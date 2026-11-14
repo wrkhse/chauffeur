@@ -955,6 +955,7 @@ pub enum DaemonError {
     Running(PathBuf),
     SocketFolder { path, reason },
     Socket { path, source: io::Error },
+    Thread(io::Error),
     Config(String),
     Watch(notify::Error),
 }
