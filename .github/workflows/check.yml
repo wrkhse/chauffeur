@@ -31,7 +31,7 @@ jobs:
       - run: cargo clippy -p chauffeur-playground --target wasm32-unknown-unknown --locked -- -D warnings
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.152
       - run: cargo nextest run --workspace --locked
       - run: cargo test --doc --workspace --locked
       # Each benchmark once, so they keep building and running; timings are compared locally.
@@ -53,6 +53,7 @@ jobs:
   # machine: they execute generated code and the tests spawn processes.
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,16 +63,23 @@ jobs:
 
   kani:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       KANI_VERSION: 0.68.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Kani brings its own nightly; the pinned one stays for the rest.
+      # Kani brings its own nightly, nightly-2026-08-21 for 0.68.0; the pinned
+      # one stays for the rest.
       - run: cargo install --locked kani-verifier --version "$KANI_VERSION"
       - run: cargo kani setup
-      - run: cargo kani -p chauffeur-judges
+      # A run that verifies no harness proves nothing, so it fails too.
+      - name: cargo kani -p chauffeur-judges
+        run: |
+          set -o pipefail
+          cargo kani -p chauffeur-judges | tee kani.log
+          grep -Eq 'Complete - [1-9][0-9]* successfully verified harnesses, 0 failures' kani.log
 
   # Every viable mutant in the lines a pull request changes must be caught;
   # an equivalent one is excluded in .cargo/mutants.toml, with why.
@@ -86,20 +94,31 @@ jobs:
           fetch-depth: 0
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
-          tool: cargo-mutants,cargo-nextest
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.152
       - name: The pull request's diff
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: git diff "$BASE"...HEAD -- '*.rs' > pr.diff
-      # Exit 3 is timeouts and nothing missed: a mutant that hangs the tests is
-      # caught by them, as the audits count it. Exit 2, a missed mutant, fails.
-      - name: cargo mutants
-        run: cargo mutants --in-diff pr.diff --no-shuffle -vV || test $? -eq 3
-      - if: failure()
+      # A missed mutant or a timeout fails. One that truly hangs the tests is
+      # excluded by name in .cargo/mutants.toml, with its reason.
+      - run: cargo mutants --in-diff pr.diff --no-shuffle -j 2 -vV
+      - name: What was tested
+        if: always()
+        run: |
+          {
+            echo "### Mutants"
+            if [ -f mutants.out/outcomes.json ]; then
+              jq -r '"- tested: \(.total_mutants)", "- caught: \(.caught)", "- missed: \(.missed)", "- timeouts: \(.timeout)", "- unviable: \(.unviable)"' mutants.out/outcomes.json
+            else
+              echo "- none in this diff"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutants.out
           path: mutants.out
+          if-no-files-found: ignore
 
   opencode:
     runs-on: ubuntu-latest
