@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -64,13 +65,29 @@ impl Drop for State {
 struct Audit(Child);
 
 impl Audit {
-    /// Reads one line from stdout, then closes the pipe.
-    fn first_line(&mut self) -> String {
-        let mut line = String::new();
-        BufReader::new(self.0.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        line
+    /// Reads one line, then closes stdout. A silent child is killed and
+    /// reaped before joining the reader and returning the timeout error.
+    fn first_line(&mut self, limit: Duration) -> Result<String, String> {
+        let stdout = self.0.stdout.take().unwrap();
+        let (done, finished) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            let read = BufReader::new(stdout).read_line(&mut line);
+            let _ = done.send(());
+            (read, line)
+        });
+        let ready = finished.recv_timeout(limit);
+
+        if ready.is_err() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+
+        let (read, line) = reader.join().expect("the audit reader panicked");
+        ready.map_err(|error| format!("no audit line within {limit:?}: {error}"))?;
+        read.map_err(|error| format!("read the audit line: {error}"))?;
+
+        Ok(line)
     }
 
     /// How it exited, failing the test if it runs past `limit`.
@@ -112,7 +129,12 @@ fn audit_stops_quietly_when_its_reader_closes_the_pipe() {
     state.log(1_000);
     let mut audit = state.audit(&["1000"]);
 
-    assert!(audit.first_line().contains("tool_result"));
+    assert!(
+        audit
+            .first_line(Duration::from_secs(5))
+            .unwrap()
+            .contains("tool_result")
+    );
     let status = audit.exit_within(Duration::from_secs(5));
     let stderr = audit.stderr();
 
@@ -121,12 +143,30 @@ fn audit_stops_quietly_when_its_reader_closes_the_pipe() {
 }
 
 #[test]
+fn a_silent_follower_is_killed_and_reaped_when_the_first_line_times_out() {
+    let state = State::new("silent-follow");
+    state.log(1);
+    let mut follower = state.audit(&["0", "--follow"]);
+
+    let error = follower.first_line(Duration::from_millis(200)).unwrap_err();
+
+    assert!(error.contains("no audit line within"), "{error}");
+    assert!(follower.0.try_wait().unwrap().is_some());
+    assert!(follower.stderr().is_empty());
+}
+
+#[test]
 fn audit_follow_stops_quietly_when_its_reader_closes_the_pipe() {
     let state = State::new("closed-follow");
     state.log(1);
     let mut follower = state.audit(&["1", "--follow"]);
 
-    assert!(follower.first_line().contains("tool_result"));
+    assert!(
+        follower
+            .first_line(Duration::from_secs(5))
+            .unwrap()
+            .contains("tool_result")
+    );
     // Following notices the closed pipe only at its next write.
     state.log(1);
     let status = follower.exit_within(Duration::from_secs(5));
