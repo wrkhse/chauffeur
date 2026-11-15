@@ -176,12 +176,15 @@ mod tests {
     }
 
     #[test]
-    fn an_accept_that_succeeds_does_not_wait() {
-        let started = Instant::now();
+    fn an_accept_that_succeeds_is_not_tried_again() {
+        let mut calls = 0_u32;
 
-        let accepted = next(|| io::Result::Ok("connection"));
+        let accepted = next(|| {
+            calls = calls.saturating_add(1);
+            io::Result::Ok("connection")
+        });
 
         assert_eq!(accepted, "connection");
-        assert!(started.elapsed() < ACCEPT_RETRY, "{:?}", started.elapsed());
+        assert_eq!(calls, 1);
     }
 }
