@@ -266,7 +266,7 @@ impl fmt::Display for Rejection {
                 let accepted: Vec<String> = PROTOCOLS.iter().map(u64::to_string).collect();
                 write!(f, "the daemon accepts protocol {}", accepted.join(", "))
             }
-            Self::Busy => f.write_str("the daemon is at capacity for this caller"),
+            Self::Busy => f.write_str("the daemon is busy: at capacity for this caller"),
             Self::Deadline => f.write_str("the strategy did not finish within its deadline"),
         }
     }

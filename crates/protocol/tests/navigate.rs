@@ -348,3 +348,21 @@ fn a_run_reports_its_rounds_and_settled_steps_to_three_decimals() {
         json!({ "event": "rule_matched", "rule": "r" })
     );
 }
+
+#[test]
+fn judges_and_asks_without_a_strategy_explain_what_is_wrong() {
+    for fields in [json!({ "judges": {} }), json!({ "asks": {} })] {
+        let mut params = json!({ "protocol": 1, "on": "x" });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+
+        let rejected = Navigate::parse(&params).unwrap_err();
+
+        assert!(
+            rejected.to_string().contains("come only with an inline"),
+            "{rejected}"
+        );
+    }
+}
