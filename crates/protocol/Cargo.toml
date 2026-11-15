@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 benchfmt = { workspace = true }
+jsonschema = { workspace = true }
 
 [[bench]]
 name = "event"

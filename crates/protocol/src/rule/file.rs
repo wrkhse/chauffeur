@@ -52,7 +52,14 @@ pub struct AskFile {
 #[serde(untagged)]
 pub enum LabelFile {
     Value(String),
-    Described { value: String, description: String },
+    Described(DescribedFile),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescribedFile {
+    pub value: String,
+    pub description: String,
 }
 
 #[derive(Deserialize)]

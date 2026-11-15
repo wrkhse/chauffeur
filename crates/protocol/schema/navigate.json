@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/wrkhse/chauffeur/blob/v2/crates/protocol/schema/navigate.json",
   "title": "chauffeur.navigate",
-  "description": "The params of a chauffeur.navigate request, the chauffeur.event notifications it streams, and its result or error. Messages are JSON-RPC 2.0, one per line. The byte limit on evidence and candidates (256 KiB, names included) is checked by the daemon; JSON Schema cannot express it.",
+  "description": "The params of a chauffeur.navigate request, the chauffeur.event notifications it streams, and its result or error. Messages are JSON-RPC 2.0, one per line, each at most 1 MiB. The daemon checks what JSON Schema cannot express: the byte limits on evidence and candidates (256 KiB, names included) and on each instruction and description (16 KiB), unique step IDs, that steps name known judges and asks, that an inline step's evidence is sent, and that a per-outcome confidence covers exactly its step's outcomes. Fixtures it cannot see as rejected carry \"schema\": \"accepts\".",
   "$ref": "#/$defs/request",
   "$defs": {
     "request": {
@@ -13,7 +13,8 @@
       "additionalProperties": false,
       "properties": {
         "protocol": {
-          "const": 1
+          "const": 1,
+          "description": "A whole number. One the daemon does not accept is unsupported_protocol; anything else is invalid."
         },
         "deadline_ms": {
           "type": "integer",
@@ -39,13 +40,15 @@
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/judge"
-          }
+          },
+          "maxProperties": 32
         },
         "asks": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/ask"
-          }
+          },
+          "maxProperties": 32
         },
         "evidence": {
           "type": "object",
@@ -157,7 +160,8 @@
               "additionalProperties": {
                 "$ref": "#/$defs/probability"
               },
-              "description": "One bar per outcome, covering every outcome of every step the judge answers."
+              "description": "One bar per outcome, covering every outcome of every step the judge answers.",
+              "maxProperties": 64
             }
           ]
         }
@@ -179,7 +183,7 @@
           "type": "array",
           "minItems": 2,
           "maxItems": 64,
-          "description": "Unique; unsure and failed are reserved.",
+          "description": "Unique; unsure and failed are reserved. uniqueItems cannot see \"a\" and {\"value\": \"a\", …} as the same outcome; the daemon refuses both.",
           "items": {
             "oneOf": [
               {
@@ -210,7 +214,8 @@
           "items": {
             "type": "string"
           },
-          "description": "The evidence blocks the judge sees. In an inline strategy, each must be one the request sends."
+          "description": "The evidence blocks the judge sees. In an inline strategy, each must be one the request sends.",
+          "maxItems": 64
         }
       }
     },
@@ -429,7 +434,10 @@
             "evidence_blocks",
             "candidates",
             "evidence_bytes",
-            "deadline_ms"
+            "deadline_ms",
+            "judges",
+            "asks",
+            "text_bytes"
           ]
         },
         "max": {

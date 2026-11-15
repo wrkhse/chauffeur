@@ -675,6 +675,477 @@
       "expect": "strategy"
     },
     {
+      "name": "32 judges",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "j0": {
+            "tier": "system-one"
+          },
+          "j1": {
+            "tier": "system-one"
+          },
+          "j2": {
+            "tier": "system-one"
+          },
+          "j3": {
+            "tier": "system-one"
+          },
+          "j4": {
+            "tier": "system-one"
+          },
+          "j5": {
+            "tier": "system-one"
+          },
+          "j6": {
+            "tier": "system-one"
+          },
+          "j7": {
+            "tier": "system-one"
+          },
+          "j8": {
+            "tier": "system-one"
+          },
+          "j9": {
+            "tier": "system-one"
+          },
+          "j10": {
+            "tier": "system-one"
+          },
+          "j11": {
+            "tier": "system-one"
+          },
+          "j12": {
+            "tier": "system-one"
+          },
+          "j13": {
+            "tier": "system-one"
+          },
+          "j14": {
+            "tier": "system-one"
+          },
+          "j15": {
+            "tier": "system-one"
+          },
+          "j16": {
+            "tier": "system-one"
+          },
+          "j17": {
+            "tier": "system-one"
+          },
+          "j18": {
+            "tier": "system-one"
+          },
+          "j19": {
+            "tier": "system-one"
+          },
+          "j20": {
+            "tier": "system-one"
+          },
+          "j21": {
+            "tier": "system-one"
+          },
+          "j22": {
+            "tier": "system-one"
+          },
+          "j23": {
+            "tier": "system-one"
+          },
+          "j24": {
+            "tier": "system-one"
+          },
+          "j25": {
+            "tier": "system-one"
+          },
+          "j26": {
+            "tier": "system-one"
+          },
+          "j27": {
+            "tier": "system-one"
+          },
+          "j28": {
+            "tier": "system-one"
+          },
+          "j29": {
+            "tier": "system-one"
+          },
+          "j30": {
+            "tier": "system-one"
+          },
+          "j31": {
+            "tier": "system-one"
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "j0",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "expect": "strategy"
+    },
+    {
+      "name": "32 asks",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": "a0"
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        },
+        "asks": {
+          "a0": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a1": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a2": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a3": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a4": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a5": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a6": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a7": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a8": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a9": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a10": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a11": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a12": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a13": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a14": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a15": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a16": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a17": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a18": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a19": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a20": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a21": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a22": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a23": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a24": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a25": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a26": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a27": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a28": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a29": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a30": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a31": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          }
+        }
+      },
+      "expect": "strategy"
+    },
+    {
       "name": "64 outcomes",
       "params": {
         "protocol": 1,
@@ -765,6 +1236,43 @@
         }
       },
       "expect": "strategy"
+    },
+    {
+      "name": "instructions of exactly 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "instructions": ""
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "expect": "strategy",
+      "fill": [
+        {
+          "at": "/strategy/0/ask/instructions",
+          "text": "a",
+          "times": 16384
+        }
+      ]
     },
     {
       "name": "64 evidence blocks",
@@ -932,8 +1440,7 @@
       "expect": "on",
       "fill": [
         {
-          "in": "evidence",
-          "name": "log",
+          "at": "/evidence/log",
           "text": "a",
           "times": 262141
         }
@@ -1001,7 +1508,7 @@
         }
       },
       "reject": {
-        "reason": "unsupported_protocol"
+        "reason": "invalid"
       }
     },
     {
@@ -1017,7 +1524,7 @@
         }
       },
       "reject": {
-        "reason": "unsupported_protocol"
+        "reason": "invalid"
       }
     },
     {
@@ -1033,7 +1540,7 @@
         }
       },
       "reject": {
-        "reason": "unsupported_protocol"
+        "reason": "invalid"
       }
     },
     {
@@ -1389,12 +1896,12 @@
       },
       "fill": [
         {
-          "in": "evidence",
-          "name": "log",
+          "at": "/evidence/log",
           "text": "a",
           "times": 262142
         }
-      ]
+      ],
+      "schema": "accepts"
     },
     {
       "name": "evidence and candidates over 256 KiB together",
@@ -1411,18 +1918,17 @@
       },
       "fill": [
         {
-          "in": "evidence",
-          "name": "log",
+          "at": "/evidence/log",
           "text": "a",
           "times": 131070
         },
         {
-          "in": "candidates",
-          "name": "p1",
+          "at": "/candidates/p1",
           "text": "a",
           "times": 131070
         }
-      ]
+      ],
+      "schema": "accepts"
     },
     {
       "name": "evidence over 256 KiB in bytes, not characters",
@@ -1438,12 +1944,12 @@
       },
       "fill": [
         {
-          "in": "evidence",
-          "name": "log",
+          "at": "/evidence/log",
           "text": "€",
           "times": 87381
         }
-      ]
+      ],
+      "schema": "accepts"
     },
     {
       "name": "33 steps",
@@ -1930,6 +2436,496 @@
       }
     },
     {
+      "name": "33 judges",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "j0": {
+            "tier": "system-one"
+          },
+          "j1": {
+            "tier": "system-one"
+          },
+          "j2": {
+            "tier": "system-one"
+          },
+          "j3": {
+            "tier": "system-one"
+          },
+          "j4": {
+            "tier": "system-one"
+          },
+          "j5": {
+            "tier": "system-one"
+          },
+          "j6": {
+            "tier": "system-one"
+          },
+          "j7": {
+            "tier": "system-one"
+          },
+          "j8": {
+            "tier": "system-one"
+          },
+          "j9": {
+            "tier": "system-one"
+          },
+          "j10": {
+            "tier": "system-one"
+          },
+          "j11": {
+            "tier": "system-one"
+          },
+          "j12": {
+            "tier": "system-one"
+          },
+          "j13": {
+            "tier": "system-one"
+          },
+          "j14": {
+            "tier": "system-one"
+          },
+          "j15": {
+            "tier": "system-one"
+          },
+          "j16": {
+            "tier": "system-one"
+          },
+          "j17": {
+            "tier": "system-one"
+          },
+          "j18": {
+            "tier": "system-one"
+          },
+          "j19": {
+            "tier": "system-one"
+          },
+          "j20": {
+            "tier": "system-one"
+          },
+          "j21": {
+            "tier": "system-one"
+          },
+          "j22": {
+            "tier": "system-one"
+          },
+          "j23": {
+            "tier": "system-one"
+          },
+          "j24": {
+            "tier": "system-one"
+          },
+          "j25": {
+            "tier": "system-one"
+          },
+          "j26": {
+            "tier": "system-one"
+          },
+          "j27": {
+            "tier": "system-one"
+          },
+          "j28": {
+            "tier": "system-one"
+          },
+          "j29": {
+            "tier": "system-one"
+          },
+          "j30": {
+            "tier": "system-one"
+          },
+          "j31": {
+            "tier": "system-one"
+          },
+          "j32": {
+            "tier": "system-one"
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "j0",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "judges"
+      }
+    },
+    {
+      "name": "33 asks",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": "a0"
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        },
+        "asks": {
+          "a0": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a1": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a2": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a3": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a4": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a5": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a6": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a7": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a8": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a9": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a10": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a11": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a12": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a13": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a14": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a15": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a16": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a17": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a18": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a19": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a20": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a21": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a22": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a23": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a24": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a25": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a26": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a27": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a28": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a29": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a30": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a31": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          },
+          "a32": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          }
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "asks"
+      }
+    },
+    {
       "name": "65 outcomes",
       "params": {
         "protocol": 1,
@@ -2134,6 +3130,293 @@
       }
     },
     {
+      "name": "a per-outcome confidence of 65 outcomes",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "careful": {
+            "tier": "system-one",
+            "confidence": {
+              "o0": 0.5,
+              "o1": 0.5,
+              "o2": 0.5,
+              "o3": 0.5,
+              "o4": 0.5,
+              "o5": 0.5,
+              "o6": 0.5,
+              "o7": 0.5,
+              "o8": 0.5,
+              "o9": 0.5,
+              "o10": 0.5,
+              "o11": 0.5,
+              "o12": 0.5,
+              "o13": 0.5,
+              "o14": 0.5,
+              "o15": 0.5,
+              "o16": 0.5,
+              "o17": 0.5,
+              "o18": 0.5,
+              "o19": 0.5,
+              "o20": 0.5,
+              "o21": 0.5,
+              "o22": 0.5,
+              "o23": 0.5,
+              "o24": 0.5,
+              "o25": 0.5,
+              "o26": 0.5,
+              "o27": 0.5,
+              "o28": 0.5,
+              "o29": 0.5,
+              "o30": 0.5,
+              "o31": 0.5,
+              "o32": 0.5,
+              "o33": 0.5,
+              "o34": 0.5,
+              "o35": 0.5,
+              "o36": 0.5,
+              "o37": 0.5,
+              "o38": 0.5,
+              "o39": 0.5,
+              "o40": 0.5,
+              "o41": 0.5,
+              "o42": 0.5,
+              "o43": 0.5,
+              "o44": 0.5,
+              "o45": 0.5,
+              "o46": 0.5,
+              "o47": 0.5,
+              "o48": 0.5,
+              "o49": 0.5,
+              "o50": 0.5,
+              "o51": 0.5,
+              "o52": 0.5,
+              "o53": 0.5,
+              "o54": 0.5,
+              "o55": 0.5,
+              "o56": 0.5,
+              "o57": 0.5,
+              "o58": 0.5,
+              "o59": 0.5,
+              "o60": 0.5,
+              "o61": 0.5,
+              "o62": 0.5,
+              "o63": 0.5,
+              "o64": 0.5
+            }
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "outcomes"
+      }
+    },
+    {
+      "name": "an ask naming 65 evidence blocks",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "b0",
+                "b1",
+                "b2",
+                "b3",
+                "b4",
+                "b5",
+                "b6",
+                "b7",
+                "b8",
+                "b9",
+                "b10",
+                "b11",
+                "b12",
+                "b13",
+                "b14",
+                "b15",
+                "b16",
+                "b17",
+                "b18",
+                "b19",
+                "b20",
+                "b21",
+                "b22",
+                "b23",
+                "b24",
+                "b25",
+                "b26",
+                "b27",
+                "b28",
+                "b29",
+                "b30",
+                "b31",
+                "b32",
+                "b33",
+                "b34",
+                "b35",
+                "b36",
+                "b37",
+                "b38",
+                "b39",
+                "b40",
+                "b41",
+                "b42",
+                "b43",
+                "b44",
+                "b45",
+                "b46",
+                "b47",
+                "b48",
+                "b49",
+                "b50",
+                "b51",
+                "b52",
+                "b53",
+                "b54",
+                "b55",
+                "b56",
+                "b57",
+                "b58",
+                "b59",
+                "b60",
+                "b61",
+                "b62",
+                "b63",
+                "b64"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "evidence_blocks"
+      }
+    },
+    {
+      "name": "instructions over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "instructions": ""
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/ask/instructions",
+          "text": "a",
+          "times": 16385
+        }
+      ],
+      "schema": "accepts"
+    },
+    {
+      "name": "a description over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                {
+                  "value": "no",
+                  "description": ""
+                }
+              ],
+              "instructions": "?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/ask/outcomes/1/description",
+          "text": "€",
+          "times": 5462
+        }
+      ],
+      "schema": "accepts"
+    },
+    {
       "name": "one outcome",
       "params": {
         "protocol": 1,
@@ -2198,6 +3481,43 @@
       }
     },
     {
+      "name": "an outcome given twice, once described",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "pick",
+            "judge": "quick",
+            "ask": {
+              "instructions": "Which?",
+              "outcomes": [
+                "yes",
+                "no",
+                {
+                  "value": "yes",
+                  "description": "Sure"
+                }
+              ]
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
       "name": "a reserved outcome",
       "params": {
         "protocol": 1,
@@ -2217,6 +3537,42 @@
               "outcomes": [
                 "yes",
                 "unsure"
+              ]
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "a described outcome with an unknown field",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "pick",
+            "judge": "quick",
+            "ask": {
+              "instructions": "Which?",
+              "outcomes": [
+                "yes",
+                {
+                  "value": "no",
+                  "description": "Not yet",
+                  "weight": 2
+                }
               ]
             }
           }
@@ -2264,7 +3620,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "a per-outcome confidence with an outcome the step lacks",
@@ -2303,7 +3660,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "a confidence over 1",
@@ -2373,7 +3731,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "a step naming an unknown ask",
@@ -2399,7 +3758,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "a step naming evidence the request does not send",
@@ -2434,7 +3794,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "two steps with one ID",
@@ -2483,7 +3844,8 @@
       },
       "reject": {
         "reason": "invalid"
-      }
+      },
+      "schema": "accepts"
     },
     {
       "name": "a blank step ID",

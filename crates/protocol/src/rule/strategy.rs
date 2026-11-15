@@ -5,7 +5,7 @@ use chauffeur_judges::{ConfidenceError, Question};
 
 use super::ask;
 use super::error::RuleError;
-use super::file::{AskFile, JudgeFile, StepFile};
+use super::file::{AskFile, AskRef, JudgeFile, StepFile};
 use super::judge::{self, JudgeSpec};
 use crate::limits::{Limit, count};
 
@@ -31,11 +31,15 @@ impl Strategy {
             source,
         };
         Limit::Steps.check(count(strategy.len())).map_err(limit)?;
-        // Every ask, used or not, so an unused one cannot carry unbounded outcomes.
-        for ask in asks.values() {
-            Limit::Outcomes
-                .check(count(ask.outcomes.len()))
-                .map_err(limit)?;
+        Limit::Judges.check(count(judges.len())).map_err(limit)?;
+        Limit::Asks.check(count(asks.len())).map_err(limit)?;
+        // Every ask, used or not, so an unused one cannot carry unbounded text.
+        let inline = strategy.iter().filter_map(|step| match &step.ask {
+            AskRef::Inline(ask) => Some(ask),
+            AskRef::Named(_) => None,
+        });
+        for ask in asks.values().chain(inline) {
+            ask::check_bounds(ask).map_err(limit)?;
         }
         if strategy.iter().any(|step| step.id.trim().is_empty()) {
             return Err(RuleError::BlankStep {

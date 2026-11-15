@@ -71,10 +71,12 @@ impl Navigate {
         let protocol = params
             .get("protocol")
             .ok_or_else(|| Rejection::Invalid("a request needs `protocol`".to_owned()))?;
-        if !protocol
-            .as_u64()
-            .is_some_and(|version| PROTOCOLS.contains(&version))
-        {
+        let Some(version) = protocol.as_u64() else {
+            return Err(Rejection::Invalid(
+                "`protocol` is a whole number, such as 1".to_owned(),
+            ));
+        };
+        if !PROTOCOLS.contains(&version) {
             return Err(Rejection::UnsupportedProtocol);
         }
         let file = RequestFile::deserialize(params)

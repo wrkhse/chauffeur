@@ -15,26 +15,88 @@ use chauffeur_protocol::{
 };
 use serde_json::{Value, json};
 
+fn crate_file(path: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 /// The fixture cases, each with its `fill` applied: `text` repeated
-/// `times` as the named block of its `evidence` or `candidates`.
+/// `times`, put at the JSON pointer `at` in its params.
 fn cases() -> Vec<Value> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/navigate.json");
-    let fixtures: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let mut cases = fixtures["cases"].as_array().unwrap().clone();
+    let mut cases = crate_file("fixtures/navigate.json")["cases"]
+        .as_array()
+        .unwrap()
+        .clone();
     for case in &mut cases {
         for fill in case["fill"].as_array().cloned().unwrap_or_default() {
-            let (into, name) = (fill["in"].as_str().unwrap(), fill["name"].as_str().unwrap());
+            let at = fill["at"].as_str().unwrap();
+            let (parent, key) = at.rsplit_once('/').unwrap();
             let times = usize::try_from(fill["times"].as_u64().unwrap()).unwrap();
-            case["params"][into][name] = json!(fill["text"].as_str().unwrap().repeat(times));
+            let text = fill["text"].as_str().unwrap().repeat(times);
+            let into = case["params"].pointer_mut(parent).unwrap();
+            if let Value::Array(items) = into {
+                items[key.parse::<usize>().unwrap()] = json!(text);
+            } else {
+                into.as_object_mut()
+                    .unwrap()
+                    .insert(key.to_owned(), json!(text));
+            }
         }
     }
     cases
 }
 
+/// What an accepted request must keep: its deadline, its evidence and
+/// candidates, and for a strategy its step IDs and judges.
+fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
+    let deadline = params["deadline_ms"].as_u64().unwrap_or(3_000);
+    assert_eq!(
+        navigate.deadline().as_millis(),
+        u128::from(deadline),
+        "{name}"
+    );
+    let blocks = |field: &str| -> Vec<(String, String)> {
+        let mut blocks: Vec<(String, String)> =
+            params[field].as_object().map_or_default(|fields| {
+                fields
+                    .iter()
+                    .map(|(name, text)| (name.clone(), text.as_str().unwrap().to_owned()))
+                    .collect()
+            });
+        blocks.sort();
+        blocks
+    };
+    assert_eq!(navigate.evidence(), blocks("evidence"), "{name}");
+    assert_eq!(navigate.candidates(), blocks("candidates"), "{name}");
+    if let Target::Strategy(strategy) = navigate.target() {
+        let sent: Vec<&str> = params["strategy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["id"].as_str().unwrap())
+            .collect();
+        let kept: Vec<&str> = strategy
+            .plan()
+            .steps()
+            .iter()
+            .map(chauffeur_core::Step::id)
+            .collect();
+        assert_eq!(kept, sent, "{name}");
+        for judge in params["judges"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| name)
+        {
+            assert!(strategy.judges().contains_key(judge), "{name}: {judge}");
+        }
+    }
+}
+
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 51);
+    assert_eq!(cases.len(), 62);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -46,6 +108,7 @@ fn every_fixture_is_accepted_or_rejected_as_it_expects() {
                     Target::Strategy(_) => "strategy",
                 };
                 assert_eq!(kind, expect, "{name}");
+                assert_kept(name, &case["params"], &navigate);
             }
             (Value::Null, reject, Err(rejection)) => {
                 let error = rejection.to_error();
@@ -57,6 +120,36 @@ fn every_fixture_is_accepted_or_rejected_as_it_expects() {
             (_, _, outcome) => panic!("{name}: {outcome:?}"),
         }
     }
+}
+
+#[test]
+fn the_schema_accepts_and_rejects_every_fixture_as_the_daemon_does() {
+    let schema = jsonschema::draft202012::new(&crate_file("schema/navigate.json")).unwrap();
+
+    for case in cases() {
+        let name = case["name"].as_str().unwrap();
+        let accepted = case.get("expect").is_some() || case["schema"] == "accepts";
+        let errors: Vec<String> = schema
+            .iter_errors(&case["params"])
+            .map(|error| error.to_string())
+            .collect();
+        assert_eq!(errors.is_empty(), accepted, "{name}: {errors:?}");
+    }
+}
+
+#[test]
+fn every_shipped_rule_loads_within_the_limits() {
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../distribution/rules");
+    let mut loaded = 0;
+
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        let id = path.file_stem().unwrap().to_string_lossy().into_owned();
+        Rule::parse(&id, &std::fs::read_to_string(&path).unwrap()).unwrap();
+        loaded += 1;
+    }
+
+    assert!(loaded > 0);
 }
 
 #[test]

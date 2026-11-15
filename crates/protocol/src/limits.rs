@@ -16,17 +16,26 @@ pub enum Limit {
     EvidenceBytes,
     /// Milliseconds a request may give its rules.
     Deadline,
+    /// Named judges in one strategy.
+    Judges,
+    /// Named asks in one strategy.
+    Asks,
+    /// Bytes in one question's instructions, or one outcome's description.
+    TextBytes,
 }
 
 impl Limit {
     /// Every limit, in the order the docs list them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::Steps,
         Self::Outcomes,
         Self::EvidenceBlocks,
         Self::Candidates,
         Self::EvidenceBytes,
         Self::Deadline,
+        Self::Judges,
+        Self::Asks,
+        Self::TextBytes,
     ];
 
     /// The limit's wire name, such as `evidence_bytes`.
@@ -39,6 +48,9 @@ impl Limit {
             Self::Candidates => "candidates",
             Self::EvidenceBytes => "evidence_bytes",
             Self::Deadline => "deadline_ms",
+            Self::Judges => "judges",
+            Self::Asks => "asks",
+            Self::TextBytes => "text_bytes",
         }
     }
 
@@ -46,9 +58,10 @@ impl Limit {
     #[must_use]
     pub const fn max(self) -> u64 {
         match self {
-            Self::Steps => 32,
+            Self::Steps | Self::Judges | Self::Asks => 32,
             Self::Outcomes | Self::EvidenceBlocks | Self::Candidates => 64,
             Self::EvidenceBytes => 256 * 1024,
+            Self::TextBytes => 16 * 1024,
             Self::Deadline => 30_000,
         }
     }
@@ -85,6 +98,9 @@ impl fmt::Display for Exceeded {
             Limit::Candidates => write!(f, "{count} candidates, over {max}"),
             Limit::EvidenceBytes => write!(f, "evidence is over {} KiB", max / 1024),
             Limit::Deadline => write!(f, "deadline_ms {count} is over {max}"),
+            Limit::Judges => write!(f, "the strategy names {count} judges, over {max}"),
+            Limit::Asks => write!(f, "the strategy names {count} asks, over {max}"),
+            Limit::TextBytes => write!(f, "a question's text is over {} KiB", max / 1024),
         }
     }
 }

@@ -50,6 +50,8 @@ pub fn settled(outcome: &Outcome<Answer>) -> Value {
                 .p()
                 .map(|(value, p)| (value.to_owned(), json!(p.to_f64())))
                 .collect();
+            // Probabilities are never all zero, so the level is a number.
+            debug_assert!(answer.level().is_finite(), "a level that is not a number");
             let level = (answer.level() * 1000.0).round() / 1000.0;
             json!({ "answer": {
                 "outcome": answer.outcome().to_string(),

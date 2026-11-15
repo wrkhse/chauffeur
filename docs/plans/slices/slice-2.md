@@ -65,14 +65,18 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   if its strategy misses the deadline; other rules' intents still return.
 - **Evidence** is named once per navigation and referenced by steps, so a
   batched provider call carries each block once.
-- **Versioning:** `protocol` is required; the daemon answers
-  `unsupported_protocol` with the versions it accepts, and each binding reports
-  it as `unavailable`.
-- **Limits**, checked before admission: 32 steps per strategy, counting each
-  copy `for_each` makes; 16 `after` entries per step; 64 outcomes per
-  question; 64 evidence blocks and candidates; 256 KiB of evidence; 30 s
-  deadline. Each rejection names its limit. The `after` and `for_each`
-  limits are checked with those fields, in slices 3 and 4.
+- **Versioning:** `protocol` is a required whole number; the daemon answers
+  one it does not accept with `unsupported_protocol` and the versions it
+  accepts, and each binding reports it as `unavailable`. Any other value is
+  `invalid`.
+- **Limits**, checked before admission: a request line of 1 MiB; 32 steps
+  per strategy, counting each copy `for_each` makes; 16 `after` entries per
+  step; 32 judges and 32 asks per strategy; 64 outcomes per question, and 64
+  bars in a per-outcome confidence; 64 evidence blocks, 64 candidates, and 64
+  blocks named by one ask; 256 KiB of evidence and candidates together, names
+  included; 16 KiB in one question's instructions or one outcome's
+  description; a 30 s deadline. Each rejection names its limit. The `after`
+  and `for_each` limits are checked with those fields, in slices 3 and 4.
 
 ## What it builds
 
@@ -102,7 +106,8 @@ Structure:
 
 `Navigate::parse` checks a request's `params` in order: the protocol first, so
 a newer caller's fields read as `unsupported_protocol`, then the fields, the
-limits, and an inline strategy. A request without `deadline_ms` gets
+limits, and an inline strategy. A `protocol` that is not a whole number,
+such as `"1"`, `1.5` or `-1`, is `invalid`. A request without `deadline_ms` gets
 `DEFAULT_DEADLINE`, 3 seconds. An empty `on` is refused, and so is an inline
 step naming evidence the request does not send. `event` is what rules match:
 named by `on`, with each evidence block as a field, so a block named `event`
@@ -159,9 +164,11 @@ impl From<Exceeded> for Rejection {}
 impl From<RuleError> for Rejection {}
 ```
 
-Rule files are held to the same limits as requests: a strategy of 33 steps,
-or an ask of 65 outcomes, used or not, is refused when it loads, as
-`RuleError::Limit`; a blank step ID is `RuleError::BlankStep`.
+Rule files are held to the same limits as requests: a strategy of 33 steps or
+33 judges, or an ask of 65 outcomes or 16 KiB of instructions, used or not,
+is refused when it loads, as `RuleError::Limit`; a blank step ID is
+`RuleError::BlankStep`. A described outcome refuses fields beside `value`
+and `description`.
 
 ```rust
 pub enum Limit {
@@ -171,10 +178,13 @@ pub enum Limit {
     Candidates,
     EvidenceBytes,
     Deadline,
+    Judges,
+    Asks,
+    TextBytes,
 }
 
 impl Limit {
-    pub const ALL: [Self; 6];
+    pub const ALL: [Self; 9];
     pub const fn name(self) -> &'static str;
     pub const fn max(self) -> u64;
     pub const fn check(self, count: u64) -> Result<(), Exceeded>;
@@ -236,16 +246,18 @@ pub mod progress {
 
 The fixtures are one file of cases, each with `params` and either
 `"expect": "on"` or `"strategy"`, or a `reject` with its `reason` and
-`limit`. A case with `fill` has `text` repeated `times` put in the named
-block of its `evidence` or `candidates` before it is sent, so the file stays
-small.
+`limit`. A case with `fill` has `text` repeated `times` put at the JSON
+pointer `at` in its params before it is sent, so the file stays small. A
+rejected case the schema cannot see as rejected, such as one over a byte
+limit, carries `"schema": "accepts"`.
 
 ```json
 {
   "name": "evidence over 256 KiB",
   "params": { "protocol": 1, "on": "sourcefed.event", "evidence": { "log": "" } },
-  "fill": [{ "in": "evidence", "name": "log", "text": "€", "times": 87381 }],
-  "reject": { "reason": "limit_exceeded", "limit": "evidence_bytes" }
+  "fill": [{ "at": "/evidence/log", "text": "€", "times": 87381 }],
+  "reject": { "reason": "limit_exceeded", "limit": "evidence_bytes" },
+  "schema": "accepts"
 }
 ```
 
@@ -254,8 +266,14 @@ Verified by:
 - Round-trip and rejection cases for every limit and malformed field,
   including duplicate outcomes, reserved outcome names and a per-outcome
   confidence that misses an outcome: `crates/protocol/tests/navigate.rs`
-  replays the 51 fixture cases and checks that every limit has one, at
-  and over it, bytes counted as UTF-8 across evidence and candidates.
+  replays the 62 fixture cases and checks that every limit has one, at
+  and over it, bytes counted as UTF-8 across evidence and candidates. Each
+  accepted case keeps its deadline, evidence, candidates, step IDs and
+  judges.
+- The same test file checks every case against `schema/navigate.json`
+  with the `jsonschema` crate: accepted cases, and rejected ones tagged
+  `"schema": "accepts"`, fit it; every other rejected case does not.
+- Every shipped rule file loads within the limits.
 
 ### Admission and running
 
