@@ -161,13 +161,14 @@ Tests: `audit_stops_quietly_when_its_reader_closes_the_pipe`,
 ### O4. Low: a failed accept was tried again at once
 
 `serve` skipped a connection that failed to be accepted and called `accept`
-again at once, so an error that lasts would spin a core. On Linux, a daemon
-started with 32 or 33 descriptors, with connections held past them for 4
-seconds, failed `accept` with `EMFILE` over and over, but never for good:
-Linux takes the descriptor before `accept` waits, and the daemon closed each
-connection it had no descriptor to copy, which freed one. The error lasts
-only when served connections hold every descriptor as `accept` runs, which
-takes losing a race.
+again at once, so an error that lasts would spin a core. In one experiment
+in a `rust:latest` Linux container, a daemon started with 32 or 33
+descriptors, with connections held past them for 4 seconds, failed `accept`
+with `EMFILE` over and over, but never for good. `strace` there suggested
+why: Linux took the descriptor before `accept` waited, and the daemon closed
+each connection it had no descriptor to copy, which freed one. If that holds,
+the error lasts only when served connections hold every descriptor as
+`accept` runs, which takes losing a race.
 
 Now a failed accept waits 50 ms before the next, so an error that lasts costs
 20 accepts a second.
