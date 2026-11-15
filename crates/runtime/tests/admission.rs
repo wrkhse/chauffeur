@@ -152,7 +152,6 @@ fn a_job_past_its_deadline_is_dropped_and_its_worker_freed() {
     let finished = Arc::new(AtomicBool::new(false));
     let late = Arc::clone(&finished);
 
-    let started = Instant::now();
     let waited = within(&pool, soon(20), &Cancel::new(), move |_, _| {
         thread::sleep(Duration::from_millis(150));
         late.store(true, Ordering::SeqCst);
@@ -160,7 +159,7 @@ fn a_job_past_its_deadline_is_dropped_and_its_worker_freed() {
     });
 
     assert_eq!(waited, Waited::Deadline);
-    assert!(started.elapsed() < Duration::from_millis(150));
+    assert!(!finished.load(Ordering::SeqCst), "the job is still running");
     assert!(eventually(|| finished.load(Ordering::SeqCst)));
     assert!(eventually(|| pool.waiting() == 1));
 }
@@ -244,4 +243,31 @@ fn the_event_log_keeps_at_most_its_bound_and_counts_the_rest() {
     assert_eq!(kept, [true, true, true, false, false]);
     assert_eq!(log.events(), [0, 1, 2]);
     assert_eq!(log.dropped(), 2);
+}
+
+#[test]
+fn a_deadline_already_past_never_takes_a_worker() {
+    let pool = Pool::new(1, 4);
+    let ran = Arc::new(AtomicBool::new(false));
+    let running = Arc::clone(&ran);
+
+    let waited = within(&pool, Instant::now(), &Cancel::new(), move |_, _| {
+        running.store(true, Ordering::SeqCst);
+    });
+
+    assert_eq!(waited, Waited::Deadline);
+    assert!(!ran.load(Ordering::SeqCst));
+    assert_eq!(pool.alive(), 0);
+}
+
+#[test]
+fn a_jobs_copy_keeps_admission_after_the_waiter_cancels() {
+    let admission = Admission::new(Capacity::DAEMON);
+    let permit = admission.admit(Source::Integration).unwrap();
+    let job = permit.clone();
+
+    drop(permit);
+    assert_eq!(admission.in_use().total(), 1);
+    drop(job);
+    assert_eq!(admission.in_use().total(), 0);
 }

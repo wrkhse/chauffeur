@@ -9,6 +9,7 @@ use chauffeur_core::{Panel, Run};
 use chauffeur_judges::{Answer, Evidence, Fallback, Models, NamedJudge};
 use chauffeur_protocol::{Event, Rule, Strategy, Then};
 
+use crate::Source;
 use crate::redact::{Masking, Redactor};
 
 pub use log::{EventLog, MAX_EVENTS};
@@ -19,12 +20,13 @@ pub use wait::{Cancel, Waited, within};
 /// by one event to start at once.
 const KEEP: usize = 8;
 
-/// The most workers alive: twice the daemon's capacity, so runs that outlive
-/// their deadline, still waiting on their models, leave room for new ones.
-const MAX_WORKERS: usize = 32;
+/// The most workers alive per source class. Separate pools ensure slow
+/// integration calls never occupy the harness's workers.
+const MAX_WORKERS: usize = 16;
 
 /// The workers every run in this process shares.
-static WORKERS: LazyLock<Pool> = LazyLock::new(|| Pool::new(KEEP, MAX_WORKERS));
+static HARNESS_WORKERS: LazyLock<Pool> = LazyLock::new(|| Pool::new(KEEP, MAX_WORKERS));
+static INTEGRATION_WORKERS: LazyLock<Pool> = LazyLock::new(|| Pool::new(KEEP, MAX_WORKERS));
 
 /// Finds a model's key by its environment variable's name.
 pub type Keys = dyn Fn(&str) -> Option<String> + Send + Sync;
@@ -94,7 +96,11 @@ pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
     let job = move |deadline: Instant, cancel: &Cancel| {
         run_now(&context, (*strategy).as_ref(), &evidence, deadline, cancel)
     };
-    match within(&WORKERS, deadline, cancel, job) {
+    let workers = match cancel.source() {
+        Source::Harness => &HARNESS_WORKERS,
+        Source::Integration => &INTEGRATION_WORKERS,
+    };
+    match within(workers, deadline, cancel, job) {
         Waited::Done(ran) => ran,
         Waited::Deadline => Ran::Deadline,
         Waited::Cancelled => Ran::Cancelled,

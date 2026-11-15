@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use super::pool::Pool;
+use crate::{Permit, Source};
 
 /// How often a waiting caller looks at its cancellation.
 const LOOK: Duration = Duration::from_millis(10);
@@ -14,7 +15,10 @@ const LOOK: Duration = Duration::from_millis(10);
 /// A navigation's cancellation, shared by its caller and its runs. Once
 /// cancelled it stays cancelled.
 #[derive(Clone, Debug, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel {
+    flag: Arc<AtomicBool>,
+    permit: Option<Permit>,
+}
 
 impl Cancel {
     /// A cancellation not yet made.
@@ -23,15 +27,31 @@ impl Cancel {
         Self::default()
     }
 
+    /// Shares this cancellation, retaining the admitted navigation's place
+    /// until every worker using it is really free.
+    #[must_use]
+    pub fn admitted(&self, permit: Permit) -> Self {
+        Self {
+            flag: Arc::clone(&self.flag),
+            permit: Some(permit),
+        }
+    }
+
+    /// Which source owns this run, or Harness for a run without admission.
+    #[must_use]
+    pub fn source(&self) -> Source {
+        self.permit.as_ref().map_or(Source::Harness, Permit::source)
+    }
+
     /// Cancels every run that shares it.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.flag.store(true, Ordering::SeqCst);
     }
 
     /// Whether it was cancelled.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.flag.load(Ordering::SeqCst)
     }
 }
 
@@ -60,11 +80,16 @@ pub fn within<T: Send + 'static>(
     if cancel.is_cancelled() {
         return Waited::Cancelled;
     }
+    if Instant::now() >= deadline {
+        return Waited::Deadline;
+    }
     let (send, receive) = mpsc::sync_channel(1);
     let shared = cancel.clone();
     // A send after the caller stopped waiting fails, and the result is dropped.
     let started = pool.execute(Box::new(move || {
         let _ = send.send(job(deadline, &shared));
+        // Late results do not free admission before the job finishes.
+        drop(shared);
     }));
     if let Err(error) = started {
         return Waited::Refused(format!("cannot start a worker: {error}"));

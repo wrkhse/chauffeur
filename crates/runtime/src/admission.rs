@@ -166,10 +166,10 @@ impl Admission {
     /// [`Busy`] while the source's share or the capacity is in use.
     pub fn admit(&self, source: Source) -> Result<Permit, Busy> {
         self.with(|ledger| ledger.take(source))?;
-        Ok(Permit {
+        Ok(Permit(Arc::new(Lease {
             ledger: Arc::clone(&self.ledger),
             source,
-        })
+        })))
     }
 
     /// The permits in use now.
@@ -185,10 +185,14 @@ impl Admission {
     }
 }
 
-/// One admitted navigation's place. Dropping it, on any path, gives the
-/// place back once.
+/// One admitted navigation's place, shared by its caller and its jobs.
+/// The last copy dropping gives the place back exactly once, so a late job
+/// holds its place until its worker is free.
+#[derive(Clone, Debug)]
+pub struct Permit(Arc<Lease>);
+
 #[derive(Debug)]
-pub struct Permit {
+struct Lease {
     ledger: Arc<Mutex<Ledger>>,
     source: Source,
 }
@@ -196,12 +200,12 @@ pub struct Permit {
 impl Permit {
     /// The source it was admitted for.
     #[must_use]
-    pub const fn source(&self) -> Source {
-        self.source
+    pub fn source(&self) -> Source {
+        self.0.source
     }
 }
 
-impl Drop for Permit {
+impl Drop for Lease {
     fn drop(&mut self) {
         self.ledger
             .lock()

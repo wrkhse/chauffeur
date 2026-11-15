@@ -15,7 +15,9 @@ use chauffeur_core::{Failure, Outcome};
 use chauffeur_judges::Models;
 use chauffeur_protocol::{Event, Rule};
 use chauffeur_protocol::{Navigate, Target};
-use chauffeur_runtime::{Cancel, Context, Ran, Redactor, run, run_strategy};
+use chauffeur_runtime::{
+    Admission, Cancel, Capacity, Context, Ran, Redactor, Source, run, run_strategy,
+};
 
 fn repo(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -276,4 +278,64 @@ fn a_cancelled_run_returns_at_once_while_its_judge_is_still_asked() {
 
     assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
     assert!(started.elapsed() < Duration::from_millis(1_000));
+}
+
+#[test]
+fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let admission = Admission::new(Capacity::DAEMON);
+    let release = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(Mutex::new(None::<Cancel>));
+    let held = Arc::clone(&release);
+    let cancelling = Arc::clone(&active);
+    let models = r#"{ "models": { "jev": { "format": "systemone",
+        "endpoint": "http://127.0.0.1:9", "model": "jev", "key": { "env": "TEST" } } },
+        "tiers": { "system-one": ["jev"] } }"#;
+    let base = Arc::into_inner(context("held-cancel", models, &[])).unwrap();
+    let slow = Arc::new(Context {
+        keys: Box::new(move |_| {
+            cancelling.lock().unwrap().as_ref().unwrap().cancel();
+            while !held.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            None
+        }),
+        ..base
+    });
+    let (strategy, evidence) = inline("waiting");
+    let (mut cancelled, mut busy) = (0, 0);
+
+    for _ in 0..32 {
+        let Ok(permit) = admission.admit(Source::Integration) else {
+            busy += 1;
+            continue;
+        };
+        let cancel = Cancel::new().admitted(permit);
+        *active.lock().unwrap() = Some(cancel.clone());
+        let ran = run_strategy(&slow, &strategy, &evidence, in_ms(5_000), &cancel);
+        assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
+        cancelled += 1;
+    }
+
+    let harness = Cancel::new().admitted(admission.admit(Source::Harness).unwrap());
+    let ran = run_strategy(
+        &placeholder("unstarved", r#"{ "answers": [] }"#),
+        &strategy,
+        &evidence,
+        in_ms(2_000),
+        &harness,
+    );
+    release.store(true, Ordering::SeqCst);
+    *active.lock().unwrap() = None;
+    drop(harness);
+
+    assert_eq!((cancelled, busy), (8, 24));
+    assert!(matches!(ran, Ran::Settled(_)), "{ran:?}");
+    let started = Instant::now();
+    while admission.in_use().total() != 0 {
+        assert!(started.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(1));
+    }
 }

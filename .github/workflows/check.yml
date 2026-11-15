@@ -60,6 +60,10 @@ jobs:
           persist-credentials: false
       - run: cargo miri setup
       - run: cargo miri test -p chauffeur-core --locked
+      - run: cargo miri test -p chauffeur-runtime --test admission --locked
+        env:
+          # The pool's detached idle workers end once the pool drops.
+          MIRIFLAGS: -Zmiri-ignore-leaks
 
   kani:
     runs-on: ubuntu-latest
@@ -80,6 +84,11 @@ jobs:
           set -o pipefail
           cargo kani -p chauffeur-judges | tee kani.log
           grep -Eq 'Complete - [1-9][0-9]* successfully verified harnesses, 0 failures' kani.log
+      - name: cargo kani -p chauffeur-runtime
+        run: |
+          set -o pipefail
+          cargo kani -p chauffeur-runtime | tee kani-runtime.log
+          grep -Eq 'Complete - [1-9][0-9]* successfully verified harnesses, 0 failures' kani-runtime.log
 
   # Every viable mutant in the lines a pull request changes must be caught;
   # an equivalent one is excluded in .cargo/mutants.toml, with why.

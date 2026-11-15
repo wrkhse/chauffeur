@@ -1,5 +1,5 @@
-//! Kani harnesses: admission's ledger stays within its capacity, a permit
-//! is given back exactly once on every way a navigation ends, and the event
+//! Kani harnesses: admission's ledger stays within its capacity, a permit's
+//! last copy gives back exactly one slot, and the event
 //! log never holds more than its bound.
 
 use crate::admission::{Admission, Capacity, Ledger, Source};
@@ -50,7 +50,7 @@ fn the_ledger_stays_within_its_capacity() {
 
 #[kani::proof]
 #[kani::unwind(3)]
-fn a_permit_is_given_back_once_on_every_path() {
+fn the_last_permit_copy_gives_back_exactly_one_slot() {
     let admission = Admission::new(Capacity {
         global: 2,
         per_source: 2,
@@ -58,10 +58,11 @@ fn a_permit_is_given_back_once_on_every_path() {
     let source = any_source();
     let kept = admission.admit(source);
     let ending = admission.admit(source);
+    let worker_copy = ending.as_ref().ok().cloned();
     assert!(kept.is_ok() && ending.is_ok());
 
-    // Delivered, refused, past its deadline, cancelled or its caller gone:
-    // each ends by dropping the permit, directly or with what holds it.
+    // Different owners may drop their copies in different containers; only
+    // the last copy returns the slot. Runtime tests cover the real waits.
     let path: u8 = kani::any();
     kani::assume(path < 4);
     match path {
@@ -80,6 +81,8 @@ fn a_permit_is_given_back_once_on_every_path() {
         }
     }
 
+    assert!(admission.in_use().held(source) == 2);
+    drop(worker_copy);
     assert!(admission.in_use().held(source) == 1);
     drop(kept);
     assert!(admission.in_use().total() == 0);

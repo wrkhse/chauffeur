@@ -305,7 +305,8 @@ Verified by:
 
 ### Admission and running
 
-One permit per navigation, held from admission through delivery, with
+One permit per navigation, shared by the caller and every job, held until
+both the caller releases it and its last worker is free, with
 per-source and global capacity; a bounded worker pool; the deadline and
 cancellation checked before each round; late results discarded.
 
@@ -320,7 +321,7 @@ let permit = admission.admit(Source::Integration)?;
 let ran = run_strategy(&context, &strategy, &evidence, deadline, &cancel);
 
 deliver(ran); // a result after the deadline or a cancel is dropped
-drop(permit); // given back once, on every path
+drop(permit); // its jobs keep a copy until their workers are free
 ```
 
 Structure:
@@ -328,7 +329,11 @@ Structure:
 The daemon admits each navigation for its source: `Harness` for
 `chauffeur.emit`, `Integration` for `chauffeur.navigate`. `Capacity::DAEMON`
 allows 16 at once, 8 from each source, so a flood from one source leaves the
-other its share. A refused navigation never waits in a queue.
+other its share. A cancelled or late job keeps its permit until its worker
+finishes; cancellation cannot refill a share with work still running. A
+refused navigation never waits in a queue. The socket belongs to the user:
+shares protect against accidental floods, not hostile local callers, who can
+choose either method.
 
 ```rust
 pub enum Source {
@@ -356,10 +361,10 @@ impl Admission {
 pub struct Permit { … }
 
 impl Permit {
-    pub const fn source(&self) -> Source;
+    pub fn source(&self) -> Source;
 }
 
-impl Drop for Permit {}
+impl Clone for Permit {}
 
 pub struct Busy {
     pub from: Source,
@@ -412,15 +417,19 @@ impl Ran {
 
 `within` runs any job on the pool and waits for it, looking at the
 cancellation every 10 ms. The job is handed the deadline and the
-cancellation to check before its round. Whatever arrives after the deadline
-or a cancel is dropped. The pool keeps 8 workers waiting and 32 alive at
-most; past that a job is refused.
+cancellation to check before each round. Plans have one round until slice 3
+adds `after`; that slice moves the check into `Plan::run` as a closure.
+Whatever arrives after the deadline or a cancel is dropped. Each source has
+its own pool, with 8 workers waiting and 16 alive at most, so integration
+work cannot occupy harness workers; past that a job is refused.
 
 ```rust
 pub struct Cancel { … }
 
 impl Cancel {
     pub fn new() -> Self;
+    pub fn admitted(&self, permit: Permit) -> Self;
+    pub fn source(&self) -> Source;
     pub fn cancel(&self);
     pub fn is_cancelled(&self) -> bool;
 }
@@ -471,11 +480,11 @@ Verified by:
   and the capacity in use, and audit A3's flood: 81 submissions with
   capacity 8 admit 8 and refuse 73 as `Busy`.
 - Kani, in `crates/runtime/src/proofs.rs`: the ledger stays within its
-  capacity over any six takes and gives; a permit is given back exactly once
-  on every way a navigation ends; the event log never exceeds its bound.
+  capacity over any six takes and gives; the last copy of a permit gives back exactly one slot; the event log never exceeds its bound.
 - `crates/runtime/tests/run.rs`: an inline strategy settles over the
   request's evidence, and a cancelled run returns at once while its judge is
-  still being asked.
+  still being asked; 32 integration submissions followed by cancels admit
+  8 slow jobs and refuse 24, while a harness strategy still settles.
 
 ### The daemon's socket and rule sources
 

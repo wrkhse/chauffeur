@@ -121,8 +121,10 @@ impl Router {
             Ran::Refused(reason) => {
                 entry.insert("refused".into(), json!(reason));
             }
-            // Nothing cancels an emitted event; its caller waits for it.
-            Ran::Deadline | Ran::Cancelled => {
+            Ran::Cancelled => {
+                entry.insert("cancelled".into(), json!(true));
+            }
+            Ran::Deadline => {
                 entry.insert("deadline".into(), json!(true));
             }
         }
