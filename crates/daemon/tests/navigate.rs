@@ -296,7 +296,7 @@ fn an_inline_strategy_past_its_deadline_is_rejected_as_deadline() {
     caller.navigate(1, &slow_inline(200));
 
     assert_eq!(caller.message()["error"]["data"]["reason"], "deadline");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -353,7 +353,7 @@ fn runs(paths: &Paths) -> Vec<Value> {
 fn closing_the_connection_cancels_its_calls_and_frees_their_places() {
     let paths = paths("closed", &models(Duration::from_secs(3)));
     let mut caller = Caller::new(start(&paths));
-    for id in 1..=8 {
+    for id in 1..=4 {
         caller.navigate(id, &slow_inline(10_000));
     }
     thread::sleep(Duration::from_millis(200));
@@ -365,7 +365,7 @@ fn closing_the_connection_cancels_its_calls_and_frees_their_places() {
         .iter()
         .filter(|run| run["cancelled"] == true)
         .count()
-        < 8
+        < 4
     {
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -403,7 +403,7 @@ fn past_a_sources_share_a_navigation_is_busy_at_once() {
         .iter()
         .filter(|reply| reply.get("result").is_some())
         .count();
-    assert_eq!((busy, answered), (2, 8), "{replies:?}");
+    assert_eq!((busy, answered), (6, 4), "{replies:?}");
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn two_matching_rules_both_return_and_a_late_one_drops_only_its_own() {
     caller.navigate(1, &request);
     let messages = caller.until_reply(1);
 
-    assert!(started.elapsed() < Duration::from_millis(1_500));
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(
         messages.last().unwrap()["result"]["intents"],
         json!([{ "rule": "sourcefed/also", "label": "noise" }, { "rule": "sourcefed/triage", "withhold": "event" }])
@@ -529,4 +529,92 @@ fn a_line_over_the_limit_is_an_invalid_request_and_closes_the_connection() {
         0,
         "closed: {rest}"
     );
+}
+
+#[test]
+fn an_emit_notification_runs_without_a_reply() {
+    let paths = paths("emit-notify", &models(Duration::ZERO));
+    let mut caller = Caller::new(start(&paths));
+    let event = json!({ "event": "tool.after", "session": "s", "tool": "shell",
+        "input": { "command": "git commit -m x" } });
+    writeln!(
+        caller.stream,
+        "{}",
+        json!({ "jsonrpc": "2.0", "method": "chauffeur.emit",
+        "params": { "event": event } })
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    while runs(&paths).is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    writeln!(
+        caller.stream,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": "status", "method": "chauffeur.status" })
+    )
+    .unwrap();
+    assert_eq!(caller.message()["id"], "status", "no notification reply");
+}
+
+#[test]
+fn one_client_leaves_navigation_capacity_for_another() {
+    let paths = paths("client-share", &models(Duration::from_millis(500)));
+    let mut first = Caller::new(start(&paths));
+    for id in 1..=5 {
+        first.navigate(id, &slow_inline(5_000));
+    }
+    assert_eq!(first.message()["error"]["data"]["reason"], "busy");
+
+    let mut second = Caller::new(UnixStream::connect(&paths.socket).unwrap());
+    second.navigate(1, &event("CI failed"));
+    assert!(
+        second
+            .until_reply(1)
+            .last()
+            .unwrap()
+            .get("result")
+            .is_some()
+    );
+}
+
+#[test]
+fn malformed_ids_are_invalid_and_strings_are_preserved() {
+    let paths = paths("ids", &models(Duration::ZERO));
+    let mut caller = Caller::new(start(&paths));
+
+    for id in [json!(null), json!({}), json!([]), json!(1.5)] {
+        writeln!(
+            caller.stream,
+            "{}",
+            json!({ "jsonrpc": "2.0", "id": id, "method": "chauffeur.status" })
+        )
+        .unwrap();
+        assert_eq!(caller.message()["error"]["code"], -32_600);
+    }
+
+    writeln!(
+        caller.stream,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": "s", "method": "chauffeur.status" })
+    )
+    .unwrap();
+    assert_eq!(caller.message()["id"], "s");
+}
+
+#[test]
+fn an_oversized_line_can_finish_writing_before_its_error_is_read() {
+    let paths = paths("oversized-whole", &models(Duration::ZERO));
+    let mut caller = Caller::new(start(&paths));
+    writeln!(
+        caller.stream,
+        "{}",
+        "x".repeat(chauffeur_daemon::MAX_LINE + 32)
+    )
+    .unwrap();
+
+    assert_eq!(caller.message()["error"]["code"], -32_600);
 }

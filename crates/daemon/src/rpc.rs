@@ -33,6 +33,16 @@ pub fn parse(line: &str) -> Result<Request, Value> {
     let request: Value =
         serde_json::from_str(line).map_err(|_| error(&Value::Null, PARSE_ERROR, "not JSON"))?;
     let id = request.get("id").cloned();
+    if id
+        .as_ref()
+        .is_some_and(|id| !id.is_string() && id.as_i64().is_none() && id.as_u64().is_none())
+    {
+        return Err(error(
+            &Value::Null,
+            INVALID_REQUEST,
+            "id must be a string or an integer; null is refused",
+        ));
+    }
     let text = |field: &str| request.get(field).and_then(Value::as_str);
     let (Some("2.0"), Some(method)) = (text("jsonrpc"), text("method")) else {
         return Err(error(
@@ -50,7 +60,7 @@ pub fn parse(line: &str) -> Result<Request, Value> {
 
 /// A call checked and admitted, ready to run on a thread of its own.
 pub struct Call {
-    id: Value,
+    id: Option<Value>,
     work: Work,
     /// Held until the reply is written; none for a call that needs no place.
     permit: Option<Permit>,
@@ -70,7 +80,7 @@ enum Work {
 ///
 /// The error reply to send.
 pub fn prepare(router: &Router, request: Request) -> Result<Call, Value> {
-    let id = request.id.unwrap_or(Value::Null);
+    let id = request.id;
     let refuse = |error: Value| json!({ "jsonrpc": "2.0", "id": id, "error": error });
     let (work, source) = match request.method.as_str() {
         "chauffeur.emit" => (
@@ -108,23 +118,27 @@ impl Call {
         router: &Router,
         cancel: &Cancel,
         notify: &(dyn Fn(Value) + Sync),
-    ) -> (Value, Option<Permit>) {
+    ) -> (Option<Value>, Option<Permit>) {
         let id = self.id;
+        let cancel = self
+            .permit
+            .as_ref()
+            .map_or_else(|| cancel.clone(), |permit| cancel.admitted(permit.clone()));
         let result = match self.work {
             Work::Emit(event, deadline) => {
-                Ok(json!({ "actions": router.emit(&event, deadline, cancel) }))
+                Ok(json!({ "actions": router.emit(&event, deadline, &cancel) }))
             }
             Work::Navigate(request) => {
                 let progress = |mut event: Value| {
                     if let Some(fields) = event.as_object_mut() {
-                        fields.insert("id".into(), id.clone());
+                        fields.insert("id".into(), id.clone().unwrap_or(Value::Null));
                     }
                     notify(
                         json!({ "jsonrpc": "2.0", "method": "chauffeur.event", "params": event }),
                     );
                 };
                 router
-                    .navigate(request, cancel, &progress)
+                    .navigate(request, &cancel, &progress)
                     .map_err(|rejection| rejection.to_error())
             }
             Work::Status => Ok(status(router)),
@@ -133,7 +147,8 @@ impl Call {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
         };
-        (reply, self.permit)
+        drop(cancel);
+        (id.is_some().then_some(reply), self.permit)
     }
 }
 
