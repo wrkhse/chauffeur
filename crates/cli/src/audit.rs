@@ -89,8 +89,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
 }
 
 /// Print each complete line appended after `offset` to `out`, until
-/// interrupted or a write fails. A file that shrinks was rotated or cleared,
-/// so reading starts over.
+/// interrupted or a write fails. A closed pipe is noticed only at the next
+/// write, so with no new decision this keeps polling, as `tail -f | head`
+/// does. A file that shrinks was rotated or cleared, so reading starts over.
 fn follow(path: &Path, mut offset: u64, brief: bool, out: &mut impl Write) -> Result<(), String> {
     let mut partial = String::new();
 

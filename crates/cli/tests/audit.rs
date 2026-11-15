@@ -3,7 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,8 +38,8 @@ impl State {
             .unwrap();
     }
 
-    fn audit(&self, args: &[&str]) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_chauffeur"))
+    fn audit(&self, args: &[&str]) -> Audit {
+        let child = Command::new(env!("CARGO_BIN_EXE_chauffeur"))
             .arg("audit")
             .args(args)
             .env("CHAUFFEUR_STATE_DIR", &self.0)
@@ -49,7 +49,8 @@ impl State {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap()
+            .unwrap();
+        Audit(child)
     }
 }
 
@@ -59,24 +60,48 @@ impl Drop for State {
     }
 }
 
-/// Reads one line from `child`'s stdout, then closes the pipe.
-fn first_line(child: &mut Child) -> String {
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    line
+/// A running `chauffeur audit`, killed if the test fails before it exits.
+struct Audit(Child);
+
+impl Audit {
+    /// Reads one line from stdout, then closes the pipe.
+    fn first_line(&mut self) -> String {
+        let mut line = String::new();
+        BufReader::new(self.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        line
+    }
+
+    /// How it exited, failing the test if it runs past `limit`.
+    fn exit_within(&mut self, limit: Duration) -> ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            assert!(started.elapsed() < limit, "still running after {limit:?}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn stderr(&mut self) -> String {
+        let mut text = String::new();
+        self.0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    }
 }
 
-fn stderr(child: &mut Child) -> String {
-    let mut text = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut text)
-        .unwrap();
-    text
+impl Drop for Audit {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 #[test]
@@ -87,9 +112,9 @@ fn audit_stops_quietly_when_its_reader_closes_the_pipe() {
     state.log(1_000);
     let mut audit = state.audit(&["1000"]);
 
-    assert!(first_line(&mut audit).contains("tool_result"));
-    let status = audit.wait().unwrap();
-    let stderr = stderr(&mut audit);
+    assert!(audit.first_line().contains("tool_result"));
+    let status = audit.exit_within(Duration::from_secs(5));
+    let stderr = audit.stderr();
 
     assert!(status.success(), "{status:?}: {stderr}");
     assert!(stderr.is_empty(), "{stderr}");
@@ -101,22 +126,11 @@ fn audit_follow_stops_quietly_when_its_reader_closes_the_pipe() {
     state.log(1);
     let mut follower = state.audit(&["1", "--follow"]);
 
-    assert!(first_line(&mut follower).contains("tool_result"));
-    // Printed once the reader has gone.
+    assert!(follower.first_line().contains("tool_result"));
+    // Following notices the closed pipe only at its next write.
     state.log(1);
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = follower.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = follower.kill();
-            let _ = follower.wait();
-            panic!("still following");
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
-    let stderr = stderr(&mut follower);
+    let status = follower.exit_within(Duration::from_secs(5));
+    let stderr = follower.stderr();
 
     assert!(status.success(), "{status:?}: {stderr}");
     assert!(stderr.is_empty(), "{stderr}");
