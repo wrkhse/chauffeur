@@ -34,8 +34,8 @@ export default Plugin.define({
   price, a provider that hit a limit, a subagent's session, or a turn waiting
   on the agent's question to the user.
 - **A missed cache** stops a session's keep-alives: one that writes more of
-  the cache than it reads does not count as a warm, since another plugin
-  changed the request's prefix.
+  the cache than it reads does not count as a warm; another plugin may have
+  changed the request's prefix, for example.
 - **In OpenCode,** the adapter carries `session.warm` out as one
   transient generate request with the keep-alive prompt, as v1 did. Where a
   harness can neither, the plugin does nothing. Leave the harness's own

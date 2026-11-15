@@ -4,12 +4,12 @@ When the user comes back to a long conversation after its prompt cache has
 expired, has a cheaper model summarize it before the prompt runs. The prompt
 still runs on the session's own model. Slice 7.
 
-| Hook                         | Does                                                                                                |
-| ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| `ctx.on("session.resumed")`  | Renews when the session was idle at least its cache lifetime and its context is at least the budget |
-| `ctx.on("session.idle")`     | Renews an idle session once its cache has expired, before any input wakes it                        |
-| The harness's question event | Renews a turn left waiting on the agent's question to the user once its cache has expired           |
-| `compaction.before`          | Writes the summary in a temporary child session on the summary model, with the harness's template   |
+| Hook                        | Does                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `ctx.on("session.resumed")` | Renews when the session was idle at least its cache lifetime and its context is at least the budget |
+| `ctx.on("session.idle")`    | Renews an idle session once its cache has expired, before any input wakes it                        |
+| `ctx.on("question.asked")`  | Renews a turn left waiting on the agent's question to the user once its cache has expired           |
+| `compaction.before`         | Writes the summary in a temporary child session on the summary model, with the harness's template   |
 
 No question is asked: the decision is two comparisons.
 
@@ -50,11 +50,12 @@ export default Plugin.define({
 - **While idle:** input other than a prompt, such as an integration's event
   or a subagent's reply, wakes a session with no hook before its request. So
   at a turn's end a context at its budget is renewed while still idle, after
-  the cache lifetime, the warming span and a 60-second margin, unless the
+  the cache lifetime, the warming span and `idle_margin_seconds`, unless the
   session runs first. A keep-alive that misses the cache brings it forward.
-- **A waiting question:** a turn paused on the agent's question to the user
-  is never warmed and is renewed after the cache lifetime and the margin,
-  unless the answer or a cancel comes first. Renewing interrupts the turn,
+- **A waiting question:** a turn paused on the agent's question to the user,
+  `question.asked`, is never warmed and is renewed after the cache lifetime
+  and the margin, unless `question.answered` comes first, for an answer or a
+  cancel. Renewing interrupts the turn,
   compacts, and asks the agent to ask its questions again, so the answer
   reaches the renewed context.
 - **The summary** is written with `session.create`, `session.generate` and
@@ -79,6 +80,8 @@ openai      openai/gpt-6-luna              until 14:52: usage limit
 
 ## Options
 
+`idle_margin_seconds` is at most 3600.
+
 ```json
 {
   "context-renewal": {
@@ -90,6 +93,7 @@ openai      openai/gpt-6-luna              until 14:52: usage limit
         "*": 300
       },
       "budget": { "share": 0.215, "min_tokens": 50000, "max_tokens": 100000 },
+      "idle_margin_seconds": 60,
       "pins": []
     }
   }
