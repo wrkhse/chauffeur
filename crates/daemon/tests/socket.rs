@@ -59,6 +59,23 @@ fn send(socket: &Path, line: &str) -> Value {
     serde_json::from_str(&reply).unwrap()
 }
 
+/// Sends a line over the limit and reads the reply. The daemon stops reading
+/// at the limit and closes, so the end of the line may meet a closed
+/// connection; it is written from a thread of its own and its result
+/// ignored.
+fn send_oversized(socket: &Path, line: &str) -> Value {
+    let stream = UnixStream::connect(socket).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let line = line.to_owned();
+    thread::spawn(move || {
+        let _ = writeln!(writer, "{line}");
+    });
+
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
 fn call(socket: &Path, method: &str, params: &Value) -> Value {
     let reply = send(
         socket,
@@ -327,7 +344,7 @@ fn malformed_and_oversized_requests_fail_safely() {
 
     let oversized = "x".repeat(chauffeur_daemon::MAX_LINE.saturating_add(10));
     assert!(
-        send(&paths.socket, &oversized)["error"]["message"]
+        send_oversized(&paths.socket, &oversized)["error"]["message"]
             .as_str()
             .unwrap()
             .contains("over 1 MiB")
