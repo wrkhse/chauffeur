@@ -36,6 +36,10 @@ flowchart LR
 | `linux-x64`    | `ubuntu-latest`    | `x86_64-unknown-linux-musl`  |
 
 - The build stops if the tag is not `v` and the workspace's version.
+- Each prerelease also carries `@fdcn/chauffeur` as
+  `fdcn-chauffeur-<version>.tgz`. An integration pins that asset URL in its
+  dependencies, such as
+  <https://github.com/wrkhse/chauffeur/releases/download/v1.0.0-rc.5/fdcn-chauffeur-1.0.0-rc.5.tgz>.
 - The tap job runs in the `release` environment, which only `v*-rc.*` tags
   may use and which waits for your approval. Its `TAP_DEPLOY_KEY` is an SSH
   deploy key that can write to `StevenJPx2/homebrew-taps` and nothing else.

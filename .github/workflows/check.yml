@@ -206,6 +206,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+      - name: The client's version is the workspace's
+        working-directory: .
+        run: test "$(node -p 'require("./packages/chauffeur/package.json").version')" = "$(node scripts/package.mjs version)"
       - run: cargo build --locked -p chauffeur-cli
         working-directory: .
       - run: bun install --frozen-lockfile

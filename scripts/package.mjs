@@ -73,7 +73,9 @@ export function tarball({ target, binary, out, root = ROOT }) {
 /** Write `SHA256SUMS` for every tarball in `folder` and return its text. */
 export function sums(folder) {
   const lines = readdirSync(folder)
-    .filter((name) => name.endsWith(".tar.gz"))
+    .filter(
+      (name) => name.endsWith(".tar.gz") || /^fdcn-chauffeur-.+\.tgz$/.test(name)
+    )
     .toSorted()
     .map((name) => `${createHash("sha256").update(readFileSync(join(folder, name))).digest("hex")}  ${name}`)
 
