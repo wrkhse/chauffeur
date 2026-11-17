@@ -5,6 +5,10 @@ import type { NavigateRequest, Navigated } from "../src/client/index.ts"
 // @ts-expect-error event and strategy requests are mutually exclusive.
 const mixed: NavigateRequest = { on: "event", strategy: [] }
 
+const project = "/Users/me/src/app"
+const projectedEvent: NavigateRequest = { on: "event", project }
+const projectedStrategy: NavigateRequest = { strategy: [], project }
+
 // Checked by `tsc`: each @ts-expect-error fails the typecheck when the line
 // it marks compiles, so these are compile-time tests.
 function outcomes(done: Asked<"yes" | "no">): string {
@@ -38,4 +42,6 @@ test("the compile-time checks above are part of the typecheck", () => {
   expect(typeof outcomes).toBe("function")
   expect(typeof results).toBe("function")
   expect(mixed.on).toBe("event")
+  expect(projectedEvent.project).toBe(project)
+  expect(projectedStrategy.project).toBe(project)
 })

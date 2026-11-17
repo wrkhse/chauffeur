@@ -130,3 +130,28 @@ test("a confidence outside 0 to 1 is refused before anything is sent", () => {
     judge({ tier: "system-one", confidence: { yes: 0.9, no: -1 } })
   ).toThrow(RangeError)
 })
+
+test("ask forwards the project it works in, and omits an absent one", async () => {
+  const daemon = await standIn(() => ({
+    result: { verdict: { ask: { answer: ANSWER } } }
+  }))
+  const chauffeur = connect({ socket: daemon.socket })
+  const deep = judge({ tier: "system-two" })
+
+  try {
+    await ask(noul("?"), {
+      judge: deep,
+      project: "/Users/me/src/app",
+      client: chauffeur
+    })
+    await ask(noul("?"), { judge: deep, client: chauffeur })
+
+    expect(daemon.messages[0]?.params).toMatchObject({
+      project: "/Users/me/src/app"
+    })
+    expect(daemon.messages[1]?.params).not.toHaveProperty("project")
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})

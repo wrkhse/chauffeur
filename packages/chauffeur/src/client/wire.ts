@@ -34,6 +34,12 @@ export type Step = {
 }
 
 type Common = {
+  /**
+   * The absolute path of the project the caller works in; the daemon adds its
+   * rules, and runs inline System Two only for a project listed in
+   * projects.json.
+   */
+  readonly project?: string
   readonly evidence?: Blocks
   readonly candidates?: Blocks
   /** How long the rules may take, at most 30 000; the daemon's default is 3 000. */

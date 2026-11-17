@@ -39,6 +39,9 @@ if (done.ok && done.outcome === "yes") {
   or `unavailable` when no daemon answers, it speaks another protocol, or it
   has not answered two seconds past the deadline. An aborted signal rejects
   with the signal's reason, and the daemon cancels the call.
+- A request may name `project`, the absolute path of the project it works in.
+  The daemon adds that project's rules, and runs an inline System Two judge
+  only for a project its `projects.json` lists.
 - `ask` never rejects; a rejected request includes its message and any limit
   and maximum alongside `{ ok: false, reason }`.
 - `connect()` keeps one connection, opened again on the next call after the

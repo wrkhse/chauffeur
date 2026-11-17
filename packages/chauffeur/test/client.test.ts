@@ -89,6 +89,27 @@ test("a rejection keeps its reason and limit; another protocol is unavailable", 
   }
 })
 
+test("a request's project is sent, and an absent one is left out", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+
+  try {
+    await navigate(
+      { on: "sourcefed.event", project: "/Users/me/src/app" },
+      { socket: daemon.socket }
+    )
+    await navigate(EVENT, { socket: daemon.socket })
+
+    expect(daemon.messages[0]?.params).toEqual({
+      protocol: 1,
+      on: "sourcefed.event",
+      project: "/Users/me/src/app"
+    })
+    expect(daemon.messages[1]?.params).not.toHaveProperty("project")
+  } finally {
+    await daemon.close()
+  }
+})
+
 test("no daemon, one that hangs up, and one that never answers are all unavailable", async () => {
   const missing = join(tmpdir(), "chauffeur-missing", "daemon.sock")
   const hanging = await standIn(() => "hang-up")

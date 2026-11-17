@@ -72,6 +72,12 @@ export type AskOptions = {
   readonly evidence?: Blocks
   readonly signal?: AbortSignal
   readonly deadlineMs?: number
+  /**
+   * The absolute path of the project the caller works in; the daemon adds its
+   * rules, and runs inline System Two only for a project listed in
+   * projects.json.
+   */
+  readonly project?: string
   /** A client kept with `connect()`; without one, a connection of its own. */
   readonly client?: Chauffeur
 }
@@ -96,6 +102,7 @@ export async function ask<O extends string>(
       }
     ],
     evidence,
+    ...(options.project === undefined ? {} : { project: options.project }),
     ...(options.deadlineMs === undefined ? {} : { deadline_ms: options.deadlineMs })
   }
   const signal = options.signal ? { signal: options.signal } : {}
