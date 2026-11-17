@@ -7,6 +7,9 @@ import { fakeExposure, fakeHost, Hooks, install, noRulebooks, noSkills, shippedT
 
 const sessionID = "ses_recovery"
 
+/** The arguments a reported tool call carries in these tests. */
+type CallInput = { readonly agent: string; readonly description?: string }
+
 function toolHost(hooks: Hooks, delivered: string[], skills: ReadonlyArray<string> = []) {
   return fakeHost({
     tool: { hook: hooks.register },
@@ -124,6 +127,48 @@ test("a steer after a tool result reaches the running turn; prompt context does 
   await hooks.emit("execute.after", { sessionID, tool: "shell", status: "completed", input: { command: "curl https://api.github.com" }, result: { output: "{}" } })
 
   expect(delivered).toEqual(["Use gh for GitHub."])
+
+  await plugin.close()
+})
+
+test("a subagent call says whether the agent it launches runs on a model of its own", async () => {
+  const hooks = new Hooks()
+  const sent: Signal[] = []
+  let listings = 0
+
+  const agents = [
+    { id: "build", mode: "subagent", model: { id: "gpt-6", providerID: "openai" } },
+    { id: "explore", mode: "subagent" },
+    { id: "lead", mode: "primary", model: { id: "gpt-6", providerID: "openai" } },
+  ]
+
+  const host = fakeHost({
+    tool: { hook: hooks.register },
+    session: { get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
+    agent: { list: () => Effect.sync(() => {
+      listings += 1
+
+      return { data: agents }
+    }) },
+  })
+
+  const plugin = await install(installToolResults(fakeExposure()), host, daemon(sent, []))
+  const call = (tool: string, input: CallInput) => hooks.emit("execute.after", { sessionID, tool, status: "completed", input, result: { content: "done" } })
+
+  await call("subagent", { agent: "build", description: "search" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  await call("subagent", { agent: "explore" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+
+  // The host's primary agents are not something a subagent call launches.
+  await call("subagent", { agent: "lead" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+
+  // Any other tool reports false without reading the host's agents.
+  await call("read", { agent: "build" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+  expect(listings).toBe(3)
 
   await plugin.close()
 })

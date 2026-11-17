@@ -10,6 +10,8 @@ pub const MAX_TEXT_BYTES: usize = 2_048;
 /// a rulebook's arguments. Jev judged 64 KiB goals in under a second.
 pub const MAX_PROMPT_BYTES: usize = 65_536;
 pub const MAX_AVAILABLE_MODELS: usize = 256;
+/// Thinking variants one available model may list, such as `high` and `max`.
+pub const MAX_MODEL_VARIANTS: usize = 32;
 pub const MAX_CATALOG_ENTRIES: usize = 128;
 pub const MAX_DESCRIPTION_BYTES: usize = 400;
 pub const MAX_RESOURCES: usize = 32;
@@ -154,6 +156,10 @@ pub struct CachePrices {
 pub struct AvailableModel {
     pub model: ModelRef,
     pub usable: bool,
+    /// The thinking variants the host offers this model at, such as `high`
+    /// and `max`; empty when the host does not say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -225,6 +231,11 @@ pub enum SignalKind {
         /// Registered, currently hidden direct tools with local search matches.
         #[serde(default)]
         candidates: Vec<CatalogEntry>,
+        /// The call launches an agent configured with a model of its own,
+        /// such as a subagent whose config names one, so suggesting another
+        /// model for it would override that choice.
+        #[serde(default)]
+        agent_has_model: bool,
     },
     /// The agent asked, in its own words, for a tool or skill it lacks.
     AgentRequest {
@@ -631,15 +642,34 @@ fn validate_model_error(
     bounded(error_type, "error_type")?;
     bounded(message, "message")?;
 
+    validate_available(available)
+}
+
+/// Every offered model, with the variants it may be run at.
+fn validate_available(available: &[AvailableModel]) -> Result<(), String> {
     if available.len() > MAX_AVAILABLE_MODELS {
         return Err(format!(
             "signal lists more than {MAX_AVAILABLE_MODELS} models"
         ));
     }
 
-    available
-        .iter()
-        .try_for_each(|entry| validate_model(&entry.model))
+    available.iter().try_for_each(|entry| {
+        validate_model(&entry.model)?;
+
+        if entry.variants.len() > MAX_MODEL_VARIANTS {
+            return Err(format!(
+                "a model lists more than {MAX_MODEL_VARIANTS} variants"
+            ));
+        }
+
+        entry.variants.iter().try_for_each(|variant| {
+            if variant.trim().is_empty() {
+                return Err("a model variant must be non-empty".into());
+            }
+
+            bounded(variant, "model variant")
+        })
+    })
 }
 
 fn validate_permission_lists(
@@ -827,5 +857,55 @@ mod tests {
 
         let over = vec!["x".repeat(MAX_RESOURCE_BYTES); MAX_RESOURCES];
         assert!(shell(&over).validate().unwrap_err().contains("together"));
+    }
+
+    fn offered_model(variants: Vec<String>) -> Signal {
+        let model = ModelRef {
+            provider: "p".into(),
+            model: "m".into(),
+            variant: None,
+        };
+
+        Signal {
+            agent_id: "a".into(),
+            at: 1,
+            kind: SignalKind::ModelError {
+                model: model.clone(),
+                error_type: "usage_limit".into(),
+                status: None,
+                message: String::new(),
+                tool_executed: false,
+                available: vec![AvailableModel {
+                    model,
+                    usable: true,
+                    variants,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn an_offered_model_lists_a_bounded_set_of_named_variants() {
+        assert_eq!(
+            offered_model(vec!["high".into(), "max".into()]).validate(),
+            Ok(())
+        );
+
+        let too_many = vec!["high".into(); MAX_MODEL_VARIANTS + 1];
+        assert!(
+            offered_model(too_many)
+                .validate()
+                .unwrap_err()
+                .contains("variants")
+        );
+
+        for blank in [String::new(), " ".into()] {
+            assert!(
+                offered_model(vec![blank])
+                    .validate()
+                    .unwrap_err()
+                    .contains("model variant")
+            );
+        }
     }
 }

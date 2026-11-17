@@ -67,6 +67,7 @@ fn prepare(case: &Case) -> (Engine, Step, Rule) {
                     subagent: false,
                     user_request: case.goal.clone(),
                     candidates: Vec::new(),
+                    agent_has_model: false,
                 }))
                 .unwrap(),
             Step::Done(_)

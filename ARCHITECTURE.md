@@ -504,7 +504,12 @@ follow-through. A rule declares:
   when its result (error and output, clipped with both ends kept) contains one;
   the result text decides admission and never enters Jev's question.
   `session_kind` (`top_level` or `subagent`) limits a rule to one kind of
-  session; without it both are judged.
+  session; without it both are judged. `agent_has_model` (`true` or `false`,
+  `tool_result` rules only) admits a rule only for a call that does, or does
+  not, launch an agent configured with a model of its own. The shipped
+  cheaper-subagent rule sets it to `false`, so a call to an agent
+  configured on its own model, such as a writer agent on another model, is
+  never steered.
 - `steps`: one or two yes/no judgments, each with `yes_at_or_above` (0.5-1)
   and `minimum_confidence`. The second is asked in a later round only after
   the first holds.
@@ -640,17 +645,27 @@ you use directly, then the last resort:
 A model's other variants keep its tier without the recommendation. A
 failover switches to the first variant a model's rows name in the target
 tier, so Opus is offered at `#high` in Balanced and at `#low` in Efficient,
-and Sol, Terra, Sonnet, Fable and Astra at `#high`. Frontier, Balanced and
-Efficient each recommend exactly one model per provider, so when Jev makes
-no confident pick the agent moves like for like, whatever order the host
-lists models in: Fable and Astra, Opus `#high` and Sol `#high`, Opus `#low`
-and Terra `#high`. A table may recommend at most one model per tier, which
-loading checks, so your `providers/<provider>.json` cannot bring back a
-choice by host order. Sonnet is Efficient but not recommended, so it comes
-after Opus `#low`. Luna is Fast at every variant, `#max` included. Only
-Fast models write summaries, and only a session on a Fast or last-resort
-model is left to the host's own compaction; an Efficient session is renewed
-like any other.
+and Sol, Terra, Sonnet, Fable and Astra at `#high`. When the failed model
+runs at a variant its rows do not name, such as Opus or Sol at `#max`, each
+candidate is offered at that variant, rather than the first variant its
+table names. A candidate takes it only when the host lists the variant for
+it (the adapter sends each available model's `variants`), the variant keeps
+the candidate's tier, the agent has not tried it there, and the candidate
+is not pinned: a pin keeps its own variant. A variant a row names, such as
+Opus `#low`, sets the tier rather than the effort, so it does not carry
+over: Opus `#low` still moves to Terra `#high`. Ranking is unchanged, so
+Opus `#max` fails over to Sol `#max`, and Sol `#max` to Opus `#max`.
+Frontier, Balanced and Efficient each recommend exactly one model per
+provider, so when Jev makes no confident pick the agent moves like for
+like, whatever order the host lists models in: Fable and Astra, Opus
+`#high` and Sol `#high`, Opus `#max` and Sol `#max`, Opus `#low` and Terra
+`#high`. A table may recommend at most one model per tier, which loading
+checks, so your `providers/<provider>.json` cannot bring back a choice by
+host order. Sonnet is Efficient but not recommended, so it comes after
+Opus `#low`. Luna is Fast at every variant, `#max` included. Only Fast
+models write summaries, and only a session on a Fast or last-resort model
+is left to the host's own compaction; an Efficient session is renewed like
+any other.
 
 Excluded: `*-fast`, Claude generation 4 (`claude-*-4`, `claude-*-4-*`), and
 `gpt-5*`, `gpt-4*`.
@@ -659,10 +674,10 @@ The router:
 
 1. declines to switch if a tool already ran in the failed step;
 2. computes candidates: each usable host model, once, at the first variant its
-   table names, untried, in the current model's tier (any tier when the
-   current model has none), plus every pinned model regardless of tier,
-   ordered by pins, then recommended models, then other providers, then host
-   order, at most 8. A model
+   table names or at the failed model's own variant, as above, untried, in
+   the current model's tier (any tier when the current model has none), plus
+   every pinned model regardless of tier, ordered by pins, then recommended
+   models, then other providers, then host order, at most 8. A model
    no table names is never a candidate unless pinned: hosts list many free
    and preview models that are themselves rate limited. A usage limit belongs
    to the account behind a provider, so no model of the failed model's
@@ -880,7 +895,11 @@ Installed as a package, it also registers the hand-over skills in
   `when.todos` and texts render `{todos}`. Chauffeur sends no todo reminder; a
   rulebook stays silent about open todos so the todo plugin's reminder is the
   only one. `tool.transform` also appends the cheaper-subagent instruction to
-  the host's `subagent` description, so the agent reads it before launching.
+  the host's `subagent` description, so the agent reads it before launching:
+  the guidance says it applies only to agents without a model of their own,
+  then, when any exist, names the agents that run on their own model and
+  says to launch them without one. A `subagent` call's tool result carries
+  `agent_has_model`, reported from the host's agent configs (`agent.list`).
 - **Daemon RPC transport:** dedicated `node:http` / `node:https` sockets, not
   Bun's shared fetch pool. Long-lived MCP and SourceFed event streams cannot
   consume the transport's slots and queue permission checks. Each hook's

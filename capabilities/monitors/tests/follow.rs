@@ -53,6 +53,7 @@ fn call(tool: &str, input: &str, output: &str) -> Signal {
             user_request: String::new(),
             evidence: output.into(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     }
 }

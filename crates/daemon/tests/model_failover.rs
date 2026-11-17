@@ -90,6 +90,7 @@ async fn fails_over(from: ModelRef, to: ModelRef, other_tier: &'static str, judg
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     );
 
@@ -109,6 +110,9 @@ async fn fails_over(from: ModelRef, to: ModelRef, other_tier: &'static str, judg
     .map(|model| AvailableModel {
         model,
         usable: true,
+        variants: ["low", "medium", "high", "max"]
+            .map(str::to_string)
+            .to_vec(),
     })
     .collect();
     let limit = signal(
@@ -204,6 +208,36 @@ async fn an_unsure_judge_still_sends_low_opus_to_terra() {
         "openai/gpt-6.1-sol#high",
         Judged {
             choice: "openai/gpt-6-luna",
+            confidence: 0.1,
+        },
+    )
+    .await;
+}
+
+/// An unnamed variant carries over: max stays max on the other provider.
+#[tokio::test]
+async fn a_max_supervisor_keeps_max_on_the_other_provider() {
+    fails_over(
+        at("anthropic", "claude-opus-5-5", "max"),
+        at("openai", "gpt-6.1-sol", "max"),
+        "openai/gpt-6-astra#high",
+        Judged {
+            choice: "anthropic/claude-sonnet-5-5#high",
+            confidence: 0.1,
+        },
+    )
+    .await;
+}
+
+/// Jev's pick is below the bar, and unnamed max sol still lands on max Opus.
+#[tokio::test]
+async fn an_unsure_judge_still_sends_max_sol_to_max_opus() {
+    fails_over(
+        at("openai", "gpt-6.1-sol", "max"),
+        at("anthropic", "claude-opus-5-5", "max"),
+        "anthropic/claude-fable-5-2#high",
+        Judged {
+            choice: "anthropic/claude-sonnet-5-5#high",
             confidence: 0.1,
         },
     )

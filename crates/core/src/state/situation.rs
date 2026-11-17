@@ -451,6 +451,7 @@ mod tests {
                 user_request: String::new(),
                 evidence: String::new(),
                 candidates: Vec::new(),
+                agent_has_model: false,
             },
         }
     }
@@ -503,6 +504,7 @@ mod tests {
                     user_request: String::new(),
                     evidence: String::new(),
                     candidates: Vec::new(),
+                    agent_has_model: false,
                 },
             },
             &SituationTexts::default(),

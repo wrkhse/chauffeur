@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Deferred, Effect } from "effect"
 import type { DaemonClient } from "../src/daemon.js"
-import { installModelRouter } from "../src/model-router.js"
+import { available, installModelRouter } from "../src/model-router.js"
 import type { HostEffect, Signal } from "../src/protocol.js"
 import { eventStream, fakeHost, Hooks, install, noRulebooks, noSkills, settle, shippedTexts } from "./support.js"
 
@@ -17,6 +17,18 @@ const retry = (sessionID: string) => ({
   model: failed,
   error: { type: "provider.rate_limit", status: 429, message: "limited" },
   decision: { retry: true, delay: 1000 },
+})
+
+test("available models carry their variants, without the IDs that name none", () => {
+  const variants = [{ id: "default" }, { id: "" }, { id: "low" }, { id: "high" }]
+
+  const entries = available([
+    { ...failed, enabled: true, status: "active", variants },
+    { providerID: "openai", id: "gpt-6-sol", enabled: true, status: "active" },
+  ])
+
+  expect(entries[0]?.variants).toEqual(["low", "high"])
+  expect(entries[1]?.variants).toEqual([])
 })
 
 test("a tool in an earlier request does not block failover; a tool in this request does", async () => {

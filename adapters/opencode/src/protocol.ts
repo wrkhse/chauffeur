@@ -67,7 +67,7 @@ export type SignalKind =
     code_mode: CodeModeNamespace[]
     workspace: string
   }
-  | { type: "tool_result"; tool: string; ok: boolean; workspace: string; subagent: boolean; input: string; error: string; user_request: string; evidence: string; candidates: CatalogEntry[] }
+  | { type: "tool_result"; tool: string; ok: boolean; agent_has_model: boolean; workspace: string; subagent: boolean; input: string; error: string; user_request: string; evidence: string; candidates: CatalogEntry[] }
   | { type: "turn_end"; workspace: string; subagent: boolean; user_request: string; summary: string; todos: ReadonlyArray<Todo> }
   | { type: "rulebook"; command: RulebookCommand; rulebook: string; args: string; workspace: string }
   | { type: "agent_request"; need: string; user_request: string; tools: CatalogEntry[]; code_mode: CodeModeNamespace[] }
@@ -78,7 +78,7 @@ export type SignalKind =
     status: number | null
     message: string
     tool_executed: boolean
-    available: Array<{ model: ModelRef; usable: boolean }>
+    available: Array<{ model: ModelRef; usable: boolean; variants: string[] }>
   }
   | { type: "model_succeeded"; model: ModelRef }
   | {
@@ -89,7 +89,7 @@ export type SignalKind =
     idle_seconds: number
     /** The prompt-cache lifetime the user set for the model, in seconds. */
     cache_seconds?: number | undefined
-    available: Array<{ model: ModelRef; usable: boolean }>
+    available: Array<{ model: ModelRef; usable: boolean; variants: string[] }>
   }
   | { type: "context_idle"; model: ModelRef; context_tokens: number; context_window: number; awaiting_answer: boolean; prices: CachePrices; cache_seconds?: number | undefined }
   | { type: "integration_event"; source: string; kind: string; summary: string; body: string; actionable: boolean; monitor: string }

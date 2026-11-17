@@ -146,6 +146,7 @@ fn a_skill_the_prompt_did_not_judge_can_still_be_handed_over_mid_turn() {
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     };
     let Step::Ask { questions, .. } = engine.begin(&tool).unwrap() else {

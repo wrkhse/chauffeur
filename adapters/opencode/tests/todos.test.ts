@@ -4,12 +4,14 @@ import { Effect, type Schema } from "effect"
 import type { DaemonClient } from "../src/daemon.js"
 import { Host } from "../src/host.js"
 import { installToolDescriptions, rewriteDescriptions } from "../src/tool-descriptions.js"
-import { fixedTexts, type HostTexts, SHIPPED_TEXTS, type TextsSource, withTexts } from "../src/texts.js"
+import { fill, fixedTexts, type HostTexts, SHIPPED_TEXTS, type TextsSource, withTexts } from "../src/texts.js"
 import type { Todo } from "../src/todo-data.js"
 import { readTodos } from "../src/todos.js"
 import { fakeHost, Hooks, install, noRulebooks, noSkills, shippedTexts } from "./support.js"
 
 const SUBAGENT_GUIDANCE = SHIPPED_TEXTS.subagent.guidance
+
+const OWN_MODEL_LINE = SHIPPED_TEXTS.subagent.own_model
 
 const daemon: DaemonClient = { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Effect.die("unexpected") }
 
@@ -136,6 +138,81 @@ test("the subagent tool's description carries the cheaper-model guidance once", 
   expect(tools.subagent.description).toBe(`Spawns an agent in a child session.\n\n${SUBAGENT_GUIDANCE}`)
   expect(SUBAGENT_GUIDANCE).toContain("anthropic/claude-opus-5-5#low")
   expect(SUBAGENT_GUIDANCE).toContain("openai/gpt-6.1-terra#high")
+})
+
+test("the subagent description names the agents with a model of their own, after the guidance and once", () => {
+  const tools = { subagent: tool("Spawns an agent in a child session.") }
+
+  rewriteDescriptions(tools, SHIPPED_TEXTS, ["build", "plan"])
+  rewriteDescriptions(tools, SHIPPED_TEXTS, ["build", "plan"])
+
+  expect(tools.subagent.description).toBe(
+    `Spawns an agent in a child session.\n\n${SUBAGENT_GUIDANCE}\n\n${fill(OWN_MODEL_LINE, { agents: "build, plan" })}`,
+  )
+})
+
+test("with no agent on a model of its own, the description carries only the guidance", () => {
+  const tools = { subagent: tool("Spawns an agent in a child session.") }
+
+  rewriteDescriptions(tools, SHIPPED_TEXTS)
+
+  expect(tools.subagent.description).toBe(`Spawns an agent in a child session.\n\n${SUBAGENT_GUIDANCE}`)
+})
+
+test("a request names the agents that need no model, sorted, after the guidance", async () => {
+  const hooks = new Hooks()
+
+  const host = fakeHost({
+    session: { hook: hooks.register },
+    agent: { list: () => Effect.succeed({ data: [
+      { id: "plan", mode: "subagent", model: { id: "m", providerID: "p" } },
+      { id: "build", mode: "all", model: { id: "m", providerID: "p" } },
+      { id: "explore", mode: "subagent" },
+      { id: "main", mode: "primary", model: { id: "m", providerID: "p" } },
+    ] }) },
+  })
+
+  const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
+  const event = { tools: { subagent: tool("A long subagent description.") } }
+
+  try {
+    // A hook may see the same definitions twice; the named line appears once.
+    await hooks.emit("context", event)
+    await hooks.emit("context", event)
+
+    expect(event.tools.subagent.description).toBe(
+      `A long subagent description.\n\n${SUBAGENT_GUIDANCE}\n\n${fill(OWN_MODEL_LINE, { agents: "build, plan" })}`,
+    )
+  } finally {
+    await plugin.close()
+  }
+})
+
+test("a request without the subagent tool does not read the host's agents", async () => {
+  const hooks = new Hooks()
+  let listings = 0
+
+  const host = fakeHost({
+    session: { hook: hooks.register },
+    agent: { list: () => Effect.sync(() => {
+      listings += 1
+
+      return { data: [] }
+    }) },
+  })
+
+  const texts = fixedTexts({ ...SHIPPED_TEXTS, tool_descriptions: { execute: "Run code." } })
+  const plugin = await install(installToolDescriptions, host, daemon, texts)
+  const event = { tools: { execute: tool("A long Code Mode description.") } }
+
+  try {
+    await hooks.emit("context", event)
+
+    expect(event.tools.execute.description).toBe("Run code.")
+    expect(listings).toBe(0)
+  } finally {
+    await plugin.close()
+  }
 })
 
 test("each request's tools take the configured descriptions, and the guidance follows the new subagent text", async () => {

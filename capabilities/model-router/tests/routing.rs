@@ -97,6 +97,7 @@ fn limit(tool_executed: bool) -> Signal {
     .map(|key| AvailableModel {
         model: model(key),
         usable: true,
+        variants: Vec::new(),
     })
     .collect();
 
@@ -390,10 +391,12 @@ fn an_unknown_tier_offers_pinned_then_tiered_models_only() {
         available.extend((0..40).map(|n| AvailableModel {
             model: model_ref(&format!("many/m{n}")),
             usable: true,
+            variants: Vec::new(),
         }));
         available.push(AvailableModel {
             model: model_ref("google/pinned"),
             usable: true,
+            variants: Vec::new(),
         });
     }
 
@@ -696,12 +699,17 @@ fn a_second_fallback_does_not_restart_the_original_limits_clock() {
 
 /// The shipped tables, with the host's models listed without variants.
 fn shipped_router() -> Judging<ModelRouter> {
+    shipped_router_with(defaults())
+}
+
+/// The shipped tables under `config`.
+fn shipped_router_with(config: ModelRouterConfig) -> Judging<ModelRouter> {
     let providers: Vec<Arc<dyn Provider>> = vec![
         Arc::new(chauffeur_plugin_anthropic::AnthropicProvider::default()),
         Arc::new(chauffeur_plugin_openai::OpenAiProvider::default()),
     ];
 
-    Judging::new(ModelRouter::new(providers, ModelRouterConfig::default()))
+    Judging::new(ModelRouter::new(providers, config))
 }
 
 /// The host's models, in OpenCode's alphabetical order.
@@ -722,6 +730,17 @@ fn limit_on(current: &str) -> Signal {
     limit_listed(current, &HOST_MODELS)
 }
 
+/// The thinking variants the host offers: every one at the providers you use
+/// directly, none reported for the gateway.
+fn host_variants(key: &str) -> Vec<String> {
+    match key.split_once('/').map(|(provider, _)| provider) {
+        Some("anthropic" | "openai") => ["low", "medium", "high", "max"]
+            .map(str::to_string)
+            .to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 fn limit_listed(current: &str, listed: &[&str]) -> Signal {
     let mut signal = limit(false);
 
@@ -737,6 +756,7 @@ fn limit_listed(current: &str, listed: &[&str]) -> Signal {
             .map(|key| AvailableModel {
                 model: model(key),
                 usable: true,
+                variants: host_variants(key),
             })
             .collect();
     }
@@ -854,6 +874,7 @@ fn recommended_models_come_first_and_fast_or_old_editions_are_never_offered() {
             older.into_iter().map(|key| AvailableModel {
                 model: model(key),
                 usable: true,
+                variants: Vec::new(),
             }),
         );
     }
@@ -884,6 +905,11 @@ fn without_a_confident_pick_each_tier_fails_over_like_for_like() {
         ("openai/gpt-6-astra#high", "anthropic/claude-fable-5-2#high"),
         ("anthropic/claude-opus-5-5#high", "openai/gpt-6.1-sol#high"),
         ("openai/gpt-6.1-sol#high", "anthropic/claude-opus-5-5#high"),
+        // A variant the tables do not name carries over: max stays max.
+        ("anthropic/claude-opus-5-5#max", "openai/gpt-6.1-sol#max"),
+        ("openai/gpt-6.1-sol#max", "anthropic/claude-opus-5-5#max"),
+        // The host offers terra at low, but Opus's own low names its tier, so
+        // a named variant does not carry over.
         ("anthropic/claude-opus-5-5#low", "openai/gpt-6.1-terra#high"),
         // Sonnet is efficient too, but Opus at low thinking is recommended.
         ("openai/gpt-6.1-terra#high", "anthropic/claude-opus-5-5#low"),
@@ -909,6 +935,72 @@ fn without_a_confident_pick_each_tier_fails_over_like_for_like() {
             }
         }
     }
+}
+
+#[test]
+fn a_variant_the_host_does_not_offer_is_not_kept() {
+    let mut signal = limit_on("anthropic/claude-opus-5-5#max");
+
+    // Sol cannot think at max here, so the candidate keeps its table variant.
+    if let SignalKind::ModelError { available, .. } = &mut signal.kind {
+        for entry in available
+            .iter_mut()
+            .filter(|entry| entry.model.model == "gpt-6.1-sol")
+        {
+            entry.variants.retain(|variant| variant != "max");
+        }
+    }
+
+    let mut router = shipped_router();
+    router.plan(&Situation::default(), &signal);
+
+    assert_eq!(
+        router.decide(&signal, None),
+        switch("openai/gpt-6.1-sol#high")
+    );
+}
+
+#[test]
+fn a_kept_variant_never_changes_the_candidates_tier() {
+    // Sol's low is unnamed, so the failover keeps it, but Opus at low is
+    // efficient: the balanced candidate stays at its own high.
+    let mut router = shipped_router();
+    let signal = limit_on("openai/gpt-6.1-sol#low");
+
+    assert_eq!(
+        options(&router.plan(&Situation::default(), &signal)),
+        vec!["anthropic/claude-opus-5-5#high", STAY]
+    );
+}
+
+#[test]
+fn a_pinned_candidate_keeps_its_own_variant() {
+    let mut router = shipped_router_with(ModelRouterConfig {
+        pins: vec!["openai/gpt-6.1-sol#high".into()],
+        ..defaults()
+    });
+    let signal = limit_on("anthropic/claude-opus-5-5#max");
+
+    router.plan(&Situation::default(), &signal);
+
+    assert_eq!(
+        router.decide(&signal, None),
+        switch("openai/gpt-6.1-sol#high")
+    );
+}
+
+#[test]
+fn an_unnamed_variant_carries_over_in_the_efficient_tier() {
+    // Sonnet's max is unnamed, and terra at max is still efficient.
+    let mut router = shipped_router();
+    let signal = limit_on("anthropic/claude-sonnet-5-5#max");
+
+    router.plan(&Situation::default(), &signal);
+
+    assert_eq!(
+        router.decide(&signal, None),
+        switch("openai/gpt-6.1-terra#max")
+    );
 }
 
 #[test]
@@ -955,6 +1047,7 @@ fn go_is_blocked_even_when_pinned_or_last_resort_but_zen_free_models_remain() {
             ["opencode-go/sol", "opencode-go/example-free"].map(|key| AvailableModel {
                 model: model(key),
                 usable: true,
+                variants: Vec::new(),
             }),
         );
     }
@@ -1040,6 +1133,7 @@ fn resumed(available: &[&str], window: u64) -> Signal {
                 .map(|key| AvailableModel {
                     model: model(key),
                     usable: true,
+                    variants: Vec::new(),
                 })
                 .collect(),
         },

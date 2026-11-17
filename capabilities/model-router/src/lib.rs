@@ -129,7 +129,8 @@ impl ModelRouter {
     }
 
     /// Each usable host model at every variant its tier table names; a model
-    /// without a table row keeps its default variant.
+    /// without a table row keeps its default variant. A failover later moves
+    /// a candidate to the failed model's kept variant where the host lists it.
     fn expanded(&self, available: &[chauffeur_core::AvailableModel]) -> Vec<ModelRef> {
         available
             .iter()
@@ -156,9 +157,66 @@ impl ModelRouter {
             .insert(model.key());
     }
 
+    /// The failed model's variant when a failover should keep it: one its
+    /// tier tables do not name, such as Opus or Sol at `#max`, is an effort
+    /// level within the tier. A named one, such as Opus `#low`, sets the
+    /// tier, and the target tier's rows name each model's own variant.
+    fn kept_variant<'a>(&self, current: &'a ModelRef) -> Option<&'a str> {
+        let variant = current.variant.as_deref()?;
+        let named = self
+            .variants(current)
+            .iter()
+            .any(|named| named.as_deref() == Some(variant));
+
+        (!named).then_some(variant)
+    }
+
+    /// The ranked candidates, each at the failed model's kept variant where
+    /// the host offers it there, it keeps the candidate's tier, and the
+    /// agent has not tried it. A pinned candidate keeps its own variant.
+    fn at_kept_variant(
+        &self,
+        agent_id: &str,
+        current: &ModelRef,
+        available: &[chauffeur_core::AvailableModel],
+        candidates: Vec<ModelRef>,
+    ) -> Vec<ModelRef> {
+        let Some(kept) = self.kept_variant(current) else {
+            return candidates;
+        };
+        let tried = self.attempted.get(agent_id);
+
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let at_kept = ModelRef {
+                    variant: Some(kept.to_string()),
+                    ..candidate.clone()
+                };
+                let offered = available.iter().any(|entry| {
+                    entry.usable
+                        && entry.model.provider == at_kept.provider
+                        && entry.model.model == at_kept.model
+                        && entry.variants.iter().any(|variant| variant == kept)
+                });
+
+                if offered
+                    && !self.config.pins.contains(&candidate.key())
+                    && self.tier(&at_kept) == self.tier(&candidate)
+                    && tried.is_none_or(|tried| !tried.contains(&at_kept.key()))
+                {
+                    at_kept
+                } else {
+                    candidate
+                }
+            })
+            .collect()
+    }
+
     /// The models to offer: same-tier models on providers you use directly,
     /// else any rated model there, else the configured last resort, such as
-    /// free gateway models.
+    /// free gateway models. Each is at the failed model's kept variant where
+    /// the host offers it there.
     fn candidates(
         &self,
         agent_id: &str,
@@ -168,13 +226,13 @@ impl ModelRouter {
         let same_tier = self.ranked(agent_id, current, available, self.current_tier(current));
 
         if !same_tier.is_empty() {
-            return same_tier;
+            return self.at_kept_variant(agent_id, current, available, same_tier);
         }
 
         let any_tier = self.ranked(agent_id, current, available, None);
 
         if !any_tier.is_empty() {
-            return any_tier;
+            return self.at_kept_variant(agent_id, current, available, any_tier);
         }
 
         self.last_resort(agent_id, current, available)
@@ -286,7 +344,8 @@ impl ModelRouter {
                 model.provider == current.provider,
             )
         });
-        // One variant per model: a pinned one, else the first its table names.
+        // One variant per model: a pinned one, else the first its table names,
+        // later moved to the failed model's kept variant where that stands.
         candidates.retain(|model| offered.insert((model.provider.clone(), model.model.clone())));
         candidates.truncate(self.config.max_candidates);
 

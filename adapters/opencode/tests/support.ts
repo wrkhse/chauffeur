@@ -14,10 +14,12 @@ type FakeDomain = { readonly [member: string]: Member }
 /** The host members one test supplies; any member it omits is absent. */
 export type FakeHost = { readonly [Domain in keyof Plugin.Context]?: FakeDomain }
 
-/** A test double for the host: only the members a capability under test reads. */
+/** A test double for the host: only the members a capability under test reads; every host lists agents. */
 export function fakeHost(members: FakeHost): Plugin.Context {
+  const host: FakeHost = { agent: { list: () => Effect.succeed({ data: [] }) }, ...members }
+
   // oxlint-disable-next-line anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion -- a test double supplies only the members its test reads; a missing one fails that test.
-  return members as unknown as Plugin.Context
+  return host as unknown as Plugin.Context
 }
 
 /** Hook registrations, run as the host would run them. */

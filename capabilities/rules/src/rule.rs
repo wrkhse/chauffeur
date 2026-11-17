@@ -105,6 +105,11 @@ pub struct Gate {
     /// The kind of session the agent runs in; either when absent.
     #[serde(default)]
     pub session_kind: Option<SessionKind>,
+    /// For `tool_result`: whether the call launches an agent configured with
+    /// a model of its own; either when absent. A rule suggesting a model for
+    /// a subagent sets it to `false`, so it never overrides an agent's own.
+    #[serde(default)]
+    pub agent_has_model: Option<bool>,
     /// For `turn_end`: the agent's todo list is in one of these states,
     /// such as `open` while any todo is pending or in progress.
     #[serde(default)]
@@ -275,6 +280,13 @@ impl Rule {
             ("result_includes", &gate.result_includes),
         ] {
             self.validate_call_texts(field, texts)?;
+        }
+
+        if gate.agent_has_model.is_some() && self.on != Trigger::ToolResult {
+            return Err(format!(
+                "{}: when.agent_has_model applies only to tool_result",
+                self.id
+            ));
         }
 
         if !gate.todos.is_empty() && self.on != Trigger::TurnEnd {

@@ -205,6 +205,7 @@ mod tests {
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         });
         let nudge = Effect::Context {
             agent_id: "ses".into(),

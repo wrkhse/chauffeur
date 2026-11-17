@@ -84,8 +84,23 @@ fn result(at: u64, tool: &str, workspace: &str, evidence: &str, subagent: bool) 
             user_request: String::new(),
             evidence: evidence.into(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     )
+}
+
+/// `signal`, a call that launches an agent configured with a model of its own.
+fn with_own_model(mut signal: Signal) -> Signal {
+    let SignalKind::ToolResult {
+        agent_has_model, ..
+    } = &mut signal.kind
+    else {
+        panic!("expected a tool result")
+    };
+
+    *agent_has_model = true;
+
+    signal
 }
 
 fn turn_end(at: u64, workspace: &str, request: &str) -> Signal {
@@ -295,6 +310,27 @@ fn a_session_kind_scopes_tool_results_and_turn_ends() {
     assert_eq!(
         asked(&mut engine, &turn_end_of(4, "", "", true)),
         ["rules/sub-only/holds", "rules/either/holds"]
+    );
+}
+
+#[test]
+fn agent_has_model_admits_only_the_calls_that_say_so() {
+    let own = rule(
+        "agent-model",
+        "tool_result",
+        json!({ "tools": ["subagent"], "agent_has_model": true }),
+        &["holds"],
+        "steer",
+    );
+    let mut engine = engine(&[own]);
+
+    assert!(asked(&mut engine, &result(1, "subagent", "", "", false)).is_empty());
+    assert_eq!(
+        asked(
+            &mut engine,
+            &with_own_model(result(2, "subagent", "", "", false))
+        ),
+        ["rules/agent-model/holds"]
     );
 }
 
@@ -652,6 +688,7 @@ fn shell(at: u64, command: &str) -> Signal {
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     )
 }
@@ -698,6 +735,7 @@ fn subagent_call(at: u64, input: &Value, subagent: bool) -> Signal {
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     )
 }
@@ -720,6 +758,11 @@ fn a_subagent_launched_without_a_model_is_judged_for_a_cheaper_one() {
     )));
     // A subagent's own launches are its parent's concern.
     assert!(!cheaper(asked(&mut engine, &subagent_call(3, &task, true))));
+    // An agent configured with its own model keeps it.
+    assert!(!cheaper(asked(
+        &mut engine,
+        &with_own_model(subagent_call(4, &task, false))
+    )));
 }
 
 #[test]
@@ -741,6 +784,27 @@ fn input_excludes_is_only_for_tool_results_and_bounded() {
         json!({ "tools": ["shell"], "input_excludes": [" "] }),
     );
     assert!(parsed(&blank).unwrap_err().contains("input_excludes"));
+}
+
+#[test]
+fn agent_has_model_is_only_for_tool_results() {
+    let turn_end = with(
+        reminder("r", json!({})),
+        "when",
+        json!({ "agent_has_model": false }),
+    );
+    assert!(
+        parsed(&turn_end)
+            .unwrap_err()
+            .contains("agent_has_model applies only to tool_result")
+    );
+
+    let call = with(
+        misuse("m"),
+        "when",
+        json!({ "tools": ["shell"], "agent_has_model": false }),
+    );
+    assert!(parsed(&call).is_ok());
 }
 
 // Project rules.

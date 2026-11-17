@@ -23,7 +23,11 @@ const HostTextsSchema = Schema.Struct({
   }),
   /** Replacement descriptions for host tools, keyed by tool name. */
   tool_descriptions: Schema.Record(Schema.String, Schema.String),
-  subagent: Schema.Struct({ guidance: Schema.String }),
+  subagent: Schema.Struct({
+    guidance: Schema.String,
+    /** Follows the guidance when some agents run on a model of their own: `{agents}`. */
+    own_model: Schema.String,
+  }),
   rulebook: Schema.Struct({
     description: Schema.String,
     usage: Schema.String,

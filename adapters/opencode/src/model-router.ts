@@ -12,6 +12,9 @@ const MAX_SESSIONS = 256
 
 const MAX_MODELS = 256
 
+/** The engine accepts at most this many variants per model. */
+const MAX_VARIANTS = 32
+
 type HostEvent = Stream.Success<ReturnType<Plugin.Context["event"]["subscribe"]>>
 
 type ExecutionEnd = Extract<HostEvent, { readonly type: "session.execution.interrupted" | "session.execution.failed" | "session.execution.succeeded" }>
@@ -253,12 +256,30 @@ export function modelKey(model: ModelRef): string {
   return `${model.provider}/${model.model}${model.variant ? `#${model.variant}` : ""}`
 }
 
-/** Usable models first; the engine accepts at most MAX_MODELS. */
-export function available(models: ReadonlyArray<HostModel & { readonly enabled: boolean; readonly status: string }>) {
+/** A model as the host lists it, with the thinking variants it offers. */
+type HostVariants = { readonly variants?: ReadonlyArray<{ readonly id: string }> | undefined }
+
+/** Usable models first, each with its variants; the engine accepts at most MAX_MODELS. */
+export function available(models: ReadonlyArray<HostModel & HostVariants & { readonly enabled: boolean; readonly status: string }>) {
   return models
-    .map((model) => ({ model: ref(model), usable: model.enabled && model.status === "active" }))
+    .map((model) => ({ model: ref(model), usable: model.enabled && model.status === "active", variants: variantIds(model) }))
     .toSorted((a, b) => Number(b.usable) - Number(a.usable))
     .slice(0, MAX_MODELS)
+}
+
+/** A model's thinking variants, without the two IDs that name none; the engine accepts at most MAX_VARIANTS. */
+function variantIds(model: HostVariants): string[] {
+  const ids: string[] = []
+
+  for (const variant of model.variants ?? []) {
+    if (ids.length >= MAX_VARIANTS) break
+
+    if (variant.id === "" || variant.id === "default") continue
+
+    ids.push(variant.id)
+  }
+
+  return ids
 }
 
 /** Switch to `next` and retry now, unless the execution ended or the selection moved on. */

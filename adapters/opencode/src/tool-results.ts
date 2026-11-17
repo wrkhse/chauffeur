@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode/plugin/effect"
 import type { ToolHooks } from "@opencode/plugin/effect/tool"
-import { Effect, type Scope } from "effect"
+import { Effect, Option, Schema, type Scope } from "effect"
+import { ownModelAgents, SUBAGENT_TOOL } from "./agents.js"
 import { ASK_TOOL } from "./ask-tool.js"
 import { Daemon } from "./daemon.js"
 import type { ExposureControl } from "./exposure.js"
@@ -19,6 +20,11 @@ const RECOVERY_TIMEOUT = "8 seconds"
 const MAX_CANDIDATES = 4
 
 const MISSING_TOOL = /(?:unknown|missing|unavailable|not found|no matching|not registered|cannot call|not available).{0,50}(?:tool|function)|(?:tool|function).{0,50}(?:unknown|missing|unavailable|not found|not registered|not available)/i
+
+/** A subagent call's arguments: the agent it launches, when it names one. */
+const SubagentCall = Schema.Struct({ agent: Schema.optional(Schema.String) })
+
+const decodeSubagentCall = Schema.decodeUnknownOption(SubagentCall)
 
 type ToolResult = ToolHooks["execute.after"]
 
@@ -49,6 +55,10 @@ function report(event: ToolResult, exposure: ExposureControl, texts: HostTexts):
     const observed = observe(event)
     const recovery = MISSING_TOOL.test(observed.evidence) ? yield* recover(host, exposure, event, observed) : NO_RECOVERY
 
+    // Only the subagent tool names an agent, so only it needs the host's agents.
+    const agents = event.tool === SUBAGENT_TOOL ? yield* ownModelAgents() : []
+    const agentHasModel = agents.includes(launchedAgent(event.input))
+
     // An unreadable session still reports the result, as a top-level session without a workspace.
     const session = yield* host.session.get({ sessionID: event.sessionID }).pipe(
       Effect.map((info) => ({ workspace: clip(String(info.location.directory), TEXT_CODE_POINTS), subagent: info.parentID !== undefined })),
@@ -59,6 +69,7 @@ function report(event: ToolResult, exposure: ExposureControl, texts: HostTexts):
       type: "tool_result",
       tool: clip(event.tool, TEXT_CODE_POINTS),
       ok: event.status === "completed",
+      agent_has_model: agentHasModel,
       ...session,
       ...observed,
       user_request: recovery.userRequest,
@@ -74,6 +85,11 @@ type Observed = { readonly input: string; readonly error: string; readonly evide
 type Recovery = { readonly userRequest: string; readonly candidates: CatalogEntry[] }
 
 const NO_RECOVERY: Recovery = { userRequest: "", candidates: [] }
+
+/** The agent a subagent call launches, or "" when its arguments do not name one. */
+function launchedAgent(input: ToolResult["input"]): string {
+  return Option.getOrUndefined(decodeSubagentCall(input))?.agent ?? ""
+}
 
 /** The call's input, its error, and the bounded evidence both leave, from each end. */
 function observe(event: ToolResult): Observed {
