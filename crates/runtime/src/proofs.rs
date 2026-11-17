@@ -48,7 +48,9 @@ fn the_ledger_stays_within_its_capacity() {
     }
 }
 
+// The ledger's Mutex lock loop is unbounded without this; 2 is a complete bound.
 #[kani::proof]
+#[kani::unwind(2)]
 fn the_last_permit_copy_gives_back_exactly_one_slot() {
     let admission = Admission::new(Capacity {
         global: 2,
@@ -63,14 +65,15 @@ fn the_last_permit_copy_gives_back_exactly_one_slot() {
 
     // A clone shares its permit's slot, so either copy may drop first and
     // the slot comes back only with the last one.
-    let (first, second) = if kani::any::<bool>() {
-        (ending, copy)
+    if kani::any::<bool>() {
+        drop(ending);
+        assert!(admission.in_use().held(source) == 2);
+        drop(copy);
     } else {
-        (copy, ending)
-    };
-    drop(first);
-    assert!(admission.in_use().held(source) == 2);
-    drop(second);
+        drop(copy);
+        assert!(admission.in_use().held(source) == 2);
+        drop(ending);
+    }
     assert!(admission.in_use().held(source) == 1);
     drop(permit);
     assert!(admission.in_use().held(source) == 0);
