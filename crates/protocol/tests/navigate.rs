@@ -101,7 +101,7 @@ fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 72);
+    assert_eq!(cases.len(), 77);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -183,6 +183,76 @@ fn a_rejection_names_its_reason_and_limit() {
     let protocol = Navigate::parse(&json!({ "protocol": 9, "on": "x" })).unwrap_err();
     assert_eq!(protocol.to_error()["data"]["accepted"], json!([1]));
     assert_eq!(Rejection::Busy.to_error()["code"], -32000);
+}
+
+/// Asserts `params` is refused for a named text over 16 KiB.
+fn assert_text_bytes(params: &Value) {
+    let rejection = Navigate::parse(params).unwrap_err();
+    let error = rejection.to_error();
+
+    assert_eq!(error["data"]["reason"], json!("limit_exceeded"), "{error}");
+    assert_eq!(error["data"]["limit"], json!("text_bytes"), "{error}");
+}
+
+/// A judge's name is a key in `judges`, so no fixture's fill can reach it.
+#[test]
+fn a_judge_name_over_16_kib_is_refused() {
+    let long = "x".repeat(16_385);
+    let mut params = json!({
+        "protocol": 1,
+        "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
+        "strategy": [{
+            "id": "done", "judge": "quick",
+            "ask": { "outcomes": ["yes", "no"], "instructions": "?" }
+        }]
+    });
+    params["judges"]
+        .as_object_mut()
+        .unwrap()
+        .insert(long, json!({ "tier": "system-one" }));
+
+    assert_text_bytes(&params);
+}
+
+/// A step's named ask is checked before `asks` is consulted: a name over
+/// 16 KiB is refused even when no ask holds it.
+#[test]
+fn an_ask_name_over_16_kib_is_refused() {
+    let long = "x".repeat(16_385);
+    let mut params = json!({
+        "protocol": 1,
+        "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
+        "asks": {
+            "finished": { "outcomes": ["yes", "no"], "evidence": ["log"], "instructions": "?" }
+        },
+        "strategy": [{ "id": "done", "judge": "quick", "ask": "finished" }],
+        "evidence": { "log": "…" }
+    });
+    params["strategy"][0]["ask"] = json!(long);
+
+    assert_text_bytes(&params);
+}
+
+/// A per-outcome confidence names each outcome as a key, bounded like every
+/// other text before its bar is read.
+#[test]
+fn a_per_outcome_confidence_key_over_16_kib_is_refused() {
+    let long = "x".repeat(16_385);
+    let mut confidence = serde_json::Map::new();
+    confidence.insert(long, json!(0.9));
+    confidence.insert("no".to_owned(), json!(0.95));
+    let params = json!({
+        "protocol": 1,
+        "judges": {
+            "careful": { "tier": "system-one", "confidence": confidence }
+        },
+        "strategy": [{
+            "id": "done", "judge": "careful",
+            "ask": { "outcomes": ["yes", "no"], "instructions": "?" }
+        }]
+    });
+
+    assert_text_bytes(&params);
 }
 
 #[test]

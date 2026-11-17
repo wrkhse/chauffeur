@@ -95,17 +95,21 @@ impl Loaded {
 fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
     let id = path.trim_prefix(folder).with_extension("");
     let id = id.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(path)
         .map_err(|error| error.to_string())?
         .take(MAX_RULE_BYTES.saturating_add(1))
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
 
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_RULE_BYTES {
+    // The size is checked before the bytes are read as text, so a cut inside
+    // a multi-byte character is refused for its size, not as not UTF-8.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RULE_BYTES {
         return Err("the rule file is over 1 MiB".to_owned());
     }
 
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("the rule file is not UTF-8: {error}"))?;
     Rule::parse(&id, &text).map_err(|error| error.to_string())
 }
 
@@ -199,6 +203,24 @@ mod tests {
     fn a_rule_file_over_one_mebibyte_is_refused() {
         let over = usize::try_from(MAX_RULE_BYTES.saturating_add(1)).unwrap_or(0);
         let bytes = vec![b' '; over];
+
+        let (folder, path) = temp_rule(&bytes);
+        let refused = load_rule(&folder, &path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            refused.err(),
+            Some("the rule file is over 1 MiB".to_owned())
+        );
+    }
+
+    /// A file over the limit whose cut falls inside a multi-byte character is
+    /// refused for its size, not for not being UTF-8.
+    #[test]
+    fn a_rule_file_of_multibyte_characters_over_one_mebibyte_is_refused() {
+        let bytes = "€".repeat(349_526).into_bytes();
+        let limit = usize::try_from(MAX_RULE_BYTES).unwrap_or(0);
+        assert!(bytes.len() > limit, "the sample is over the limit");
 
         let (folder, path) = temp_rule(&bytes);
         let refused = load_rule(&folder, &path);

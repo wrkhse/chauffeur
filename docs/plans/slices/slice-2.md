@@ -94,9 +94,10 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   blocks, 64 candidates, and 64 blocks named by one ask; 256 KiB of evidence
   and candidates together, names included; 16 KiB in each text a strategy
   names: instructions, descriptions, outcome values, step IDs, judge and ask
-  names, evidence names, and a judge's `model`; a 30 s deadline. Each
-  rejection names its limit. The `after` and `for_each` limits are checked
-  with those fields, in slices 3 and 4.
+  names, evidence names, a judge's `model`, and an outcome key in a
+  per-outcome confidence; a 30 s deadline. Each rejection names its limit.
+  The `after` and `for_each` limits are checked with those fields, in slices
+  3 and 4.
 
 ## What it builds
 
@@ -142,6 +143,7 @@ pub struct Navigate { … }
 impl Navigate {
     pub fn parse(params: &Value) -> Result<Self, Rejection>;
     pub const fn deadline(&self) -> Duration;
+    pub fn project(&self) -> Option<&Path>;
     pub fn evidence(&self) -> &[(String, String)];
     pub fn candidates(&self) -> &[(String, String)];
     pub const fn target(&self) -> &Target;
@@ -170,6 +172,8 @@ pub enum Rejection {
     UnsupportedProtocol,
     Busy,
     Deadline,
+    /// An inline strategy names a judge with no model to ask, or asks for
+    /// System Two without a project the user's `projects.json` allows.
     JudgeUnavailable(String),
 }
 
@@ -228,6 +232,7 @@ pub struct Strategy { … }
 
 impl Strategy {
     pub const fn judges(&self) -> &BTreeMap<String, JudgeSpec>;
+    pub fn uses_tier(&self, tier: Tier) -> bool;
     pub const fn plan(&self) -> &Plan<Question>;
 }
 
@@ -408,8 +413,9 @@ Verified by:
 ### sourcefed
 
 Its daemon asks v2 only when a v2 daemon answers its `chauffeur.status`
-handshake, looking for the socket of `chauffeur` first and then
-`chauffeur-next`. Events that v2 triaged are marked triaged; the OpenCode
+handshake. It looks for `$CHAUFFEUR_SOCKET` alone when it is set: an explicit
+override does not fall back. Otherwise it tries `chauffeur`'s socket, then
+`chauffeur-next`'s. Events that v2 triaged are marked triaged; the OpenCode
 bridge keeps calling v1's `chauffeur.gate` for events that are not marked,
 and that call is removed at slice 13 (cutover). Its installer puts `sourcefed/triage`
 under the v2 installation's `rules/sourcefed/`, never in v1's

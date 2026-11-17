@@ -21,8 +21,8 @@ pub enum Limit {
     /// Named asks in one strategy.
     Asks,
     /// Bytes in any one text a strategy names: instructions, a description,
-    /// an outcome value, a step ID, a judge or ask name, an evidence name, or
-    /// a model.
+    /// an outcome value, a step ID, a judge or ask name, an evidence name, a
+    /// model, or an outcome key in a per-outcome confidence.
     TextBytes,
     /// Bytes in a request's `project` path.
     ProjectBytes,
