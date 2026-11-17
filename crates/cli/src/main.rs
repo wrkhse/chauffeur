@@ -3,7 +3,7 @@
 
 mod audit;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -86,10 +86,7 @@ fn main() -> Result<ExitCode> {
         Command::Daemon {
             command: Daemon::Status,
         } => print(&call(&name, "chauffeur.status", &Value::Null)?),
-        Command::Version => {
-            println!("{name} {}", env!("CARGO_PKG_VERSION"));
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Version => print_line(&format!("{name} {}", env!("CARGO_PKG_VERSION"))),
         Command::Emit { deadline_ms } => {
             let mut text = String::new();
             std::io::stdin().read_to_string(&mut text)?;
@@ -113,8 +110,21 @@ fn main() -> Result<ExitCode> {
 }
 
 fn print(result: &Value) -> Result<ExitCode> {
-    println!("{}", serde_json::to_string_pretty(result)?);
-    Ok(ExitCode::SUCCESS)
+    print_line(&serde_json::to_string_pretty(result)?)
+}
+
+/// Prints `text` and a newline. A reader that stops early, as `head` does,
+/// closes the pipe; printing then stops, and succeeds.
+fn print_line(text: &str) -> Result<ExitCode> {
+    let mut stdout = io::stdout().lock();
+    let printed = writeln!(stdout, "{text}").and_then(|()| stdout.flush());
+
+    match printed {
+        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
+            Err(error).wrap_err("cannot print the output")
+        }
+        _ => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// One JSON-RPC call to the daemon, returning its result.
