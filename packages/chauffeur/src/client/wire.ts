@@ -41,10 +41,16 @@ type Common = {
 }
 
 /** An event every rule whose `on` and `when` match answers with its intents. */
-export type EventRequest = Common & { readonly on: string }
+export type EventRequest = Common & {
+  readonly on: string
+  readonly strategy?: never
+  readonly judges?: never
+  readonly asks?: never
+}
 
 /** One strategy, run alone, which answers with its verdict. */
 export type StrategyRequest = Common & {
+  readonly on?: never
   readonly strategy: readonly Step[]
   readonly judges?: Readonly<Record<string, JudgeSpec>>
   readonly asks?: Readonly<Record<string, Ask>>

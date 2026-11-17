@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 import type { Asked } from "../src/judge/index.ts"
-import type { Navigated } from "../src/client/index.ts"
+import type { NavigateRequest, Navigated } from "../src/client/index.ts"
+
+// @ts-expect-error event and strategy requests are mutually exclusive.
+const mixed: NavigateRequest = { on: "event", strategy: [] }
 
 // Checked by `tsc`: each @ts-expect-error fails the typecheck when the line
 // it marks compiles, so these are compile-time tests.
@@ -34,4 +37,5 @@ function results(
 test("the compile-time checks above are part of the typecheck", () => {
   expect(typeof outcomes).toBe("function")
   expect(typeof results).toBe("function")
+  expect(mixed.on).toBe("event")
 })

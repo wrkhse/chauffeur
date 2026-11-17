@@ -16,6 +16,7 @@ export type Reply =
       readonly events?: readonly Record<string, unknown>[]
     }
   | { readonly error: Record<string, unknown> }
+  | { readonly chunks: readonly Uint8Array[] }
   | "silent"
   | "hang-up"
 
@@ -61,6 +62,13 @@ export async function standIn(reply: (message: Message) => Reply, path?: string)
       return
     }
 
+    if ("chunks" in replied) {
+      for (const [index, chunk] of replied.chunks.entries()) {
+        setTimeout(() => connection.write(chunk), index * 5)
+      }
+      return
+    }
+
     const send = (body: unknown) => connection.write(`${JSON.stringify(body)}\n`)
 
     if ("result" in replied) {
@@ -97,11 +105,11 @@ export async function standIn(reply: (message: Message) => Reply, path?: string)
 }
 
 /** Waits until `done` holds, at most two seconds. */
-export async function eventually(done: () => boolean): Promise<void> {
+export async function eventually(done: () => boolean, timeout = 2_000): Promise<void> {
   const started = Date.now()
 
   while (!done()) {
-    if (Date.now() - started > 2_000) throw new Error("it never happened")
+    if (Date.now() - started > timeout) throw new Error("it never happened")
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
 }

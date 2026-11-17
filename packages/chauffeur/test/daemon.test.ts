@@ -144,14 +144,31 @@ describe.skipIf(!BIN)("against the real daemon", () => {
       ["daemon", "run", "--models", join(root, "models.json")],
       { env, stdio: "ignore" }
     )
-    await eventually(() => existsSync(socket))
-  })
+    await eventually(() => existsSync(socket), 10_000)
+  }, 15_000)
 
-  afterAll(() => {
-    daemon?.kill()
+  afterAll(async () => {
+    if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
+      const child = daemon
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
+      child.kill()
+      let timer: ReturnType<typeof setTimeout> | undefined
+
+      try {
+        await Promise.race([
+          exited,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("daemon did not exit")), 10_000)
+          })
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
     jev?.stop(true)
     rmSync(root, { recursive: true, force: true })
-  })
+  }, 15_000)
 
   /** `chauffeur navigate` with `request`: its exit status and its last line. */
   const cli = (request: unknown) => {

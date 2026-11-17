@@ -72,9 +72,10 @@ test("a failure, a rejection, no daemon and an abort are each ok: false with why
     })
     expect(await ask(noul("?"), at(busy.socket))).toEqual({
       ok: false,
-      reason: "busy"
+      reason: "busy",
+      message: "busy"
     })
-    expect(await ask(noul("?"), at(missing))).toEqual({
+    expect(await ask(noul("?"), at(missing))).toMatchObject({
       ok: false,
       reason: "unavailable"
     })
@@ -85,6 +86,41 @@ test("a failure, a rejection, no daemon and an abort are each ok: false with why
   } finally {
     await failed.close()
     await busy.close()
+  }
+})
+
+test("ask preserves rejected limit details and refuses an unknown outcome", async () => {
+  const rejected = await standIn(() => ({
+    error: {
+      code: -32602,
+      message: "evidence is too large",
+      data: { reason: "limit_exceeded", limit: "evidence_bytes", max: 262144 }
+    }
+  }))
+  const invalid = await standIn(() => ({
+    result: { verdict: { ask: { answer: { ...ANSWER, outcome: "maybe" } } } }
+  }))
+  const limitedClient = connect({ socket: rejected.socket })
+  const invalidClient = connect({ socket: invalid.socket })
+  const quick = judge({ tier: "system-one" })
+
+  try {
+    expect(await ask(noul("?"), { judge: quick, client: limitedClient })).toEqual({
+      ok: false,
+      reason: "limit_exceeded",
+      message: "evidence is too large",
+      limit: "evidence_bytes",
+      max: 262144
+    })
+    expect(await ask(noul("?"), { judge: quick, client: invalidClient })).toEqual({
+      ok: false,
+      reason: "invalid"
+    })
+  } finally {
+    limitedClient.close()
+    invalidClient.close()
+    await rejected.close()
+    await invalid.close()
   }
 })
 

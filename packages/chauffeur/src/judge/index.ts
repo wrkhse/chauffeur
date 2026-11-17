@@ -1,4 +1,4 @@
-import { connect, navigate, type Chauffeur } from "../client/navigate.ts"
+import { connect, navigate, type Chauffeur } from "../client/navigate.js"
 import {
   NavigateError,
   type Blocks,
@@ -7,7 +7,7 @@ import {
   type Reason,
   type StrategyRequest,
   type Tier
-} from "../client/wire.ts"
+} from "../client/wire.js"
 
 /** A named judge: a tier, the model asked first, and how sure an answer must be. */
 export type Judge = JudgeSpec
@@ -56,7 +56,13 @@ export type Answered<O extends string> = {
 }
 
 /** No answer: the judge failed, or the request was rejected or never reached the daemon. */
-export type Unanswered = { readonly ok: false; readonly reason: Failure | Reason }
+export type Unanswered = {
+  readonly ok: false
+  readonly reason: Failure | Reason
+  readonly message?: string
+  readonly limit?: string
+  readonly max?: number
+}
 
 export type Asked<O extends string> = Answered<O> | Unanswered
 
@@ -104,9 +110,21 @@ export async function ask<O extends string>(
 
     if ("failed" in settled) return { ok: false, reason: settled.failed }
 
+    if (settled.answer.outcome !== "unsure" && !question.outcomes.includes(settled.answer.outcome as O)) {
+      return { ok: false, reason: "invalid" }
+    }
+
     return { ok: true, ...settled.answer } as Answered<O>
   } catch (error) {
-    if (error instanceof NavigateError) return { ok: false, reason: error.reason }
+    if (error instanceof NavigateError) {
+      return {
+        ok: false,
+        reason: error.reason,
+        message: error.message,
+        ...(error.limit === undefined ? {} : { limit: error.limit }),
+        ...(error.max === undefined ? {} : { max: error.max })
+      }
+    }
 
     return {
       ok: false,

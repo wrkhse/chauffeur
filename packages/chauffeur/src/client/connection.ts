@@ -5,10 +5,12 @@ import {
   rejected,
   type NavigateRequest,
   type NavigationEvent
-} from "./wire.ts"
+} from "./wire.js"
 
-/** The longest line read from the daemon; past it the connection is dropped. */
+/** Maximum UTF-16 code units in a line, excluding its newline. */
 const MAX_LINE = 4 * 1024 * 1024
+const MAX_PENDING = 256
+const MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 /** How much longer than the request's deadline the daemon is waited for. */
 const MARGIN_MS = 2_000
@@ -86,6 +88,9 @@ export class Connection {
     }
 
     if (signal?.aborted) return Promise.reject(signal.reason)
+    if (this.#pending.size >= MAX_PENDING) {
+      return Promise.reject(new NavigateError("unavailable", "too many pending calls"))
+    }
 
     const id = this.#next++
     const wait = (request.deadline_ms ?? DEFAULT_DEADLINE_MS) + MARGIN_MS
@@ -115,7 +120,9 @@ export class Connection {
 
       this.#pending.set(id, settle)
       signal?.addEventListener("abort", aborted, { once: true })
-      this.#write({ jsonrpc: "2.0", id, method: "chauffeur.navigate", params })
+      if (!this.#write({ jsonrpc: "2.0", id, method: "chauffeur.navigate", params })) {
+        settle.reject(new NavigateError("unavailable", "socket output buffer is full"))
+      }
     })
   }
 
@@ -132,8 +139,15 @@ export class Connection {
     this.#write({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id } })
   }
 
-  #write(message: unknown): void {
-    this.#socket.write(`${JSON.stringify(message)}\n`)
+  #write(message: unknown): boolean {
+    const line = `${JSON.stringify(message)}\n`
+
+    if (this.#socket.writableLength + Buffer.byteLength(line) > MAX_OUTPUT_BYTES) {
+      return false
+    }
+
+    this.#socket.write(line)
+    return true
   }
 
   #read(data: string): void {
@@ -142,6 +156,11 @@ export class Connection {
     let end = received.indexOf("\n")
 
     while (end !== -1) {
+      if (end - start > MAX_LINE) {
+        this.#socket.destroy()
+        return
+      }
+
       this.#message(received.slice(start, end))
       start = end + 1
       end = received.indexOf("\n", start)
@@ -170,6 +189,11 @@ export class Connection {
     if (message.method === "chauffeur.event") {
       const { id, ...event } = message.params ?? {}
       const pending = typeof id === "number" ? this.#pending.get(id) : undefined
+      if (
+        event.event !== "rule_matched" &&
+        event.event !== "round_ready" &&
+        event.event !== "step_settled"
+      ) return
 
       // A listener that throws ends its own call, never the connection's others.
       try {

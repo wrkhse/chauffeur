@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { connect, navigate, NavigateError, socketPath } from "../src/client/index.ts"
@@ -160,10 +160,8 @@ test("a kept connection carries calls at once, cancels an aborted one by ID, and
 })
 
 test("a kept connection opens again after the daemon restarts", async () => {
-  const socket = join(
-    mkdtempSync(join(tmpdir(), "chauffeur-restart-")),
-    "daemon.sock"
-  )
+  const folder = mkdtempSync(join(tmpdir(), "chauffeur-restart-"))
+  const socket = join(folder, "daemon.sock")
   const first = await standIn(() => ({ result: { intents: [] } }), socket)
   const chauffeur = connect({ socket })
 
@@ -184,6 +182,7 @@ test("a kept connection opens again after the daemon restarts", async () => {
     }
   } finally {
     chauffeur.close()
+    rmSync(folder, { recursive: true, force: true })
   }
 })
 
@@ -240,6 +239,72 @@ test("a call on a closed client is unavailable, and opens nothing", async () => 
       reason: "unavailable"
     })
     await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("an already aborted signal never opens a socket", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+  const client = connect({ socket: daemon.socket })
+  const signal = AbortSignal.abort(new Error("already aborted"))
+
+  try {
+    await expect(navigate(EVENT, { socket: daemon.socket, signal })).rejects.toThrow(
+      "already aborted"
+    )
+    await expect(client.navigate(EVENT, { signal })).rejects.toThrow("already aborted")
+    expect(daemon.open).toBe(0)
+    expect(daemon.messages).toHaveLength(0)
+  } finally {
+    client.close()
+    await daemon.close()
+  }
+})
+
+test("reads lines split across chunks and across a UTF-8 character", async () => {
+  const line = Buffer.from(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { intents: [{ rule: "café", withhold: "event" }] }
+  }) + "\n")
+  const split = line.indexOf(Buffer.from("é")) + 1
+  const daemon = await standIn(() => ({
+    chunks: [line.subarray(0, 8), line.subarray(8, split), line.subarray(split)]
+  }))
+
+  try {
+    expect(await navigate(EVENT, { socket: daemon.socket })).toEqual({
+      intents: [{ rule: "café", withhold: "event" }]
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a complete line over the receive limit closes the connection", async () => {
+  const line = Buffer.from("x".repeat(4 * 1024 * 1024 + 1) + "\n")
+  const daemon = await standIn(() => ({ chunks: [line] }))
+
+  try {
+    await expect(navigate(EVENT, { socket: daemon.socket })).rejects.toMatchObject({
+      reason: "unavailable"
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("unknown event names are not delivered to listeners", async () => {
+  const daemon = await standIn(() => ({
+    events: [{ event: "future_event" }],
+    result: { intents: [] }
+  }))
+  const events: unknown[] = []
+
+  try {
+    await navigate(EVENT, { socket: daemon.socket, onEvent: (event) => events.push(event) })
+    expect(events).toEqual([])
   } finally {
     await daemon.close()
   }

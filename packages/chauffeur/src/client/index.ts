@@ -3,9 +3,9 @@ export {
   connect,
   type Chauffeur,
   type NavigateOptions
-} from "./navigate.ts"
-export type { CallOptions } from "./connection.ts"
-export { socketPath, type Where } from "./socket.ts"
+} from "./navigate.js"
+export type { CallOptions } from "./connection.js"
+export { socketPath, type Where } from "./socket.js"
 export {
   NavigateError,
   PROTOCOL,
@@ -27,4 +27,4 @@ export {
   type StrategyRequest,
   type Tier,
   type Verdict
-} from "./wire.ts"
+} from "./wire.js"

@@ -7,13 +7,13 @@ Asks Chauffeur from any TypeScript program, over the daemon's socket.
 | `/client` | `navigate` on a connection of its own, `connect` for many, and the wire's types |
 | `/judge`  | `judge`, `noul` and `ask`: one question, its result typed from its outcomes     |
 
-| File                       | Holds                                                                  |
-| -------------------------- | ---------------------------------------------------------------------- |
-| `src/client/wire.ts`       | Requests, intents, verdicts, events and `NavigateError`, as the schema |
-| `src/client/socket.ts`     | `socketPath`: the option, `$CHAUFFEUR_SOCKET`, then the runtime folder |
-| `src/client/connection.ts` | `Connection`: calls by ID on one socket, events routed, cancelling     |
-| `src/client/navigate.ts`   | `navigate` and `connect`                                               |
-| `src/judge/index.ts`       | `judge`, `noul`, `ask`                                                 |
+| File                       | Holds                                                                    |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `src/client/wire.ts`       | Requests, intents, verdicts, events and `NavigateError`, as the schema   |
+| `src/client/socket.ts`     | `socketPath`: the option, name, `$CHAUFFEUR_SOCKET`, then runtime folder |
+| `src/client/connection.ts` | `Connection`: calls by ID on one socket, events routed, cancelling       |
+| `src/client/navigate.ts`   | `navigate` and `connect`                                                 |
+| `src/judge/index.ts`       | `judge`, `noul`, `ask`                                                   |
 
 ```ts
 import { navigate } from "@fdcn/chauffeur/client"
@@ -39,9 +39,12 @@ if (done.ok && done.outcome === "yes") {
   or `unavailable` when no daemon answers, it speaks another protocol, or it
   has not answered two seconds past the deadline. An aborted signal rejects
   with the signal's reason, and the daemon cancels the call.
-- `ask` never rejects; anything but an answer is `{ ok: false, reason }`.
+- `ask` never rejects; a rejected request includes its message and any limit
+  and maximum alongside `{ ok: false, reason }`.
 - `connect()` keeps one connection, opened again on the next call after the
-  daemon restarts; `close()` ends it.
+  daemon restarts; call `close()` to end it and allow the process to exit.
+- A connection allows 256 pending calls and 4 MiB of buffered output. It
+  drops a received line over 4,194,304 UTF-16 code units, excluding its newline.
 
 ```sh
 bun install

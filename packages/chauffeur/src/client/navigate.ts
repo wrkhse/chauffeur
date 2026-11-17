@@ -1,6 +1,6 @@
-import { Connection, type CallOptions } from "./connection.ts"
-import { socketPath, type Where } from "./socket.ts"
-import { NavigateError, type NavigateRequest, type Navigated } from "./wire.ts"
+import { Connection, type CallOptions } from "./connection.js"
+import { socketPath, type Where } from "./socket.js"
+import { NavigateError, type NavigateRequest, type Navigated } from "./wire.js"
 
 /** How one navigation is sent: its signal, its events, and where the daemon is. */
 export type NavigateOptions = CallOptions & Where
@@ -14,6 +14,8 @@ export async function navigate<R extends NavigateRequest>(
   request: R,
   options: NavigateOptions = {}
 ): Promise<Navigated<R>> {
+  if (options.signal?.aborted) throw options.signal.reason
+
   const connection = await Connection.open(socketPath(options))
 
   try {
@@ -66,6 +68,7 @@ export function connect(where: Where = {}): Chauffeur {
   return {
     async navigate(request, options = {}) {
       if (closed) throw new NavigateError("unavailable", "the client is closed")
+      if (options.signal?.aborted) throw options.signal.reason
 
       return (await (await connection()).call(request, options)) as never
     },
