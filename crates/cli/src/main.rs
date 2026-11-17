@@ -7,11 +7,23 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use chauffeur_daemon::{DaemonError, Paths};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde_json::{Value, json};
+
+/// How long a call with no deadline of its own waits for its reply.
+const WAIT: Duration = Duration::from_secs(5);
+/// How long past its deadline a call waits for the daemon to answer.
+const GRACE: Duration = Duration::from_secs(2);
+/// The most of a reply line the CLI reads; a longer one is refused.
+const MAX_REPLY: usize = 4 * 1024 * 1024;
+/// The longest deadline the daemon accepts, the same as
+/// `chauffeur_protocol::Limit::Deadline`; the CLI does not depend on the
+/// protocol crate, so the bound is repeated here.
+const MAX_DEADLINE_MS: u64 = 30_000;
 
 #[derive(Parser)]
 #[command(version, about = "A judgment engine for coding agents")]
@@ -93,7 +105,7 @@ fn main() -> Result<ExitCode> {
         },
         Command::Daemon {
             command: Daemon::Status,
-        } => print(&call(&name, "chauffeur.status", &Value::Null)?),
+        } => print(&call(&name, "chauffeur.status", &Value::Null, WAIT)?),
         Command::Version => print_line(
             &mut io::stdout().lock(),
             &format!("{name} {}", env!("CARGO_PKG_VERSION")),
@@ -103,10 +115,14 @@ fn main() -> Result<ExitCode> {
             std::io::stdin().read_to_string(&mut text)?;
             let event: Value =
                 serde_json::from_str(&text).wrap_err("the event on stdin is not JSON")?;
+            let deadline = Duration::from_millis(deadline_ms.min(MAX_DEADLINE_MS));
+            let wait = deadline.saturating_add(GRACE);
+
             print(&call(
                 &name,
                 "chauffeur.emit",
                 &json!({ "event": event, "deadline_ms": deadline_ms }),
+                wait,
             )?)
         }
         Command::Audit {
@@ -150,8 +166,9 @@ fn print_line(out: &mut impl Write, text: &str) -> Result<ExitCode> {
     }
 }
 
-/// One JSON-RPC call to the daemon, returning its result.
-fn call(name: &str, method: &str, params: &Value) -> Result<Value> {
+/// One JSON-RPC call to the daemon, returning its result. `wait` bounds the
+/// answer, so no call waits on a daemon that has stopped answering.
+fn call(name: &str, method: &str, params: &Value, wait: Duration) -> Result<Value> {
     let socket = Paths::from_env(name, None).socket;
     let mut stream = UnixStream::connect(&socket)
         .wrap_err_with(|| format!("no daemon answers on {}", socket.display()))?;
@@ -160,9 +177,53 @@ fn call(name: &str, method: &str, params: &Value) -> Result<Value> {
         "{}",
         json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
     )?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
-    let reply: Value = serde_json::from_str(&line).wrap_err("the daemon's reply is not JSON")?;
+    answer(stream, wait)
+}
+
+/// The daemon's one-line answer to `stream`, read within `wait` end to end:
+/// a daemon that trickles bytes cannot extend the wait.
+fn answer(stream: UnixStream, wait: Duration) -> Result<Value> {
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    let until = Instant::now().checked_add(wait);
+
+    loop {
+        let left = until.map_or(Duration::ZERO, |until| {
+            until.saturating_duration_since(Instant::now())
+        });
+        if left.is_zero() {
+            return Err(eyre!("the daemon did not answer in time"));
+        }
+        bound(&reader, left)?;
+
+        let (count, ended) = match reader.fill_buf() {
+            Err(error) if wait_over(&error) => {
+                return Err(eyre!("the daemon did not answer in time"));
+            }
+            Err(error) => return Err(error).wrap_err("cannot read the daemon's answer"),
+            Ok([]) => break,
+            Ok(bytes) => {
+                let (count, ended) = bytes
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or((bytes.len(), false), |position| {
+                        (position.saturating_add(1), true)
+                    });
+                if line.len().saturating_add(count) > MAX_REPLY {
+                    return Err(eyre!("the daemon's answer is over 4 MiB"));
+                }
+                line.extend_from_slice(bytes.get(..count).unwrap_or_default());
+
+                (count, ended)
+            }
+        };
+        reader.consume(count);
+        if ended {
+            break;
+        }
+    }
+
+    let reply: Value = serde_json::from_slice(&line).wrap_err("the daemon's reply is not JSON")?;
     if let Some(error) = reply.get("error") {
         let message = error.get("message").and_then(Value::as_str);
         return Err(eyre!(
@@ -173,13 +234,38 @@ fn call(name: &str, method: &str, params: &Value) -> Result<Value> {
     Ok(reply.get("result").cloned().unwrap_or(Value::Null))
 }
 
+/// Bounds the next read by `left`.
+fn bound(reader: &BufReader<UnixStream>, left: Duration) -> Result<()> {
+    match reader.get_ref().set_read_timeout(Some(left)) {
+        // macOS refuses a timeout on a socket whose peer has closed (EINVAL).
+        // Nothing more can arrive then: the next read returns what is
+        // buffered and then end of file, so the wait still ends.
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        result => result.wrap_err("cannot bound the wait for the daemon's answer"),
+    }
+}
+
+/// Whether `error` is a read that ran past its timeout.
+fn wait_over(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::ExitCode;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use super::{daemon_paths, print_line};
+    use color_eyre::eyre::Result;
+    use serde_json::Value;
+
+    use super::{answer, daemon_paths, print_line};
 
     /// A writer whose every write fails with `kind`.
     struct Failing(io::ErrorKind);
@@ -226,5 +312,107 @@ mod tests {
         let paths = daemon_paths("chauffeur", None, Some(models.clone()));
 
         assert_eq!(paths.models, Some(models));
+    }
+
+    /// A daemon that never answers must not hold the command: the wait ends
+    /// it, with the same failure a refused call gets.
+    #[test]
+    fn an_answer_that_never_comes_is_refused_at_the_wait() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+
+        let error = answer(ours, Duration::from_millis(100)).unwrap_err();
+
+        assert_eq!(error.to_string(), "the daemon did not answer in time");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?} waiting",
+            started.elapsed()
+        );
+    }
+
+    /// A reply line of `size` bytes, its newline included, that parses as a
+    /// JSON-RPC result with a `pad` of the padding, which it returns too.
+    fn reply_of(size: usize) -> (Vec<u8>, usize) {
+        const HEAD: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"pad":""#;
+        const TAIL: &str = r#""}}"#;
+        let padding = size
+            .saturating_sub(HEAD.len())
+            .saturating_sub(TAIL.len())
+            .saturating_sub(1);
+        let mut line = Vec::with_capacity(size);
+        line.extend_from_slice(HEAD.as_bytes());
+        line.extend(std::iter::repeat_n(b'a', padding));
+        line.extend_from_slice(TAIL.as_bytes());
+        line.push(b'\n');
+        assert_eq!(line.len(), size, "the reply line is the size asked for");
+
+        (line, padding)
+    }
+
+    /// `answer` over a pair whose peer writes `line` and closes. The pair's
+    /// buffer is small, so the peer needs its own thread to write a long one.
+    fn answered(line: Vec<u8>, wait: Duration) -> Result<Value> {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            let _ = peer.write_all(&line);
+        });
+        let answer = answer(ours, wait);
+        writer.join().unwrap();
+
+        answer
+    }
+
+    /// A daemon that trickles bytes without ever finishing its line cannot
+    /// extend the wait: the whole reply is bounded, not each read.
+    #[test]
+    fn a_trickled_answer_ends_at_the_wait() {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            for _ in 0..100 {
+                if peer.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+
+        let error = answer(ours, Duration::from_millis(100)).unwrap_err();
+        writer.join().unwrap();
+
+        assert_eq!(error.to_string(), "the daemon did not answer in time");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?} waiting",
+            started.elapsed()
+        );
+    }
+
+    /// The last byte the bound admits is accepted, not refused: a line of
+    /// exactly 4 MiB, its newline included, is read whole and parsed.
+    #[test]
+    fn a_reply_line_of_exactly_four_mebibytes_is_accepted() {
+        // The CLI's own 4 MiB, written out rather than read from `MAX_REPLY`:
+        // the test must hold the boundary still while a mutant moves the
+        // constant under it.
+        let size = 4 * 1024 * 1024;
+        let (line, padding) = reply_of(size);
+
+        let reply = answered(line, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(reply["pad"].as_str().map(str::len), Some(padding));
+    }
+
+    /// One byte more is refused, however valid the JSON behind it.
+    #[test]
+    fn a_reply_line_one_byte_over_four_mebibytes_is_refused() {
+        // As above: the test owns its 4 MiB, not `MAX_REPLY`.
+        let size = 4 * 1024 * 1024 + 1;
+        let (line, _) = reply_of(size);
+
+        let error = answered(line, Duration::from_secs(5)).unwrap_err();
+
+        assert_eq!(error.to_string(), "the daemon's answer is over 4 MiB");
     }
 }

@@ -104,20 +104,23 @@ fn accept_next<S>(mut accept: impl FnMut() -> io::Result<S>, mut log: impl FnMut
 }
 
 fn busy(mut stream: UnixStream) {
-    let mut error = Rejection::Busy.to_error();
-    if let Some(fields) = error.as_object_mut() {
-        fields.insert(
-            "message".into(),
-            json!(format!(
-                "the daemon is busy: it serves {MAX_CONNECTIONS} connections already"
-            )),
-        );
-    }
+    let error = busy_error(&format!(
+        "the daemon is busy: it serves {MAX_CONNECTIONS} connections already"
+    ));
     let reply = json!({ "jsonrpc": "2.0", "id": null, "error": error });
 
     if stream.set_write_timeout(Some(BUSY_WRITE)).is_ok() {
         let _ = writeln!(stream, "{reply}");
     }
+}
+
+/// Busy's error, with `message` in place of the one it carries.
+fn busy_error(message: &str) -> Value {
+    let mut error = Rejection::Busy.to_error();
+    if let Some(fields) = error.as_object_mut() {
+        fields.insert("message".into(), json!(message));
+    }
+    error
 }
 
 /// Reads and admits on this thread; each admitted call gets a fallible
@@ -192,12 +195,10 @@ fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
             if let Err(error) = started {
                 calls.close(&id);
                 if reply {
-                    let error = rpc::error(
-                        &id,
-                        rpc::SERVER_ERROR,
-                        &format!("cannot start call thread: {error}"),
-                    );
-                    let _ = wire.send(&error);
+                    let error = busy_error(&format!(
+                        "the daemon is busy: cannot start a call thread: {error}"
+                    ));
+                    let _ = wire.send(&json!({ "jsonrpc": "2.0", "id": &id, "error": error }));
                 }
             }
         }
@@ -425,7 +426,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{ACCEPT_RETRY, accept_next, serve_connection};
+    use super::{ACCEPT_RETRY, accept_next, busy_error, serve_connection};
     use crate::Paths;
     use crate::route::Router;
 
@@ -532,6 +533,21 @@ mod tests {
             }
         });
         endpoint
+    }
+
+    /// A daemon with no capacity, whether for another connection or for a
+    /// call thread, says it is busy and why.
+    #[test]
+    fn a_busy_error_names_the_reason_and_the_message() {
+        let error =
+            busy_error("the daemon is busy: cannot start a call thread: too many open files");
+
+        assert_eq!(error["code"], -32_000);
+        assert_eq!(error["data"]["reason"], "busy");
+        assert_eq!(
+            error["message"],
+            "the daemon is busy: cannot start a call thread: too many open files"
+        );
     }
 
     /// With nothing sent, the connection ends at the idle timeout, so a

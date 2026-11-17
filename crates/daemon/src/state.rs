@@ -149,15 +149,19 @@ fn load_projects(path: &Path) -> Result<BTreeSet<PathBuf>, String> {
         return Ok(BTreeSet::new());
     }
 
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(path)
         .map_err(|error| error.to_string())?
         .take(MAX_PROJECTS_BYTES.saturating_add(1))
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_PROJECTS_BYTES {
+    // Counted before it is read as text: a file cut inside a multi-byte
+    // character is over the limit, not a broken character.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PROJECTS_BYTES {
         return Err("the file is over 64 KiB".to_owned());
     }
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("the file is not UTF-8: {error}"))?;
 
     let listed: Vec<String> = serde_json::from_str(&text)
         .map_err(|error| format!("it is not a JSON array of paths: {error}"))?;
@@ -363,6 +367,38 @@ mod tests {
             Ok(BTreeSet::from([PathBuf::from("/a")])),
             "a list at the limit should load"
         );
+    }
+
+    /// A file cut inside a multi-byte character is refused for its size:
+    /// the bytes are counted before they are read as UTF-8, so a cut
+    /// character cannot be reported as broken text first.
+    #[test]
+    fn a_projects_file_over_64_kib_cut_inside_a_character_is_refused_for_its_size() {
+        let over = usize::try_from(MAX_PROJECTS_BYTES.saturating_add(1)).unwrap_or(0);
+        let mut bytes = format!("[\"/{}\"]", "€".repeat(30_000)).into_bytes();
+        bytes.truncate(over);
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "the cut lands inside a three-byte character"
+        );
+        let path = temp_file("projects-utf8-cut", &bytes);
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(refused.err(), Some("the file is over 64 KiB".to_owned()));
+    }
+
+    /// A file within the limit that is not UTF-8 says so.
+    #[test]
+    fn a_projects_file_that_is_not_utf8_is_refused_as_such() {
+        let path = temp_file("projects-not-utf8", b"[\"/\xff\"]");
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        let message = refused.err().unwrap_or_default();
+        assert!(message.starts_with("the file is not UTF-8: "), "{message}");
     }
 
     /// 257 paths are one more than the list may hold.
