@@ -20,13 +20,18 @@ pub enum Limit {
     Judges,
     /// Named asks in one strategy.
     Asks,
-    /// Bytes in one question's instructions, or one outcome's description.
+    /// Bytes in any one text a strategy names: instructions, a description,
+    /// an outcome value, a step ID, a judge or ask name, an evidence name, or
+    /// a model.
     TextBytes,
+    /// Bytes in a request's `project` path.
+    ProjectBytes,
 }
 
 impl Limit {
-    /// Every limit, in the order the docs list them.
-    pub const ALL: [Self; 9] = [
+    /// Every limit a request or strategy is checked against, in the order the
+    /// docs list them.
+    pub const ALL: [Self; 10] = [
         Self::Steps,
         Self::Outcomes,
         Self::EvidenceBlocks,
@@ -36,6 +41,7 @@ impl Limit {
         Self::Judges,
         Self::Asks,
         Self::TextBytes,
+        Self::ProjectBytes,
     ];
 
     /// The limit's wire name, such as `evidence_bytes`.
@@ -51,6 +57,7 @@ impl Limit {
             Self::Judges => "judges",
             Self::Asks => "asks",
             Self::TextBytes => "text_bytes",
+            Self::ProjectBytes => "project_bytes",
         }
     }
 
@@ -62,6 +69,7 @@ impl Limit {
             Self::Outcomes | Self::EvidenceBlocks | Self::Candidates => 64,
             Self::EvidenceBytes => 256 * 1024,
             Self::TextBytes => 16 * 1024,
+            Self::ProjectBytes => 4096,
             Self::Deadline => 30_000,
         }
     }
@@ -100,7 +108,8 @@ impl fmt::Display for Exceeded {
             Limit::Deadline => write!(f, "deadline_ms {count} is over {max}"),
             Limit::Judges => write!(f, "the strategy names {count} judges, over {max}"),
             Limit::Asks => write!(f, "the strategy names {count} asks, over {max}"),
-            Limit::TextBytes => write!(f, "a question's text is over {} KiB", max / 1024),
+            Limit::TextBytes => write!(f, "a strategy's text is over {} KiB", max / 1024),
+            Limit::ProjectBytes => write!(f, "`project` is over {max} bytes"),
         }
     }
 }

@@ -74,6 +74,39 @@
       "expect": "strategy"
     },
     {
+      "name": "an inline System Two judge for a project",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "project": "/Users/me/src/app",
+        "judges": {
+          "deep": {
+            "tier": "system-two"
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "deep",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "expect": "strategy"
+    },
+    {
       "name": "an inline step naming a tier",
       "params": {
         "protocol": 1,
@@ -1461,6 +1494,21 @@
       "expect": "on"
     },
     {
+      "name": "an event for a project",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "project": "/Users/me/src/app",
+        "evidence": {
+          "event": "codecov[bot] commented on #42: Coverage 81.2% (+0.3%)",
+          "monitor": "PR #42 in wrkhse/chauffeur",
+          "thread": "PR #42: feat(cli): add navigate"
+        }
+      },
+      "expect": "on"
+    },
+    {
       "name": "not an object",
       "params": [
         1,
@@ -1687,6 +1735,36 @@
       }
     },
     {
+      "name": "a relative project",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "project": "src/app",
+        "evidence": {
+          "event": "CI failed"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "a project that is not text",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "project": 42,
+        "evidence": {
+          "event": "CI failed"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
       "name": "a deadline of 0",
       "params": {
         "protocol": 1,
@@ -1696,6 +1774,20 @@
           "event": "codecov[bot] commented on #42: Coverage 81.2% (+0.3%)",
           "monitor": "PR #42 in wrkhse/chauffeur",
           "thread": "PR #42: feat(cli): add navigate"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "a null deadline",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": null,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "CI failed"
         }
       },
       "reject": {
@@ -1718,6 +1810,29 @@
         "reason": "limit_exceeded",
         "limit": "deadline_ms"
       }
+    },
+    {
+      "name": "a project over 4096 bytes",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "project": "",
+        "evidence": {
+          "event": "CI failed"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "project_bytes"
+      },
+      "fill": [
+        {
+          "at": "/project",
+          "text": "/",
+          "times": 4097
+        }
+      ]
     },
     {
       "name": "65 evidence blocks",
@@ -3417,6 +3532,83 @@
       "schema": "accepts"
     },
     {
+      "name": "an outcome value over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "strategy": [
+          {
+            "id": "pick",
+            "judge": "system-one",
+            "ask": {
+              "outcomes": [
+                "",
+                "no"
+              ],
+              "instructions": "Which?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/ask/outcomes/0",
+          "text": "x",
+          "times": 16385
+        }
+      ]
+    },
+    {
+      "name": "a step id over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/id",
+          "text": "s",
+          "times": 16385
+        }
+      ]
+    },
+    {
       "name": "one outcome",
       "params": {
         "protocol": 1,
@@ -3731,6 +3923,71 @@
       },
       "reject": {
         "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "an inline judge of System Two without a project",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "deep": {
+            "tier": "system-two"
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "deep",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "judge_unavailable"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "an inline step naming System Two without a project",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "system-two",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "judge_unavailable"
       },
       "schema": "accepts"
     },

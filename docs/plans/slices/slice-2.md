@@ -7,9 +7,11 @@ next.
 **You can:** let sourcefed ask Chauffeur before it queues each event, so
 OpenCode, Pi, MCP and the CLI receive the same filtered stream, as in
 [sourcefed: one triage for every host](../pluggability.md#sourcefed-one-triage-for-every-host).
-sourcefed's daemon navigates `sourcefed.event`, its installer adds
-`sourcefed/triage` with the System One screen, and its OpenCode adapter's
-`chauffeur.gate` call goes.
+sourcefed's daemon navigates `sourcefed.event` once a v2 daemon answers its
+handshake, and marks the events v2 triaged; its installer adds
+`sourcefed/triage` with the System One screen, and its OpenCode adapter keeps
+calling v1's `chauffeur.gate` for the events that are not marked until
+cutover.
 
 A caller sends an event or an inline strategy, with its evidence and a
 deadline, and receives the events and the intents or verdict. It sends data,
@@ -69,14 +71,32 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   one it does not accept with `unsupported_protocol` and the versions it
   accepts, and each binding reports it as `unavailable`. Any other value is
   `invalid`.
-- **Limits**, checked before admission: a request line of 1 MiB; 32 steps
-  per strategy, counting each copy `for_each` makes; 16 `after` entries per
-  step; 32 judges and 32 asks per strategy; 64 outcomes per question, and 64
-  bars in a per-outcome confidence; 64 evidence blocks, 64 candidates, and 64
-  blocks named by one ask; 256 KiB of evidence and candidates together, names
-  included; 16 KiB in one question's instructions or one outcome's
-  description; a 30 s deadline. Each rejection names its limit. The `after`
-  and `for_each` limits are checked with those fields, in slices 3 and 4.
+- **Project:** a request may name the `project` it works in, as the absolute
+  path of at most 4096 bytes, the `project_bytes` limit; a relative path, or
+  one that is not text, is `invalid`. The daemon then reads that project's
+  `.chauffeur/rules/` too, bounded and cached, and applies the project's
+  System Two allowance.
+- **Inline trust:** an inline strategy carries its caller's user-level trust,
+  so a judge that names a `model`, and a `person` judge, are allowed. Inline
+  System Two, a judge whose tier is `system-two` or a step naming
+  `system-two`, runs only when the request names a `project` that the
+  user-level `projects.json` in Chauffeur's config folder lists. That file is
+  a JSON list of absolute project paths, empty by default. Without a
+  `project` the request is refused at parse with `judge_unavailable`; a
+  project the list does not name is refused by the daemon with
+  `judge_unavailable` too. System Two stays unconfigured until slice 11.
+- **Nulls:** a JSON null anywhere in `params` is `invalid`; a field with no
+  value is left out.
+- **Limits**, checked before admission: a request line of 1 MiB; a `project`
+  of at most 4096 bytes; 32 steps per strategy, counting each copy `for_each`
+  makes; 16 `after` entries per step; 32 judges and 32 asks per strategy; 64
+  outcomes per question, and 64 bars in a per-outcome confidence; 64 evidence
+  blocks, 64 candidates, and 64 blocks named by one ask; 256 KiB of evidence
+  and candidates together, names included; 16 KiB in each text a strategy
+  names: instructions, descriptions, outcome values, step IDs, judge and ask
+  names, evidence names, and a judge's `model`; a 30 s deadline. Each
+  rejection names its limit. The `after` and `for_each` limits are checked
+  with those fields, in slices 3 and 4.
 
 ## What it builds
 
@@ -165,10 +185,10 @@ impl From<RuleError> for Rejection {}
 ```
 
 Rule files are held to the same limits as requests: a strategy of 33 steps or
-33 judges, or an ask of 65 outcomes or 16 KiB of instructions, used or not,
-is refused when it loads, as `RuleError::Limit`; a blank step ID is
+33 judges, or an ask of 65 outcomes or a text over 16 KiB, used or not, is
+refused when it loads, as `RuleError::Limit`; a blank step ID is
 `RuleError::BlankStep`. A described outcome refuses fields beside `value`
-and `description`.
+and `description`. A rule file over 1 MiB is refused with its path.
 
 ```rust
 pub enum Limit {
@@ -181,10 +201,11 @@ pub enum Limit {
     Judges,
     Asks,
     TextBytes,
+    ProjectBytes,
 }
 
 impl Limit {
-    pub const ALL: [Self; 9];
+    pub const ALL: [Self; 10];
     pub const fn name(self) -> &'static str;
     pub const fn max(self) -> u64;
     pub const fn check(self, count: u64) -> Result<(), Exceeded>;
@@ -264,16 +285,18 @@ limit, carries `"schema": "accepts"`.
 Verified by:
 
 - Round-trip and rejection cases for every limit and malformed field,
-  including duplicate outcomes, reserved outcome names and a per-outcome
-  confidence that misses an outcome: `crates/protocol/tests/navigate.rs`
-  replays the 62 fixture cases and checks that every limit has one, at
-  and over it, bytes counted as UTF-8 across evidence and candidates. Each
-  accepted case keeps its deadline, evidence, candidates, step IDs and
-  judges.
+  including a JSON null in `params`, duplicate outcomes, reserved outcome
+  names and a per-outcome confidence that misses an outcome:
+  `crates/protocol/tests/navigate.rs` replays the fixture cases and checks
+  that every limit has one, at and over it, that bytes count as UTF-8 across
+  evidence, candidates and every named text, and that a relative `project` is
+  refused. Each accepted case keeps its deadline, evidence, candidates, step
+  IDs and judges.
 - The same test file checks every case against `schema/navigate.json`
   with the `jsonschema` crate: accepted cases, and rejected ones tagged
   `"schema": "accepts"`, fit it; every other rejected case does not.
-- Every shipped rule file loads within the limits.
+- Every shipped rule file loads within the limits, and one over 1 MiB is
+  refused with its path.
 
 ### Admission and running
 
@@ -304,10 +327,15 @@ Verified by:
 
 ### The daemon's socket and rule sources
 
-Several calls per connection, `$/cancelRequest`, and cancelling on close;
-`--models FILE` for tests. The integration and project rule sources, refusing
-System Two in a project rule the user has not allowed and any model or
-placeholder entry from a project. Matching rules run concurrently.
+Several calls per connection, at most 16 open calls and at most 4 of them
+`chauffeur.navigate`; a fifth navigation is refused at once with `busy`,
+which keeps the integration share free for other connections.
+`$/cancelRequest`, and a close, cancels what the connection carried.
+`--models FILE` for tests. The integration and project rule sources: a
+request's `project` adds that project's `.chauffeur/rules/`, read bounded
+and cached, and the project may run System Two only when the user-level
+`projects.json` lists it. A project rule may not name a `model` or a
+placeholder, and such a rule is refused. Matching rules run concurrently.
 
 Files: `crates/daemon/src/socket.rs`, `rules.rs`
 
@@ -325,9 +353,16 @@ distribution/rules/                     shipped
 
 Verified by:
 
-- Each of the four sources loads.
-- A project rule naming System Two, and a model or placeholder entry in a
-  project's `.chauffeur/`, are refused.
+- Each of the four sources loads; a request's `project` adds its rules, read
+  within bounds and cached.
+- A fifth open navigation on one connection is `busy` while another
+  connection is still served.
+- A project rule naming System Two in a project that `projects.json` does
+  not list, and a `model` or placeholder entry in a project's
+  `.chauffeur/`, are refused.
+- An inline strategy naming `system-two` is `judge_unavailable` without a
+  `project` at parse, and from the daemon when the list does not name the
+  project.
 - Two matching rules both return their intents; a rule that misses the
   deadline drops only its own intents.
 
@@ -372,8 +407,15 @@ Verified by:
 
 ### sourcefed
 
-Its daemon navigates before queuing each event, its installer adds
-`sourcefed/triage`, and its OpenCode adapter's `chauffeur.gate` call goes.
+Its daemon asks v2 only when a v2 daemon answers its `chauffeur.status`
+handshake, looking for the socket of `chauffeur` first and then
+`chauffeur-next`. Events that v2 triaged are marked triaged; the OpenCode
+bridge keeps calling v1's `chauffeur.gate` for events that are not marked,
+and that call is removed at slice 13 (cutover). Its installer puts `sourcefed/triage`
+under the v2 installation's `rules/sourcefed/`, never in v1's
+`~/.config/chauffeur/rules`.
+
+Before queuing each event it navigates `sourcefed.event`:
 
 Files, in sourcefed: its daemon, its installer, `adapters/opencode/bridge.ts`
 
@@ -387,10 +429,18 @@ const { intents } = await chauffeur.navigate({
 if (!intents.some((intent) => intent.withhold === "event")) queue(target, event)
 ```
 
-Verified by the end-to-end checks below.
+The `thread` evidence is the event's subject behind its monitor label, such
+as `PR #42 wrkhse/chauffeur: feat(cli): add navigate`, and empty when absent,
+with no lookup of earlier history.
+
+Verified by the end-to-end checks below. The sourcefed side is tracked in
+wrkhse/sourcefed#27.
 
 ## End to end
 
 - sourcefed, for real: v1's 12 labelled events give the same deliveries;
   events reaching OpenCode, Pi and the CLI are filtered alike; with Chauffeur
   stopped, sourcefed delivers.
+- With only v1's daemon running, sourcefed's `chauffeur.status` handshake
+  goes unanswered, no event is marked triaged, and the OpenCode bridge's
+  `chauffeur.gate` filters as before.

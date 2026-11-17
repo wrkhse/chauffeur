@@ -1,0 +1,129 @@
+{
+  "recorded_at": "2026-11-17T08:11:30Z",
+  "daemon": {
+    "version": "0.1.0"
+  },
+  "adapter": "main's adapters/opencode/src/gate.ts: an integration_event signal with deadline_ms 3000; deliver unless a gate effect says deliver:false; an error or a late reply delivers",
+  "replies": {
+    "bot-coverage": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 283
+    },
+    "approval": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 302
+    },
+    "status-churn": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 314
+    },
+    "assignee-churn": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 305
+    },
+    "thanks": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 372
+    },
+    "empty-message": {
+      "deliver": false,
+      "reply": {
+        "effects": [
+          {
+            "agent_id": "slice-2-triage-replay",
+            "deliver": false,
+            "type": "gate"
+          }
+        ]
+      },
+      "elapsed_ms": 42
+    },
+    "ci-failure": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 296
+    },
+    "requested-changes": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 353
+    },
+    "direct-question": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 363
+    },
+    "merge-conflict": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 327
+    },
+    "merged-followup": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 364
+    },
+    "new-fact": {
+      "deliver": true,
+      "reply": {
+        "effects": []
+      },
+      "elapsed_ms": 341
+    }
+  }
+}

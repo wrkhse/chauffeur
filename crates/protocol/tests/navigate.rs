@@ -46,13 +46,18 @@ fn cases() -> Vec<Value> {
     cases
 }
 
-/// What an accepted request must keep: its deadline, its evidence and
-/// candidates, and for a strategy its step IDs and judges.
+/// What an accepted request must keep: its deadline, its project, its
+/// evidence and candidates, and for a strategy its step IDs and judges.
 fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
     let deadline = params["deadline_ms"].as_u64().unwrap_or(3_000);
     assert_eq!(
         navigate.deadline().as_millis(),
         u128::from(deadline),
+        "{name}"
+    );
+    assert_eq!(
+        navigate.project(),
+        params["project"].as_str().map(std::path::Path::new),
         "{name}"
     );
     let blocks = |field: &str| -> Vec<(String, String)> {
@@ -96,7 +101,7 @@ fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 62);
+    assert_eq!(cases.len(), 72);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -178,6 +183,58 @@ fn a_rejection_names_its_reason_and_limit() {
     let protocol = Navigate::parse(&json!({ "protocol": 9, "on": "x" })).unwrap_err();
     assert_eq!(protocol.to_error()["data"]["accepted"], json!([1]));
     assert_eq!(Rejection::Busy.to_error()["code"], -32000);
+}
+
+#[test]
+fn a_null_is_named_by_its_pointer() {
+    let inline = |judges: Value, outcomes: Value| {
+        json!({
+            "protocol": 1,
+            "judges": judges,
+            "strategy": [{
+                "id": "done", "judge": "quick",
+                "ask": { "outcomes": outcomes, "evidence": ["log"],
+                         "instructions": "Is the migration finished?" }
+            }],
+            "evidence": { "log": "migrated 42 of 42 tables" }
+        })
+    };
+
+    let cases = [
+        (
+            json!({ "protocol": 1, "on": "x", "deadline_ms": null }),
+            "`/deadline_ms`",
+        ),
+        (
+            inline(
+                json!({ "quick": { "tier": "system-one", "confidence": 0.7, "model": null } }),
+                json!(["yes", "no"]),
+            ),
+            "`/judges/quick/model`",
+        ),
+        (
+            inline(
+                json!({ "quick": { "tier": "system-one", "confidence": 0.7 } }),
+                json!(["yes", null]),
+            ),
+            "`/strategy/0/ask/outcomes/1`",
+        ),
+        (
+            json!({ "protocol": 1, "on": "x", "evidence": { "a/b~c": null } }),
+            "`/evidence/a~1b~0c`",
+        ),
+    ];
+
+    for (params, pointer) in cases {
+        let rejection = Navigate::parse(&params).unwrap_err();
+
+        assert_eq!(
+            rejection.to_error()["data"]["reason"],
+            json!("invalid"),
+            "{pointer}"
+        );
+        assert!(rejection.to_string().contains(pointer), "{rejection}");
+    }
 }
 
 #[test]

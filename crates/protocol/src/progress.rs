@@ -1,7 +1,7 @@
 //! What a navigation reports as it runs, and the verdict it ends in, as they
 //! go on the wire.
 
-use chauffeur_core::{Event as RunEvent, Outcome, Verdict};
+use chauffeur_core::{Event as RunEvent, Failure, Outcome, Verdict};
 use chauffeur_judges::Answer;
 use serde_json::{Map, Value, json};
 
@@ -46,12 +46,16 @@ pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>
 pub fn settled(outcome: &Outcome<Answer>) -> Value {
     match outcome {
         Outcome::Value(answer) => {
+            // A level that is not a number is reported as an invalid answer
+            // rather than a null.
+            if !answer.level().is_finite() {
+                return json!({ "failed": Failure::Invalid.name() });
+            }
+
             let p: Map<String, Value> = answer
                 .p()
                 .map(|(value, p)| (value.to_owned(), json!(p.to_f64())))
                 .collect();
-            // Probabilities are never all zero, so the level is a number.
-            debug_assert!(answer.level().is_finite(), "a level that is not a number");
             let level = (answer.level() * 1000.0).round() / 1000.0;
             json!({ "answer": {
                 "outcome": answer.outcome().to_string(),

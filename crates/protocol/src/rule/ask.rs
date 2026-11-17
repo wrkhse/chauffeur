@@ -7,16 +7,27 @@ use super::file::{AskFile, AskRef, LabelFile, StepFile};
 use crate::limits::{Exceeded, Limit, count};
 
 /// Checks an ask's sizes before anything else reads it: its outcomes, the
-/// evidence it names, and the bytes of its instructions and descriptions.
+/// evidence it names, and the bytes of its instructions, outcome values and
+/// descriptions.
 pub(super) fn check_bounds(ask: &AskFile) -> Result<(), Exceeded> {
     Limit::Outcomes.check(count(ask.outcomes.len()))?;
     Limit::EvidenceBlocks.check(count(ask.evidence.len()))?;
     Limit::TextBytes.check(count(ask.instructions.len()))?;
+
     for label in &ask.outcomes {
-        if let LabelFile::Described(described) = label {
-            Limit::TextBytes.check(count(described.description.len()))?;
+        match label {
+            LabelFile::Value(value) => Limit::TextBytes.check(count(value.len()))?,
+            LabelFile::Described(described) => {
+                Limit::TextBytes.check(count(described.value.len()))?;
+                Limit::TextBytes.check(count(described.description.len()))?;
+            }
         }
     }
+
+    for name in &ask.evidence {
+        Limit::TextBytes.check(count(name.len()))?;
+    }
+
     Ok(())
 }
 

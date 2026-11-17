@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use chauffeur_core::{Plan, Step};
-use chauffeur_judges::{ConfidenceError, Question};
+use chauffeur_judges::{ConfidenceError, Question, Tier};
 
 use super::ask;
 use super::error::RuleError;
 use super::file::{AskFile, AskRef, JudgeFile, StepFile};
 use super::judge::{self, JudgeSpec};
-use crate::limits::{Limit, count};
+use crate::limits::{Exceeded, Limit, count};
 
 /// A strategy: the judges its steps name, and its steps as a core plan.
 /// A rule holds one, and a request may send one inline.
@@ -33,6 +33,7 @@ impl Strategy {
         Limit::Steps.check(count(strategy.len())).map_err(limit)?;
         Limit::Judges.check(count(judges.len())).map_err(limit)?;
         Limit::Asks.check(count(asks.len())).map_err(limit)?;
+        check_names(&judges, asks, &strategy).map_err(limit)?;
         // Every ask, used or not, so an unused one cannot carry unbounded text.
         let inline = strategy.iter().filter_map(|step| match &step.ask {
             AskRef::Inline(ask) => Some(ask),
@@ -79,9 +80,43 @@ impl Strategy {
         &self.judges
     }
 
+    /// Whether any judge its steps name, including a tier named directly, is
+    /// of `tier`.
+    #[must_use]
+    pub fn uses_tier(&self, tier: Tier) -> bool {
+        self.judges.values().any(|judge| judge.tier == tier)
+    }
+
     /// Its steps as a core plan.
     #[must_use]
     pub const fn plan(&self) -> &Plan<Question> {
         &self.plan
     }
+}
+
+/// Checks the bytes of every name `judges`, `asks` and the steps use, before
+/// anything reads them.
+fn check_names(
+    judges: &BTreeMap<String, JudgeFile>,
+    asks: &BTreeMap<String, AskFile>,
+    strategy: &[StepFile],
+) -> Result<(), Exceeded> {
+    for (name, judge) in judges {
+        Limit::TextBytes.check(count(name.len()))?;
+
+        if let Some(model) = &judge.model {
+            Limit::TextBytes.check(count(model.len()))?;
+        }
+    }
+
+    for name in asks.keys() {
+        Limit::TextBytes.check(count(name.len()))?;
+    }
+
+    for step in strategy {
+        Limit::TextBytes.check(count(step.id.len()))?;
+        Limit::TextBytes.check(count(step.judge.len()))?;
+    }
+
+    Ok(())
 }

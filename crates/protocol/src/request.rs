@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chauffeur_judges::Tier;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Map, Value, json};
@@ -32,6 +34,7 @@ struct RequestFile {
     _protocol: IgnoredAny,
     deadline_ms: Option<u64>,
     on: Option<String>,
+    project: Option<String>,
     strategy: Option<Vec<StepFile>>,
     judges: Option<BTreeMap<String, JudgeFile>>,
     asks: Option<BTreeMap<String, AskFile>>,
@@ -46,6 +49,7 @@ struct RequestFile {
 #[derive(Debug)]
 pub struct Navigate {
     deadline: Duration,
+    project: Option<PathBuf>,
     evidence: Vec<(String, String)>,
     candidates: Vec<(String, String)>,
     target: Target,
@@ -79,8 +83,14 @@ impl Navigate {
         if !PROTOCOLS.contains(&version) {
             return Err(Rejection::UnsupportedProtocol);
         }
+        if let Some(pointer) = first_null(params, "") {
+            return Err(Rejection::Invalid(format!(
+                "`{pointer}` is null; leave the field out instead"
+            )));
+        }
         let file = RequestFile::deserialize(params)
             .map_err(|error| Rejection::Invalid(error.to_string()))?;
+        let project = project(file.project)?;
         let deadline = deadline(file.deadline_ms)?;
         check_evidence(&file.evidence, &file.candidates)?;
         let target = match (file.on, file.strategy) {
@@ -100,6 +110,11 @@ impl Navigate {
                     &file.asks.unwrap_or_default(),
                     steps,
                 )?;
+                if strategy.uses_tier(Tier::SystemTwo) && project.is_none() {
+                    return Err(Rejection::JudgeUnavailable(
+                        "System Two runs inline only for a `project` listed in projects.json, and this request names no project".to_owned(),
+                    ));
+                }
                 check_named_evidence(&strategy, &file.evidence)?;
                 Target::Strategy(strategy)
             }
@@ -111,6 +126,7 @@ impl Navigate {
         };
         Ok(Self {
             deadline,
+            project,
             evidence: file.evidence.into_iter().collect(),
             candidates: file.candidates.into_iter().collect(),
             target,
@@ -121,6 +137,13 @@ impl Navigate {
     #[must_use]
     pub const fn deadline(&self) -> Duration {
         self.deadline
+    }
+
+    /// The project the caller works in, an absolute path; its rules and
+    /// System Two allowance apply.
+    #[must_use]
+    pub fn project(&self) -> Option<&Path> {
+        self.project.as_deref()
     }
 
     /// The named evidence blocks, in name order.
@@ -168,6 +191,42 @@ fn deadline(deadline_ms: Option<u64>) -> Result<Duration, Rejection> {
     }
     Limit::Deadline.check(milliseconds)?;
     Ok(Duration::from_millis(milliseconds))
+}
+
+/// The request's `project`, checked to an absolute path within its limit.
+fn project(file_value: Option<String>) -> Result<Option<PathBuf>, Rejection> {
+    let Some(value) = file_value else {
+        return Ok(None);
+    };
+    Limit::ProjectBytes.check(count(value.len()))?;
+
+    if !Path::new(&value).is_absolute() {
+        return Err(Rejection::Invalid(
+            "`project` is an absolute path".to_owned(),
+        ));
+    }
+
+    Ok(Some(PathBuf::from(value)))
+}
+
+/// The JSON pointer of the first `null` in `value`, if it holds one, so a
+/// request says where its null is instead of leaving serde to describe it.
+///
+/// Recursion is bounded by `serde_json`'s own nesting limit of 128, which a
+/// request cannot exceed on the wire.
+fn first_null(value: &Value, pointer: &str) -> Option<String> {
+    match value {
+        Value::Null => Some(pointer.to_owned()),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| first_null(item, &format!("{pointer}/{index}"))),
+        Value::Object(fields) => fields.iter().find_map(|(key, field)| {
+            let key = key.replace('~', "~0").replace('/', "~1");
+            first_null(field, &format!("{pointer}/{key}"))
+        }),
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
 }
 
 /// An inline strategy's caller sent the evidence too, so a step naming a
