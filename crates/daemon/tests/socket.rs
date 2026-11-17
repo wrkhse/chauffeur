@@ -7,7 +7,7 @@
 )]
 
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -54,7 +54,16 @@ fn start(paths: &Paths) {
 
 fn send(socket: &Path, line: &str) -> Value {
     let mut stream = UnixStream::connect(socket).unwrap();
-    writeln!(stream, "{line}").unwrap();
+    // Past the connection limit the daemon replies and closes at once, so the write may fail while the reply is readable.
+    if let Err(error) = writeln!(stream, "{line}") {
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ),
+            "{error}"
+        );
+    }
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).unwrap();
     serde_json::from_str(&reply).unwrap()

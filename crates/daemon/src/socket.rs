@@ -101,7 +101,16 @@ fn accept_next<S>(mut accept: impl FnMut() -> io::Result<S>) -> S {
 }
 
 fn busy(mut stream: UnixStream) {
-    let reply = json!({ "jsonrpc": "2.0", "id": null, "error": Rejection::Busy.to_error() });
+    let mut error = Rejection::Busy.to_error();
+    if let Some(fields) = error.as_object_mut() {
+        fields.insert(
+            "message".into(),
+            json!(format!(
+                "the daemon is busy: it serves {MAX_CONNECTIONS} connections already"
+            )),
+        );
+    }
+    let reply = json!({ "jsonrpc": "2.0", "id": null, "error": error });
 
     if stream.set_write_timeout(Some(BUSY_WRITE)).is_ok() {
         let _ = writeln!(stream, "{reply}");
