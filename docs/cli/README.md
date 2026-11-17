@@ -42,5 +42,6 @@ daemon, which starts the plugin if it is stopped.
 | The audit log      | `~/.local/state/chauffeur/audit.jsonl`                                            | `XDG_STATE_HOME`                                         |
 | Model keys         | The environment the daemon runs in, such as `TYPESAFE_API_KEY` for Jev            | Each model's `key` in `models.json`                      |
 
-Every command exits 0 when it did what it was asked, and 1 with a message on
-stderr when it could not.
+Commands exit 0 on success and normally exit 1 on failure. The
+[`navigate`](navigate.md) command also uses exit 2 for daemon and stdout
+errors and treats a closed pipe as success.

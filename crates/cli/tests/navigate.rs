@@ -132,9 +132,14 @@ fn fixtures() -> Vec<Value> {
     let mut cases = fixtures["cases"].as_array().unwrap().clone();
     for case in &mut cases {
         for fill in case["fill"].as_array().cloned().unwrap_or_default() {
-            let (into, name) = (fill["in"].as_str().unwrap(), fill["name"].as_str().unwrap());
             let times = usize::try_from(fill["times"].as_u64().unwrap()).unwrap();
-            case["params"][into][name] = json!(fill["text"].as_str().unwrap().repeat(times));
+            let value = json!(fill["text"].as_str().unwrap().repeat(times));
+            if let Some(pointer) = fill["at"].as_str() {
+                *case["params"].pointer_mut(pointer).unwrap() = value;
+            } else {
+                let (into, name) = (fill["in"].as_str().unwrap(), fill["name"].as_str().unwrap());
+                case["params"][into][name] = value;
+            }
         }
     }
     cases
@@ -144,7 +149,14 @@ fn fixtures() -> Vec<Value> {
 fn every_fixture_is_answered_or_rejected_as_it_expects() {
     let paths = daemon("fixtures");
 
-    for case in fixtures() {
+    let cases = fixtures();
+    let source: Value = serde_json::from_str(
+        &fs::read_to_string(repo("crates/protocol/fixtures/navigate.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cases.len(), source["cases"].as_array().unwrap().len());
+    assert_ne!(cases.len(), 0);
+    for case in cases {
         let name = case["name"].as_str().unwrap();
         let output = navigate(&paths, &case["params"].to_string());
         let reply = lines(&output).pop().unwrap();
@@ -174,6 +186,41 @@ fn every_fixture_is_answered_or_rejected_as_it_expects() {
             }
         }
     }
+}
+
+#[test]
+#[ignore = "starts subprocesses; run only in CI or a disposable container"]
+fn closed_pipe_after_first_line_exits_successfully() {
+    use std::os::unix::net::UnixListener;
+
+    let root = std::env::temp_dir().join(format!("chauffeur-pipe-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let socket = root.join("socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let line = format!("{{\"event\":\"{}\"}}\n", "x".repeat(4096));
+        for _ in 0..2048 {
+            if stream.write_all(line.as_bytes()).is_err() {
+                break;
+            }
+        }
+    });
+    let output = Command::new("bash")
+        .args([
+            "-o",
+            "pipefail",
+            "-c",
+            "\"$CHAUFFEUR\" navigate <<<'{}' | head -1 >/dev/null",
+        ])
+        .env("CHAUFFEUR", CHAUFFEUR)
+        .env("CHAUFFEUR_SOCKET", &socket)
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]
@@ -213,8 +260,8 @@ impl Drop for Daemon {
     }
 }
 
-// It starts the binary's daemon and kills it, so it runs only in CI.
 #[test]
+#[ignore = "starts and kills a daemon; run only in CI or a disposable container"]
 fn the_daemon_answers_from_the_models_file_it_is_given() {
     let root = std::env::temp_dir().join(format!("chauffeur-cli-models-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);

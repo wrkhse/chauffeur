@@ -52,8 +52,8 @@ enum Command {
         deadline_ms: u64,
     },
     /// Send one navigate request, read as JSON on stdin, and print each
-    /// JSON-RPC message that comes back. Exits 0 with intents or a verdict, 1
-    /// when rejected, 2 when no daemon answers.
+    /// JSON-RPC message that comes back. Exits 0 with an answer or a closed
+    /// pipe, 1 when rejected, 2 on daemon or stdout errors.
     Navigate,
     /// Print the most recent runs from the audit log, oldest first.
     Audit {

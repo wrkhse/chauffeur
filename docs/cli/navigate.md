@@ -27,11 +27,14 @@ EOF
 {"id":1,"jsonrpc":"2.0","result":{"intents":[{"rule":"sourcefed/triage","withhold":"event"}]}}
 ```
 
-| Exit | Means                                                                                         |
-| ---- | --------------------------------------------------------------------------------------------- |
-| 0    | Intents or a verdict came back                                                                |
-| 1    | The request was rejected, such as `limit_exceeded`, stdin is not JSON, or stdout closed first |
-| 2    | No daemon answers, it does not answer in time, or it speaks another protocol                  |
+| Exit | Means                                                                      |
+| ---- | -------------------------------------------------------------------------- |
+| 0    | Intents or a verdict came back, or the stdout pipe closed                  |
+| 1    | The request was rejected or stdin failed                                   |
+| 2    | The daemon is unavailable, speaks another protocol, or stdout write failed |
+
+Rejections such as `busy` and `judge_unavailable` retain their reason in
+the JSON reply's `error.data.reason` and exit 1.
 
 A script tests the reply with `jq`:
 
@@ -42,6 +45,18 @@ if chauffeur navigate < request.json | tail -1 \
 fi
 ```
 
-It waits for the request's `deadline_ms`, 3 seconds by default, and 2
-seconds more, in all, however many events arrive. The socket is `$CHAUFFEUR_SOCKET`, or the installation's own.
+It reads at most 1 MiB from stdin, including any newline. It waits for the
+request's `deadline_ms`, 3 seconds by default and capped at 30 seconds, and 2
+seconds more, in all, however many events arrive. A daemon message is limited
+to 4 MiB. The socket is `$CHAUFFEUR_SOCKET`, or the installation's own.
 The wire contract is in [Slice 2](../plans/slices/slice-2.md#wire-contract).
+
+The CLI integration tests start daemons, including on test threads. On a host
+with a live daemon, use the build-only checks; run tests in CI or a disposable
+container:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy -p chauffeur-cli --all-targets --locked -- -D warnings
+cargo build -p chauffeur-cli --locked
+```
