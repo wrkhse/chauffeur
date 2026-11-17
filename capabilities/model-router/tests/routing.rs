@@ -974,6 +974,186 @@ fn go_is_blocked_even_when_pinned_or_last_resort_but_zen_free_models_remain() {
     );
 }
 
+/// The user's overlay once OpenCode Go is subscribed: Go is no longer
+/// blacklisted, and its DeepSeek model is the first last resort. The host's
+/// own tier tables, as `shipped_router` lists them, rate the named models.
+fn go_router() -> Judging<ModelRouter> {
+    let providers: Vec<Arc<dyn Provider>> = vec![
+        Arc::new(chauffeur_plugin_anthropic::AnthropicProvider::default()),
+        Arc::new(chauffeur_plugin_openai::OpenAiProvider::default()),
+    ];
+
+    Judging::new(ModelRouter::new(
+        providers,
+        ModelRouterConfig {
+            blacklist: Vec::new(),
+            last_resort: vec![
+                "opencode-go/deepseek-v4.1-flash".into(),
+                "opencode-go/*-free".into(),
+                "opencode/*-free".into(),
+            ],
+            ..defaults()
+        },
+    ))
+}
+
+/// The host's models with Go subscribed, optionally with Zen's free models.
+fn go_models(free: bool) -> Vec<&'static str> {
+    let mut listed = vec![
+        "anthropic/claude-fable-5-2",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5-5",
+        "openai/gpt-6-astra",
+        "openai/gpt-6-luna",
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6.1-terra",
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode/claude-sonnet-5-5",
+    ];
+
+    if free {
+        listed.extend(["opencode/fledge-alpha-free", "opencode/ling-3.1-flash-free"]);
+    }
+
+    listed
+}
+
+/// The error OpenCode reports when an OpenAI subscription is used up.
+fn used_up(
+    on: &str,
+    listed: &[&str],
+    error_type: &str,
+    status: Option<u16>,
+    message: &str,
+) -> Signal {
+    let mut signal = limit_listed(on, listed);
+
+    if let SignalKind::ModelError {
+        error_type: kind,
+        status: code,
+        message: body,
+        ..
+    } = &mut signal.kind
+    {
+        *kind = error_type.into();
+        *code = status;
+        *body = message.into();
+    }
+
+    signal.at = 2;
+
+    signal
+}
+
+#[test]
+fn a_switched_model_that_hits_its_own_limit_chains_to_the_last_resort() {
+    // The first names only the provider's code, with no limit phrase in the
+    // message, so the code alone must classify it; the second is a plain
+    // invalid request whose message names the usage limit.
+    let errors = [
+        (
+            "provider.subscription_sharing_usage_limit_exceeded",
+            None,
+            "The ChatGPT user has reached their Subscription Sharing limit for this account.",
+        ),
+        (
+            "provider.invalid-request",
+            Some(400),
+            "subscription_sharing_usage_limit_exceeded: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
+        ),
+    ];
+    let mut reversed = go_models(false);
+    reversed.reverse();
+
+    for listed in [go_models(false), reversed] {
+        for (error_type, status, message) in errors {
+            let mut router = go_router();
+
+            // Opus at high thinking hits Anthropic's limit: with no confident
+            // pick the agent moves like for like to Sol at high.
+            let opus = limit_listed("anthropic/claude-opus-5-5#high", &listed);
+
+            router.plan(&Situation::default(), &opus);
+            assert_eq!(
+                router.decide(&opus, None),
+                switch("openai/gpt-6.1-sol#high")
+            );
+
+            // Sol's subscription is used up too: both providers are exhausted
+            // and a usage limit does not clear by waiting.
+            let sol = used_up(
+                "openai/gpt-6.1-sol#high",
+                &listed,
+                error_type,
+                status,
+                message,
+            );
+
+            // DeepSeek is the only last resort and stay is not offered, so it
+            // switches without a question, whatever the host's order.
+            assert_eq!(
+                router.plan(&Situation::default(), &sol),
+                Plan::Settled(switch("opencode-go/deepseek-v4.1-flash")),
+                "{error_type} listed {listed:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_chained_limit_asks_among_the_last_resorts_and_never_offers_stay() {
+    // With Zen's free models listed too, the question offers every last
+    // resort and never stay, whatever the host's order.
+    let listed = go_models(true);
+    let mut reversed = listed.clone();
+    reversed.reverse();
+
+    for order in [listed, reversed] {
+        // A fresh agent: this one already hit the anthropic limit above.
+        let mut router = go_router();
+        let opus = limit_listed("anthropic/claude-opus-5-5#high", &order);
+
+        router.plan(&Situation::default(), &opus);
+        assert_eq!(
+            router.decide(&opus, None),
+            switch("openai/gpt-6.1-sol#high")
+        );
+
+        let sol = used_up(
+            "openai/gpt-6.1-sol#high",
+            &order,
+            "provider.subscription_sharing_usage_limit_exceeded",
+            None,
+            "subscription_sharing_usage_limit_exceeded: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
+        );
+        let plan = router.plan(&Situation::default(), &sol);
+        let offered = options(&plan);
+        let allowed = [
+            "opencode-go/deepseek-v4.1-flash",
+            "opencode/fledge-alpha-free",
+            "opencode/ling-3.1-flash-free",
+        ];
+
+        assert!(matches!(&plan, Plan::Ask(_)));
+        assert!(!offered.contains(&STAY.to_string()), "{offered:?}");
+        assert!(
+            offered.iter().all(|key| allowed.contains(&key.as_str())),
+            "{offered:?}"
+        );
+        assert!(
+            offered.contains(&"opencode-go/deepseek-v4.1-flash".to_string()),
+            "{offered:?}"
+        );
+        assert_eq!(
+            router.decide(
+                &sol,
+                Some(&[choice("opencode-go/deepseek-v4.1-flash", 0.9)])
+            ),
+            switch("opencode-go/deepseek-v4.1-flash")
+        );
+    }
+}
+
 #[test]
 fn waiting_is_offered_once_then_the_next_limit_switches() {
     let mut router = router(&[]);

@@ -598,11 +598,16 @@ create`, `*create_pr`, `*open_pr`), a Jira key in a Jira call, or a Slack
 On a usage-limit error the router acts. A limit is HTTP 402, 429, 503, or 529;
 a limit error type (OpenCode's `provider.quota`, `rate_limit`, `overloaded`,
 and similar); or wording in the message ("credit balance", "insufficient
-funds", "quota", "rate limit", "billing", "high demand", "capacity"), which
-catches providers that report an empty balance as an invalid request. A model
-the router switched to that cannot serve the agent (401, 403, 404, or an auth,
-permission, or not-found error) is a failed switch: the router moves on to the
-next candidate. The same error on a model the user chose is left to the host.
+funds", "quota", "rate limit", "usage limit", "billing", "high demand",
+"capacity"), which catches providers that report an empty balance as an
+invalid request, and a subscription that is used up ("The ChatGPT user has
+reached their Subscription Sharing usage limit"). An error type matches whole
+underscore-separated words of the provider's code, never part of a word, so
+`subscription_sharing_usage_limit_exceeded` is a `usage_limit` and
+`provider.permission_denied` is a permission error. A model the router switched
+to that cannot serve the agent (401, 403, 404, or an auth, permission, or
+not-found error) is a failed switch: the router moves on to the next candidate.
+The same error on a model the user chose is left to the host.
 
 **Tiers depend on thinking.** A model reference carries the host's thinking
 variant (`anthropic/claude-opus-5-5#high`), and each provider plugin's tier
@@ -680,21 +685,24 @@ The router:
    failure or confidence below 0.2 it switches to the first candidate, keeping
    the agent unblocked.
 
-A completed model step clears the session's tried set; an HTTP 200 alone does
-not. Some failures never reach OpenCode's retry hook: a provider plugin that
-rejects the request before sending it ends the execution instead. When an
-execution fails on a model Chauffeur switched to before any step completed on
-it, and the retry hook never saw that failure, the OpenCode adapter reports it
-as a model error. If the router picks another model, the adapter switches and
-wakes the agent with a note saying why. If the router keeps the model, a note
-says no other model is left. Context overflows skip the retry hook too, so
-OpenCode compacts the session as usual. A cancelled execution invalidates pending model effects, and an
-abandoned daemon reply restores the router's prior state. A switch sets the
-model's thinking variant too. `$CHAUFFEUR_CONFIG_DIR/model-router.json` pins
-preferred fallbacks, with a variant where it matters:
-`{"pins": ["openai/gpt-6-sol", "anthropic/claude-opus-5-5#low"]}`. The same
-file tunes the pick confidence, the switch-back wait and bar, the candidate
-count, and the limit, lasting and unusable phrases and error types, all shipped in
+A completed model step clears the session's tried set; an HTTP 200 alone does not.
+Some failures never reach OpenCode's retry hook: a provider plugin that rejects
+the request before sending it ends the execution instead. When an execution fails
+on a model Chauffeur switched to before any step completed on it, and the retry
+hook never saw that failure, the OpenCode adapter reports it as a model error, so
+failover chains: a second model that is also limited is left as well, a provider
+the agent already hit a limit on is not offered again until a model serves the
+agent, and the last resort is reached before the router gives up. If the router
+picks another model, the adapter switches and wakes the agent with a note saying
+why. If the router keeps the model, a note says no other model is left. Context
+overflows skip the retry hook too, so OpenCode compacts the session as usual. A
+cancelled execution invalidates pending model effects, and an abandoned daemon
+reply restores the router's prior state. A switch sets the model's thinking
+variant too. `$CHAUFFEUR_CONFIG_DIR/model-router.json` pins preferred fallbacks,
+with a variant where it matters:
+`{"pins": ["openai/gpt-6-sol", "anthropic/claude-opus-5-5#low"]}`. The same file
+tunes the pick confidence, the switch-back wait and bar, the candidate count,
+and the limit, lasting and unusable phrases and error types, all shipped in
 `skills/config/model-router.json`.
 
 **Switch back.** The router remembers the model the agent left (the first in a

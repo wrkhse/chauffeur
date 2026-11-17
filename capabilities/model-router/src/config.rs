@@ -316,7 +316,9 @@ impl Renewal {
 pub struct ErrorWords {
     /// Phrases found anywhere in the error message.
     pub messages: Vec<String>,
-    /// Exact error types, spaces and dashes read as underscores.
+    /// Error types. Spaces and dashes read as underscores, and a known type
+    /// matches any whole underscore-separated run of a provider's code, so
+    /// `usage_limit` matches `subscription_sharing_usage_limit_exceeded`.
     pub types: Vec<String>,
 }
 
@@ -450,9 +452,15 @@ impl ErrorWords {
         let normalized = normalized(error_type);
         // OpenCode namespaces provider errors, e.g. `provider.quota`.
         let kind = normalized.strip_prefix("provider.").unwrap_or(&normalized);
+        // Providers also compose their codes, e.g.
+        // `subscription_sharing_usage_limit_exceeded`: a known type matches a
+        // whole underscore-separated run of the code, never part of a word.
+        let padded = format!("_{kind}_");
         let message = message.to_lowercase();
 
-        self.types.iter().any(|known| known == kind)
+        self.types
+            .iter()
+            .any(|known| padded.contains(&format!("_{known}_")))
             || self.messages.iter().any(|phrase| message.contains(phrase))
     }
 }
@@ -484,7 +492,8 @@ mod tests {
         assert!((config.pick_confidence.value() - 0.2).abs() < f32::EPSILON);
         assert_eq!(config.switch_back.after_seconds, 300);
         assert_eq!(config.max_candidates, 8);
-        assert_eq!(config.limit.messages.len(), 13);
+        assert_eq!(config.limit.messages.len(), 14);
+        assert_eq!(config.lasting.messages.len(), 10);
         assert_eq!(config.limit.types.len(), 12);
         assert_eq!(config.unusable.messages.len(), 6);
         assert_eq!(config.unusable.types.len(), 10);
@@ -599,5 +608,28 @@ mod tests {
         // The list replaced the shipped phrases.
         assert!(!config.is_limit_error("internal", None, "insufficient funds"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_providers_composed_code_matches_a_whole_word_of_it() {
+        let config = ModelRouterConfig::default();
+
+        // OpenCode reports an exhausted subscription by its own code.
+        assert!(config.is_limit_error(
+            "provider.subscription_sharing_usage_limit_exceeded",
+            None,
+            ""
+        ));
+        assert!(config.is_lasting_error("subscription_sharing_usage_limit_exceeded", None, ""));
+        assert!(config.is_limit_error("provider.rate_limit_error", None, ""));
+        // The broadened rule is not a substring match, and the words that
+        // make an auth failure unusable do not make it a limit.
+        assert!(!config.is_limit_error("provider.internal", None, ""));
+        assert!(!config.is_limit_error("provider.permission_denied", None, ""));
+        assert!(config.is_unusable_error("provider.permission_denied", None, ""));
+        assert!(config.is_unusable_error("provider.authentication_error", None, ""));
+        // Runs match whole and in order.
+        assert!(!config.is_limit_error("provider.limited_usage", None, ""));
+        assert!(!config.is_limit_error("provider.quotas_exceeded", None, ""));
     }
 }
