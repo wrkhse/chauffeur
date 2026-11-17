@@ -579,7 +579,10 @@ The playground's _Navigate_ tab checks a request as the daemon does and runs
 it against rule files, each step answered by a stand-in reply, so a rule's
 triage can be tried in a browser with no daemon or model.
 
-Files: `playground/wasm/src/navigate.rs`, `playground/src/features/navigate.ts`
+Files: `playground/wasm/src/navigate.rs`,
+`playground/wasm/tests/navigate.rs`,
+`playground/src/features/navigate.ts`,
+`playground/src/features/navigate-examples.json`
 
 ```json
 {
@@ -597,10 +600,18 @@ Structure:
 
 `navigate` takes the request, rule files by ID and each step's reply by step
 ID, and returns the events and the intents or verdict, the rejection a caller
-gets, or an error for input it cannot read. A step with no reply fails as
-`unavailable`, as with no model; a rule that does not load is listed in
-`refused`. The protocol crate takes `chauffeur-judges` without its model
-formats, so it builds for the browser.
+gets, or an error for input it cannot read. Every `rule_matched` precedes any
+rule's run. Matching rules then run one after another in rule ID order; the
+daemon runs them concurrently, so the order of their run events can differ. A
+step with no reply fails as `unavailable`, as with no model; a rule that does
+not load, or whose plan cannot run, is listed in `refused`, and the others
+still run. A reply keyed to a step no plan has is an error. The protocol crate
+takes `chauffeur-judges` without its model formats, so it builds for the
+browser.
+
+It does not model cooldowns, deadlines during a run, `judge_unavailable` for
+an inline strategy without a model, busy or cancelled requests, redaction, or
+the 4,096-event cap.
 
 ```rust
 #[wasm_bindgen]
@@ -610,8 +621,19 @@ pub fn navigate(input: &str) -> String;
 Verified by:
 
 - `playground/wasm/tests/navigate.rs`: noise withheld after the run's
-  events; unsure, a failure and no reply give no intent; an inline verdict; a
-  refused rule; a rejection over a limit.
+  events; every `rule_matched` before any run, in rule ID order
+  (`all_matches_precede_runs_in_rule_order`); distinct steps receive their
+  own replies (`distinct_steps_receive_their_own_replies`); an invalid answer
+  names its step and the expected shape or failure names
+  (`invalid_answers_report_the_step_and_expected_shape_or_failure_names`); an
+  answer keyed to no step is an error
+  (`an_answer_keyed_to_no_step_is_an_error`); unsure, a failure and no reply
+  give no intent; an inline verdict; a refused rule; a rejection over a
+  limit; every browser example fits the schema and gives its expected result
+  (`browser_examples_match_the_schema_and_expected_results`).
+- The unit test in `playground/wasm/src/navigate.rs`: a rule whose plan cannot
+  run is refused and the others still run
+  (`a_rule_that_cannot_run_is_refused_and_the_others_still_run`).
 - The tab in Chrome, from `vite preview` of the release build: each example
   shows its events, then withhold, no intent, a verdict, or the
   `unsupported_protocol` rejection.

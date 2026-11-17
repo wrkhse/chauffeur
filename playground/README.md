@@ -18,9 +18,11 @@ its own tab.
 - **Check:** `bun run check` builds the release module and the page, and
   type-checks.
 
-Navigate keys stand-in answers by step ID across all rules. It does not model
-cooldowns, deadlines during a run, `judge_unavailable` for an inline strategy
-without a model, busy or cancelled requests, redaction, or the 4,096-byte cap.
+Navigate keys stand-in answers by step ID across all rules. Matching rules run
+one after another in rule ID order; the daemon runs them concurrently, so the
+order of their run events can differ. It does not model cooldowns, deadlines
+during a run, `judge_unavailable` for an inline strategy without a model, busy
+or cancelled requests, redaction, or the 4,096-event cap.
 
 ## Adding a feature tab
 

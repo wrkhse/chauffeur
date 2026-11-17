@@ -155,6 +155,16 @@ fn invalid_answers_report_the_step_and_expected_shape_or_failure_names() {
 }
 
 #[test]
+fn an_answer_keyed_to_no_step_is_an_error() {
+    let mut input = event("thanks", &json!({ "yes": 0.06, "no": 0.94 }));
+    input["answers"]["scrren"] = json!({ "yes": 0.06, "no": 0.94 });
+
+    let reply = navigated(&input);
+
+    assert_eq!(reply["error"], "answers.scrren: no such step");
+}
+
+#[test]
 fn unsure_a_failure_and_no_reply_give_no_intent() {
     for screen in [
         json!({ "yes": 0.48, "no": 0.52 }),
