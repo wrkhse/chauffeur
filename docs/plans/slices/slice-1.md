@@ -933,10 +933,12 @@ pub fn private_folder(socket: &Path) -> Result<(), DaemonError>;
 ```
 
 `run` loads everything, watches the configuration (polling every 2 seconds when
-the platform refuses), binds the socket and serves. A change reloads after 200
-ms; one that does not load keeps what was loaded. A user rule replaces a shipped
-one of the same ID, and a rule file that does not load is refused alone, with
-why, while the rule it held before still runs.
+the platform refuses), binds the socket and serves. Creating, writing, renaming
+or removing a file reloads once changes stop for 200 ms, and at most 2 s after
+the first; opening or reading one does not. A change that does not load keeps
+what was loaded. A user rule replaces a shipped one of the same ID, and a rule
+file that does not load is refused alone, with why, while the rule it held
+before still runs.
 
 ```rust
 pub fn run(paths: &Paths) -> Result<!, DaemonError>;
@@ -1035,6 +1037,8 @@ Verified by:
 - Another user's socket folder is refused.
 - An oversized line and a closed connection fail safely.
 - An edited rule applies to the next event.
+- Reading the configuration does not reload it; creating, editing, renaming
+  or removing a rule does, and settling ends at its bound.
 - The audit log moves aside at its bound and reads across both files.
 
 ### The CLI

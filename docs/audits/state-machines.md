@@ -252,24 +252,30 @@ Files: `crates/daemon/src/lib.rs` (`reload`), `state.rs`, `route/mod.rs`
 ```mermaid
 stateDiagram-v2
 [*] --> Current
-Current --> Settling : a file changes
-Settling --> Settling : another change within 200 ms
+Current --> Settling : a file is created, written, renamed or removed
+Settling --> Settling : another change within 200 ms, for at most 2 s
 Settling --> Current : the new set loads and replaces it
 Settling --> Current : models or redaction refused, the set is kept
 ```
 
 - **Invariants**
+  - Only a file created, written, renamed or removed is a change. Opening,
+    reading or closing one, or changing its permissions, is not, so the
+    daemon's own reads do not reload it.
   - Each event runs against one set: `emit` takes the current set once.
   - One reload at a time, on its own thread, in the order changes come; a
     change made during a load loads again.
+  - Settling ends 2 s after the first change, so changes that keep coming
+    still reload.
   - A change that does not load keeps what was loaded, for the whole set and
     for each rule file (S2).
 
-| From     | On                                 | To       | Then                                                        |
-| -------- | ---------------------------------- | -------- | ----------------------------------------------------------- |
-| Current  | a file under either folder changes | Settling |                                                             |
-| Settling | 200 ms with no change              | Current  | load, with the current set as the previous one              |
-| Settling | models or redaction do not load    | Current  | the current set stays, and the error goes to standard error |
+| From     | On                                                                 | To       | Then                                                        |
+| -------- | ------------------------------------------------------------------ | -------- | ----------------------------------------------------------- |
+| Current  | a file under either folder is created, written, renamed or removed | Settling |                                                             |
+| Settling | 200 ms with no change                                              | Current  | load, with the current set as the previous one              |
+| Settling | 2 s since the first change                                         | Current  | load, though changes keep coming                            |
+| Settling | models or redaction do not load                                    | Current  | the current set stays, and the error goes to standard error |
 
 ### A rule file
 
