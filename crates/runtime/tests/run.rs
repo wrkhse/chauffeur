@@ -7,14 +7,17 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_core::{Failure, Outcome};
 use chauffeur_judges::Models;
-use chauffeur_protocol::{Event, Rule};
-use chauffeur_runtime::{Context, Ran, Redactor, run};
+use chauffeur_protocol::{Event, Rule, Strategy};
+use chauffeur_protocol::{Navigate, Target};
+use chauffeur_runtime::{
+    Admission, Cancel, Capacity, Context, Ran, Redactor, Source, run, run_strategy,
+};
 
 fn repo(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -72,12 +75,15 @@ fn a_judge_sees_only_redacted_evidence() {
         r#"{{ "answers": [{{ "evidence": {{ "tool_call": {redacted:?} }}, "p": {{ "yes": 0.94, "no": 0.06 }} }}] }}"#
     );
 
-    let Ran::Settled { run: ran, then } = run(
+    let rule = commit_rule();
+    let ran = run(
         &placeholder("redacted", &answers),
-        &commit_rule(),
+        &rule,
         &commit(leaked),
         Duration::from_secs(2),
-    ) else {
+    );
+    let then = ran.then(&rule).cloned();
+    let Ran::Settled(ran) = ran else {
         panic!("the rule did not settle")
     };
 
@@ -93,12 +99,15 @@ fn a_judge_sees_only_redacted_evidence() {
 
 #[test]
 fn with_no_model_answering_the_step_fails_and_nothing_is_returned() {
-    let Ran::Settled { run: ran, then } = run(
+    let rule = commit_rule();
+    let ran = run(
         &placeholder("unanswered", r#"{ "answers": [] }"#),
-        &commit_rule(),
+        &rule,
         &commit("fixed stuff"),
         Duration::from_secs(2),
-    ) else {
+    );
+    let then = ran.then(&rule);
+    let Ran::Settled(ran) = &ran else {
         panic!("the rule did not settle")
     };
 
@@ -185,4 +194,188 @@ fn a_judge_slower_than_the_deadline_is_dropped() {
         sent.contains("[REDACTED]") && !sent.contains("AKIA"),
         "{sent}"
     );
+}
+
+/// A stand-in for Jev on loopback that answers once, after `delay`.
+fn slow_jev(delay: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        thread::sleep(delay);
+        drop(stream);
+    });
+    format!(
+        r#"{{ "models": {{ "jev": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "jev-latest",
+                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": 5000 }} }},
+             "tiers": {{ "system-one": ["jev"] }} }}"#
+    )
+}
+
+fn inline(evidence: &str) -> (Arc<chauffeur_protocol::Strategy>, Vec<(String, String)>) {
+    let navigate = Navigate::parse(&serde_json::json!({
+        "protocol": 1,
+        "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
+        "strategy": [{ "id": "done", "judge": "quick",
+                       "ask": { "outcomes": ["yes", "no"], "evidence": ["log"],
+                                "instructions": "Is the migration finished?" } }],
+        "evidence": { "log": evidence }
+    }))
+    .unwrap();
+    let evidence = navigate.evidence().to_vec();
+    let strategy = match navigate.into_target() {
+        Target::Strategy(strategy) => Some(strategy),
+        Target::On(_) => None,
+    };
+    let strategy = strategy.unwrap();
+    (Arc::new(strategy), evidence)
+}
+
+fn in_ms(milliseconds: u64) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_millis(milliseconds))
+        .unwrap()
+}
+
+/// Fills the integration pool: each run cancels itself inside `keys` and then
+/// waits for the test's release, so its worker stays busy after
+/// `run_strategy` returns. The first eight are admitted; admission refuses
+/// the rest. Returns how many were admitted and how many refused.
+fn hold_integration_workers(
+    admission: &Admission,
+    slow: &Arc<Context>,
+    strategy: &Arc<Strategy>,
+    evidence: &[(String, String)],
+    active: &Mutex<Option<Cancel>>,
+) -> (usize, usize) {
+    let (mut admitted, mut busy) = (0_usize, 0_usize);
+    for _ in 0..32 {
+        let cancel = admission.admit(Source::Integration).map_or_else(
+            |_| {
+                busy = busy.saturating_add(1);
+                Cancel::new(Source::Integration)
+            },
+            |permit| {
+                admitted = admitted.saturating_add(1);
+                Cancel::new(Source::Integration).admitted(permit)
+            },
+        );
+        *active.lock().unwrap() = Some(cancel.clone());
+        let ran = run_strategy(slow, strategy, evidence, in_ms(5_000), &cancel);
+        assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
+    }
+    (admitted, busy)
+}
+
+#[test]
+fn an_inline_strategy_settles_over_the_requests_evidence() {
+    let answers = r#"{ "answers": [{ "evidence": { "log": "migrated 42 of 42 tables" },
+                                     "p": { "yes": 0.9, "no": 0.1 } }] }"#;
+    let (strategy, evidence) = inline("migrated 42 of 42 tables");
+
+    let ran = run_strategy(
+        &placeholder("inline", answers),
+        &strategy,
+        &evidence,
+        in_ms(2_000),
+        &Cancel::new(Source::Harness),
+    );
+
+    let Ran::Settled(ran) = ran else {
+        panic!("the strategy did not settle: {ran:?}")
+    };
+    let Some(Outcome::Value(answer)) = ran.verdict.get("done") else {
+        panic!("no answer")
+    };
+    assert_eq!(answer.outcome().to_string(), "yes");
+}
+
+#[test]
+fn a_cancelled_run_returns_at_once_while_its_judge_is_still_asked() {
+    let (strategy, evidence) = inline("migrated 41 of 42 tables");
+    let context = context("cancelled", &slow_jev(Duration::from_secs(2)), &[]);
+    let cancel = Cancel::new(Source::Harness);
+    let canceller = cancel.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        canceller.cancel();
+    });
+
+    let started = Instant::now();
+    let ran = run_strategy(&context, &strategy, &evidence, in_ms(4_000), &cancel);
+
+    assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
+    assert!(started.elapsed() < Duration::from_millis(1_000));
+}
+
+#[test]
+fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // Admission caps integration at 8, the pool at 32: the first 8 keep
+    // their admitted slots and the rest fill the pool without one.
+    let admission = Admission::new(Capacity::DAEMON);
+    let release = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(Mutex::new(None::<Cancel>));
+    let held = Arc::clone(&release);
+    let done = Arc::clone(&finished);
+    let cancelling = Arc::clone(&active);
+    let models = r#"{ "models": { "jev": { "format": "systemone",
+        "endpoint": "http://127.0.0.1:9", "model": "jev", "key": { "env": "TEST" } } },
+        "tiers": { "system-one": ["jev"] } }"#;
+    let base = Arc::into_inner(context("held-cancel", models, &[])).unwrap();
+    let slow = Arc::new(Context {
+        keys: Box::new(move |_| {
+            cancelling.lock().unwrap().as_ref().unwrap().cancel();
+            while !held.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            done.fetch_add(1, Ordering::SeqCst);
+            None
+        }),
+        ..base
+    });
+    let (strategy, evidence) = inline("waiting");
+    let (admitted, busy) =
+        hold_integration_workers(&admission, &slow, &strategy, &evidence, &active);
+
+    // The admitted jobs still run, so their eight slots are still held.
+    assert_eq!(admission.in_use().total(), 8);
+
+    // Every integration worker is busy, so the next run is refused at once.
+    let refused = run_strategy(
+        &placeholder("filled", r#"{ "answers": [] }"#),
+        &strategy,
+        &evidence,
+        in_ms(1_000),
+        &Cancel::new(Source::Integration),
+    );
+    assert!(
+        matches!(&refused, Ran::Refused(reason) if reason.contains("busy")),
+        "{refused:?}"
+    );
+
+    // The harness pool is separate, so its strategy still settles.
+    let harness = Cancel::new(Source::Harness).admitted(admission.admit(Source::Harness).unwrap());
+    let ran = run_strategy(
+        &placeholder("unstarved", r#"{ "answers": [] }"#),
+        &strategy,
+        &evidence,
+        in_ms(2_000),
+        &harness,
+    );
+    release.store(true, Ordering::SeqCst);
+    *active.lock().unwrap() = None;
+    drop(harness);
+
+    assert_eq!((admitted, busy), (8, 24));
+    assert!(matches!(ran, Ran::Settled(_)), "{ran:?}");
+    let started = Instant::now();
+    while admission.in_use().total() != 0 || finished.load(Ordering::SeqCst) != 32 {
+        assert!(started.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(1));
+    }
 }

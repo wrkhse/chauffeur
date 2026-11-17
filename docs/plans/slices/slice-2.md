@@ -1,8 +1,8 @@
 # Slice 2: sourcefed triage
 
-**Status:** In progress: requests, intents and limits are built; admission,
-the daemon's socket and rule sources, the bindings and sourcefed's side are
-next.
+**Status:** In progress: requests, intents and limits, admission and running
+are built; the daemon's socket and rule sources, the bindings and sourcefed's
+side are next.
 
 **You can:** let sourcefed ask Chauffeur before it queues each event, so
 OpenCode, Pi, MCP and the CLI receive the same filtered stream, as in
@@ -305,30 +305,193 @@ Verified by:
 
 ### Admission and running
 
-One permit per navigation, held from admission through delivery, with
+One permit per navigation, shared by the caller and every job, held until
+both the caller releases it and its last worker is free, with
 per-source and global capacity; a bounded worker pool; the deadline and
 cancellation checked before each round; late results discarded.
 
-Files: `crates/runtime/src/admission.rs`, `run.rs`
+Files: `crates/runtime/src/admission.rs`, `run/mod.rs`, `run/wait.rs`,
+`run/pool.rs`, `run/log.rs`, `proofs.rs`
 
 ```rust
-// Err(Busy) while the source's share is in use.
+// Err(Busy) while the source's share or the capacity is in use.
 let permit = admission.admit(Source::Integration)?;
 
-// The deadline and cancellation are checked before each round.
-let ran = pool.run(navigation, deadline, &cancel);
+// Cancellation and the deadline are checked before the round starts.
+let ran = run_strategy(&context, &strategy, &evidence, deadline, &cancel);
 
-deliver(ran); // a result after the deadline is discarded
-drop(permit); // released once, after delivery
+deliver(ran); // a result after the deadline or a cancel is dropped
+drop(permit); // its jobs keep a copy until their workers are free
+```
+
+Structure:
+
+The daemon admits each navigation for its source: `Harness` for
+`chauffeur.emit`, `Integration` for `chauffeur.navigate`. `Capacity::DAEMON`
+allows 16 at once, 8 from each source, so a flood from one source leaves the
+other its share. A cancelled or late job keeps its permit until its worker
+finishes; cancellation cannot refill a share with work still running. A
+refused navigation never waits in a queue. The socket belongs to the user:
+shares protect against accidental floods, not hostile local callers, who can
+choose either method.
+
+```rust
+pub enum Source {
+    Harness,
+    Integration,
+}
+
+pub struct Capacity {
+    pub global: usize,
+    pub per_source: usize,
+}
+
+impl Capacity {
+    pub const DAEMON: Self;
+}
+
+pub struct Admission { … }
+
+impl Admission {
+    pub fn new(capacity: Capacity) -> Self;
+    pub fn admit(&self, source: Source) -> Result<Permit, Busy>;
+    pub fn in_use(&self) -> Ledger;
+}
+
+pub struct Permit { … }
+
+impl Permit {
+    pub fn source(&self) -> Source;
+}
+
+impl Clone for Permit {}
+
+pub struct Busy {
+    pub from: Source,
+    pub share: bool,
+}
+```
+
+`Ledger` is admission's state without its lock, so Kani can check every
+sequence of takes and gives. `give` for a source holding nothing changes
+nothing.
+
+```rust
+pub struct Ledger { … }
+
+impl Ledger {
+    pub const fn new(capacity: Capacity) -> Self;
+    pub fn take(&mut self, source: Source) -> Result<(), Busy>;
+    pub fn give(&mut self, source: Source);
+    pub fn held(&self, source: Source) -> usize;
+    pub const fn total(&self) -> usize;
+}
+```
+
+`run_strategy` runs a rule's strategy or an inline one; `run` is the same
+for a rule and an event, with no cancellation. `Ran::then` gives the rule's
+first `then` entry its verdict meets.
+
+```rust
+pub fn run(context: &Arc<Context>, rule: &Arc<Rule>, event: &Event, deadline: Duration) -> Ran;
+
+pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
+    context: &Arc<Context>,
+    strategy: &Arc<S>,
+    evidence: &[(String, String)],
+    deadline: Instant,
+    cancel: &Cancel,
+) -> Ran;
+
+pub enum Ran {
+    Settled(Run<Answer>),
+    Refused(String),
+    Deadline,
+    Cancelled,
+}
+
+impl Ran {
+    pub fn then<'a>(&self, rule: &'a Rule) -> Option<&'a Then>;
+}
+```
+
+`within` runs any job on the pool and waits for it, looking at the
+cancellation every 10 ms. The job is handed the deadline and the
+cancellation to check before each round. Plans have one round until slice 3
+adds `after`; that slice moves the check into `Plan::run` as a closure.
+Whatever arrives after the deadline or a cancel is dropped. Each source has
+its own pool, with 8 workers waiting and 32 alive at most, so integration
+work cannot occupy harness workers; past that a job is refused. A `Cancel`
+is made for a source, and `admitted` takes the permit's source, so a run's
+pool is never guessed.
+
+```rust
+pub struct Cancel { … }
+
+impl Cancel {
+    pub fn new(source: Source) -> Self;
+    pub fn admitted(&self, permit: Permit) -> Self;
+    pub const fn source(&self) -> Source;
+    pub fn cancel(&self);
+    pub fn is_cancelled(&self) -> bool;
+}
+
+pub fn within<T: Send + 'static>(
+    pool: &Pool,
+    deadline: Instant,
+    cancel: &Cancel,
+    job: impl FnOnce(Instant, &Cancel) -> T + Send + 'static,
+) -> Waited<T>;
+
+pub enum Waited<T> {
+    Done(T),
+    Deadline,
+    Cancelled,
+    Refused(String),
+}
+
+impl Pool {
+    pub fn new(keep: usize, max: usize) -> Self;
+    pub fn execute(&self, job: Job) -> io::Result<()>;
+    pub fn waiting(&self) -> usize;
+    pub fn alive(&self) -> usize;
+}
+```
+
+A navigation's events go through an `EventLog` of at most `MAX_EVENTS`,
+4096; past it an event is counted, not kept.
+
+```rust
+pub const MAX_EVENTS: usize;
+
+pub struct EventLog<T> { … }
+
+impl<T> EventLog<T> {
+    pub const fn new(max: usize) -> Self;
+    pub fn push(&mut self, event: T) -> bool;
+    pub fn events(&self) -> &[T];
+    pub const fn dropped(&self) -> usize;
+}
 ```
 
 Verified by:
 
-- Miri over deadline, cancellation, a late result, overflow and exhausted
-  capacity, including audit A3's flood: 81 submissions with capacity 8 admit 8
-  and reject 73 with `capacity`.
-- Kani: a permit is released exactly once on every terminal path; the event
-  log never exceeds its bound.
+- Miri over `crates/runtime/tests/admission.rs`, which touches no file or
+  network: a deadline, a cancel during the wait and before the start, a
+  cancelled wait that keeps its slot until its job finishes, a panicking job
+  refused with its worker and slot freed, a late result, a full pool, a
+  permit given back when its thread panics, a share and the capacity in use,
+  and audit A3's flood: 81 submissions with capacity 8 admit 8 and refuse 73
+  as `Busy`.
+- Kani, in `crates/runtime/src/proofs.rs`: the ledger stays within its
+  capacity over any six takes and gives; the last copy of a permit gives the
+  slot back exactly once, whichever copy drops first; the event log never
+  exceeds its bound.
+- `crates/runtime/tests/run.rs`: an inline strategy settles over the
+  request's evidence, and a cancelled run returns at once while its judge is
+  still being asked; 32 cancelled integration runs, 8 admitted and 24
+  refused admission, fill all 32 integration workers, so the next is
+  refused while a harness strategy still settles.
 
 ### The daemon's socket and rule sources
 
