@@ -278,6 +278,75 @@ fn an_inline_strategy_with_no_model_for_its_judge_is_unavailable() {
     );
 }
 
+/// An inline strategy naming System Two for a project, as a request.
+fn system_two(project: &str) -> Value {
+    json!({
+        "protocol": 1,
+        "project": project,
+        "strategy": [{ "id": "review", "judge": "system-two",
+                       "ask": { "outcomes": ["yes", "no"], "instructions": "Is it safe?" } }]
+    })
+}
+
+#[test]
+fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
+    let paths = paths("system-two-unlisted", &models(Duration::ZERO));
+    let mut caller = Caller::new(start(&paths));
+
+    caller.navigate(1, &system_two("/nowhere/listed"));
+    let reply = caller.message();
+
+    assert_eq!(
+        reply["error"]["data"]["reason"], "judge_unavailable",
+        "{reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.json"),
+        "the refusal names the file that allows a project: {reply}"
+    );
+}
+
+#[test]
+fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
+    let paths = paths("system-two-listed", &models(Duration::ZERO));
+    fs::write(paths.config.join("projects.json"), r#"["/work/app"]"#).unwrap();
+    let mut caller = Caller::new(start(&paths));
+
+    caller.navigate(1, &system_two("/work/app"));
+    let reply = caller.message();
+
+    assert_eq!(
+        reply["error"]["data"]["reason"], "judge_unavailable",
+        "{reply}"
+    );
+    assert!(
+        !reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.json"),
+        "it passed the allowance and failed for having no model: {reply}"
+    );
+}
+
+#[test]
+fn a_projects_file_naming_a_relative_path_is_refused() {
+    let paths = paths("projects-relative", &models(Duration::ZERO));
+    fs::write(
+        paths.config.join("projects.json"),
+        r#"["/work/app", "work/app"]"#,
+    )
+    .unwrap();
+
+    // Loaded before the socket is bound, so the daemon does not start.
+    let refused = chauffeur_daemon::run(&paths).unwrap_err().to_string();
+
+    assert!(refused.contains("projects.json"), "{refused}");
+    assert!(refused.contains("work/app"), "{refused}");
+}
+
 fn slow_inline(deadline_ms: u64) -> Value {
     json!({
         "protocol": 1, "deadline_ms": deadline_ms,

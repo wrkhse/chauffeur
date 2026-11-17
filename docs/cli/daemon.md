@@ -28,11 +28,18 @@ chauffeur daemon run --models fixtures/placeholders.json
   says so and exits 0, so starting it twice is harmless.
 - **A private socket.** The socket's folder is created with mode `0700`; one
   that is open to others, or owned by someone else, is refused.
-- **Reloads by itself.** Edits to models, rules or redaction apply to the
-  next event; a change that does not load keeps what was loaded. A rule file
-  that does not load is listed by `daemon status`, and the rule it held
+- **Reloads by itself.** Edits to models, rules, redaction or projects apply
+  to the next event; a change that does not load keeps what was loaded. A rule
+  file that does not load is listed by `daemon status`, and the rule it held
   before, if any, still runs. Where the platform cannot report file changes,
   such as in a sandbox, it checks every 2 seconds.
+- **Your own projects.** `projects.json` in the configuration folder names the
+  projects whose inline System Two strategies may run, as a JSON array of
+  absolute paths, such as `["/Users/me/src/app"]`. A project it does not list
+  is refused with `judge_unavailable`; with no file, no project may run one.
+  The file may be at most 64 KiB and list at most 256 projects, and one that
+  is larger or names a relative path is refused: the daemon does not start
+  with it, and a reload keeps the list loaded before.
 - **Keys** come from its own environment, so start it where the keys are set,
   or put them in the service's environment file when Homebrew runs it.
 - **Several calls per connection.** Each call runs on its own thread, at

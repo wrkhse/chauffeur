@@ -539,12 +539,13 @@ pub const MAX_CONNECTIONS: usize;
 pub const MAX_LINE: usize;
 ```
 
-The router admits each call for its source and holds the permit until the
-reply is written. `navigate` sends `rule_matched` for every hooked rule
-first, then each rule's `round_ready` and `step_settled` as it settles, at
-most 4,096 events, and returns the intents in the order the rules load. An
-inline strategy whose judge has no model is `judge_unavailable` before it
-runs, and one past its deadline is `deadline`.
+The router admits each call for its source; the call releases its permit before
+its reply is written, and a job still running keeps a copy until its worker is
+free. `navigate` sends `rule_matched` for every hooked rule first, then each
+rule's `round_ready` and `step_settled` as it settles, at most 4,096 events,
+and returns the intents in the order the rules load. An inline strategy whose
+judge has no model is `judge_unavailable` before it runs, and one past its
+deadline is `deadline`.
 
 ```rust
 impl Router {
@@ -577,12 +578,21 @@ Verified by:
   - an inline strategy returns its verdict;
   - rejections by reason: `unsupported_protocol`, `limit_exceeded`,
     `judge_unavailable` and `deadline`;
+  - an inline System Two strategy for a project `projects.json` does not
+    list is `judge_unavailable`, and the message names the file; for a
+    project it lists, the reason is the judge's missing model instead;
+  - a `projects.json` naming a relative path is refused, and the daemon
+    does not start;
   - a fast call on a connection is not held up by a slow one;
   - `$/cancelRequest` is answered as `cancelled` within a second;
   - a second call with an open ID is refused and the first still answers;
-  - a `chauffeur.navigate` notification runs nothing;
-  - closing a connection cancels its 8 calls and frees their places;
-  - 10 navigations at once from one source: 8 answered, 2 `busy`.
+  - a `chauffeur.navigate` notification runs nothing, and so does a
+    `chauffeur.emit` notification, which is answered with no reply;
+  - malformed ids are `invalid` with `-32600`, and a string id is
+    preserved;
+  - closing a connection cancels its 4 calls and frees their places;
+  - 10 navigations at once from one source: 4 answered, 6 `busy`;
+  - one client at its navigation share leaves a place for another.
 - Each of the four sources loads; a request's `project` adds its rules, read
   within bounds and cached.
 - A fifth open navigation on one connection is `busy` while another

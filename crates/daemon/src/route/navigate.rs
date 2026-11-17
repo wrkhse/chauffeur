@@ -1,7 +1,8 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use chauffeur_judges::Fallback;
+use chauffeur_judges::{Fallback, Tier};
 use chauffeur_protocol::{Intent, Navigate, Rejection, Rule, Strategy, Target, progress};
 use chauffeur_runtime::{Cancel, Context, EventLog, MAX_EVENTS, Ran, run_strategy};
 use serde_json::{Map, Value, json};
@@ -41,6 +42,7 @@ impl Router {
             }
         };
         let evidence = request.evidence().to_vec();
+        let project = request.project().map(Path::to_path_buf);
         let answered = match (request.event(), request.into_target()) {
             (Some(event), Target::On(on)) => {
                 let hooked: Vec<&Arc<Rule>> = loaded
@@ -58,6 +60,7 @@ impl Router {
                 Ok(self.intents(&loaded, &hooked, &call, &send))
             }
             (_, Target::Strategy(strategy)) => {
+                allowed(&loaded, &strategy, project.as_deref())?;
                 self.inline(&loaded, strategy, &evidence, deadline, cancel, &send)
             }
             (None, Target::On(_)) => Err(Rejection::Invalid("no event to match".to_owned())),
@@ -98,6 +101,7 @@ impl Router {
     }
 
     /// An inline strategy's verdict, once every judge it names has a model.
+    /// Its project was checked against `projects.json` before it is called.
     fn inline(
         &self,
         loaded: &Arc<Loaded>,
@@ -142,6 +146,30 @@ impl Router {
             (None, None) => Err(Rejection::Deadline),
         }
     }
+}
+
+/// Refuses an inline System Two strategy for a project `projects.json` does
+/// not list: an inline strategy carries its caller's trust, so only the
+/// user's own listed projects may spend System Two.
+fn allowed(loaded: &Loaded, strategy: &Strategy, project: Option<&Path>) -> Result<(), Rejection> {
+    if !strategy.uses_tier(Tier::SystemTwo) {
+        return Ok(());
+    }
+    // A request naming no project is refused at parse; this keeps the
+    // daemon from running one if that check is ever bypassed.
+    let Some(project) = project else {
+        return Err(Rejection::JudgeUnavailable(
+            "System Two runs only for a project listed in projects.json, and this request names no project"
+                .to_owned(),
+        ));
+    };
+    if loaded.projects().contains(project) {
+        return Ok(());
+    }
+    Err(Rejection::JudgeUnavailable(format!(
+        "System Two runs only for a project listed in projects.json, and {} is not",
+        project.display()
+    )))
 }
 
 /// Refuses a strategy naming a judge with no model to ask, before any runs.
