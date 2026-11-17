@@ -20,10 +20,13 @@ export const installToolDescriptions: Effect.Effect<void, never, Host | Texts | 
   const texts = yield* Texts
 
   const rewrite = (event: SessionContext) => event.tools[SUBAGENT_TOOL]
-    ? ownModelAgents().pipe(
-      Effect.map((agents) => rewriteDescriptions(event.tools, texts.current(), namedAgents(agents))),
-      Effect.provideService(Host, host),
-    )
+    ? Effect.gen(function* () {
+      // The session's own location, where its project's `.opencode/agents` are defined.
+      const session = yield* host.session.get({ sessionID: event.sessionID }).pipe(Effect.orElseSucceed(() => undefined))
+      const agents = yield* ownModelAgents(session?.location)
+
+      return rewriteDescriptions(event.tools, texts.current(), namedAgents(agents))
+    }).pipe(Effect.provideService(Host, host))
     // No subagent tool to name agents in, so the host's agents are not read.
     : Effect.sync(() => rewriteDescriptions(event.tools, texts.current()))
 

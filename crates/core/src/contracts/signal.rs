@@ -234,7 +234,7 @@ pub enum SignalKind {
         /// The call launches an agent configured with a model of its own,
         /// such as a subagent whose config names one, so suggesting another
         /// model for it would override that choice.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         agent_has_model: bool,
     },
     /// The agent asked, in its own words, for a tool or skill it lacks.
@@ -907,5 +907,79 @@ mod tests {
                     .contains("model variant")
             );
         }
+    }
+
+    fn tool_result(agent_has_model: bool) -> Signal {
+        Signal {
+            agent_id: "a".into(),
+            at: 1,
+            kind: SignalKind::ToolResult {
+                tool: "edit".into(),
+                ok: true,
+                workspace: String::new(),
+                subagent: false,
+                input: String::new(),
+                error: String::new(),
+                user_request: String::new(),
+                evidence: String::new(),
+                candidates: Vec::new(),
+                agent_has_model,
+            },
+        }
+    }
+
+    #[test]
+    fn a_tool_result_without_agent_has_model_still_reads() {
+        let signal: Signal = serde_json::from_str(
+            r#"{"agent_id":"a","at":1,"kind":{"type":"tool_result","tool":"edit","ok":true}}"#,
+        )
+        .expect("a tool result from a host that predates agent_has_model");
+
+        let SignalKind::ToolResult {
+            agent_has_model, ..
+        } = signal.kind
+        else {
+            panic!("expected a tool result")
+        };
+        assert!(!agent_has_model);
+    }
+
+    #[test]
+    fn a_model_error_without_variants_still_reads() {
+        let signal: Signal = serde_json::from_str(
+            r#"{
+                "agent_id": "a",
+                "at": 1,
+                "kind": {
+                    "type": "model_error",
+                    "model": { "provider": "p", "model": "m" },
+                    "error_type": "rate_limit_error",
+                    "status": 429,
+                    "message": "rate limit reached",
+                    "tool_executed": false,
+                    "available": [
+                        { "model": { "provider": "p", "model": "m" }, "usable": true }
+                    ]
+                }
+            }"#,
+        )
+        .expect("a model error from a host that lists no variants");
+
+        let SignalKind::ModelError { available, .. } = signal.kind else {
+            panic!("expected a model error")
+        };
+        assert!(available[0].variants.is_empty());
+    }
+
+    #[test]
+    fn a_false_agent_has_model_is_never_serialized() {
+        let value = serde_json::to_value(tool_result(false)).expect("a signal");
+
+        assert!(value["kind"].get("agent_has_model").is_none());
+
+        // A call that does launch its own model still says so.
+        let launched = serde_json::to_value(tool_result(true)).expect("a signal");
+
+        assert_eq!(launched["kind"]["agent_has_model"].as_bool(), Some(true));
     }
 }

@@ -163,7 +163,7 @@ test("a request names the agents that need no model, sorted, after the guidance"
   const hooks = new Hooks()
 
   const host = fakeHost({
-    session: { hook: hooks.register },
+    session: { hook: hooks.register, get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
     agent: { list: () => Effect.succeed({ data: [
       { id: "plan", mode: "subagent", model: { id: "m", providerID: "p" } },
       { id: "build", mode: "all", model: { id: "m", providerID: "p" } },
@@ -173,7 +173,7 @@ test("a request names the agents that need no model, sorted, after the guidance"
   })
 
   const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
-  const event = { tools: { subagent: tool("A long subagent description.") } }
+  const event = { sessionID: "ses_a", tools: { subagent: tool("A long subagent description.") } }
 
   try {
     // A hook may see the same definitions twice; the named line appears once.
@@ -192,7 +192,7 @@ test("a request does not name a hidden agent on a model of its own", async () =>
   const hooks = new Hooks()
 
   const host = fakeHost({
-    session: { hook: hooks.register },
+    session: { hook: hooks.register, get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
     agent: { list: () => Effect.succeed({ data: [
       { id: "build", mode: "subagent", hidden: false, model: { id: "m", providerID: "p" } },
       { id: "compaction", mode: "subagent", hidden: true, model: { id: "m", providerID: "p" } },
@@ -200,7 +200,7 @@ test("a request does not name a hidden agent on a model of its own", async () =>
   })
 
   const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
-  const event = { tools: { subagent: tool("A long subagent description.") } }
+  const event = { sessionID: "ses_a", tools: { subagent: tool("A long subagent description.") } }
 
   try {
     await hooks.emit("context", event)
@@ -213,16 +213,41 @@ test("a request does not name a hidden agent on a model of its own", async () =>
   }
 })
 
+test("a request finds an agent defined only at the session's location", async () => {
+  const hooks = new Hooks()
+
+  const host = fakeHost({
+    session: { hook: hooks.register, get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
+    // The project's own agent is listed only for this session's location.
+    agent: { list: (input?: { readonly location?: { readonly directory?: string } }) => Effect.succeed({ data: input?.location?.directory === "/projects/app"
+      ? [{ id: "project-build", mode: "subagent", hidden: false, model: { id: "m", providerID: "p" } }]
+      : [] }) },
+  })
+
+  const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
+  const event = { sessionID: "ses_a", tools: { subagent: tool("A long subagent description.") } }
+
+  try {
+    await hooks.emit("context", event)
+
+    expect(event.tools.subagent.description).toBe(
+      `A long subagent description.\n\n${SUBAGENT_GUIDANCE}\n\n${fill(OWN_MODEL_LINE, { agents: "project-build" })}`,
+    )
+  } finally {
+    await plugin.close()
+  }
+})
+
 test("when the host's agents cannot be read, the description carries the guidance and names none", async () => {
   const hooks = new Hooks()
 
   const host = fakeHost({
-    session: { hook: hooks.register },
+    session: { hook: hooks.register, get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
     agent: { list: () => Effect.fail("host down") },
   })
 
   const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
-  const event = { tools: { subagent: tool("A long subagent description.") } }
+  const event = { sessionID: "ses_a", tools: { subagent: tool("A long subagent description.") } }
 
   try {
     await hooks.emit("context", event)
@@ -263,8 +288,8 @@ test("a request without the subagent tool does not read the host's agents", asyn
 test("each request's tools take the configured descriptions, and the guidance follows the new subagent text", async () => {
   const hooks = new Hooks()
   const texts = fixedTexts({ ...SHIPPED_TEXTS, tool_descriptions: { execute: "Run code.", subagent: "Start a subagent.", missing: "Ignored." } })
-  const plugin = await install(installToolDescriptions, fakeHost({ session: { hook: hooks.register } }), daemon, texts)
-  const event = { tools: { execute: tool("A long Code Mode description."), read: tool("Read a file."), subagent: tool("A long subagent description.") } }
+  const plugin = await install(installToolDescriptions, fakeHost({ session: { hook: hooks.register, get: () => Effect.succeed({ location: { directory: "/projects/app" } }) } }), daemon, texts)
+  const event = { sessionID: "ses_a", tools: { execute: tool("A long Code Mode description."), read: tool("Read a file."), subagent: tool("A long subagent description.") } }
 
   try {
     await hooks.emit("context", event)

@@ -648,13 +648,18 @@ tier, so Opus is offered at `#high` in Balanced and at `#low` in Efficient,
 and Sol, Terra, Sonnet, Fable and Astra at `#high`. When the failed model
 runs at a variant its rows do not name, such as Opus or Sol at `#max`, each
 candidate is offered at that variant, rather than the first variant its
-table names. A candidate takes it only when the host lists the variant for
-it (the adapter sends each available model's `variants`), the variant keeps
-the candidate's tier, the agent has not tried it there, and the candidate
-is not pinned: a pin keeps its own variant. A variant a row names, such as
-Opus `#low`, sets the tier rather than the effort, so it does not carry
-over: Opus `#low` still moves to Terra `#high`. Ranking is unchanged, so
-Opus `#max` fails over to Sol `#max`, and Sol `#max` to Opus `#max`.
+table names. Only a failed model with a tier carries its variant over (a
+model no table rates carries none), and variants match by name: the host's
+variant ID must equal the failed model's. A candidate takes it only when
+the host lists the variant for it (the adapter sends each available model's
+`variants`), the variant keeps the candidate's tier, the agent has not
+tried it there, and the candidate is not pinned: a pin keeps its own
+variant. A variant a row names, such as Opus `#low`, sets the tier rather
+than the effort, so it does not carry over: Opus `#low` still moves to
+Terra `#high`. Ranking is unchanged, so Opus `#max` fails over to Sol
+`#max`, and Sol `#max` to Opus `#max`. Jev still sees the candidate's
+recommendation: Sol `#max` is offered as recommended, from Sol `#high`'s
+row.
 Frontier, Balanced and Efficient each recommend exactly one model per
 provider, so when Jev makes no confident pick the agent moves like for
 like, whatever order the host lists models in: Fable and Astra, Opus
@@ -898,8 +903,15 @@ Installed as a package, it also registers the hand-over skills in
   the host's `subagent` description, so the agent reads it before launching:
   the guidance says it applies only to agents without a model of their own,
   then, when any exist, names the agents that run on their own model and
-  says to launch them without one. A `subagent` call's tool result carries
-  `agent_has_model`, reported from the host's agent configs (`agent.list`).
+  says to launch them without one. The adapter reads the agents at the session's
+  location, names only those the `subagent` tool can launch (mode `subagent` or
+  `all`) and that are not hidden, and resolves a call that continues a child
+  session (`sessionID` without `agent`) to that session's agent; an agent it
+  cannot resolve, or an agent list that fails or takes longer than a second,
+  counts as having its own model, so nothing is steered. A `subagent` call's
+  tool result carries `agent_has_model`, reported from the host's agent configs
+  (`agent.list`). The adapter omits `variants` when empty and `agent_has_model`
+  when false, so an older daemon still accepts its signals.
 - **Daemon RPC transport:** dedicated `node:http` / `node:https` sockets, not
   Bun's shared fetch pool. Long-lived MCP and SourceFed event streams cannot
   consume the transport's slots and queue permission checks. Each hook's

@@ -8,7 +8,7 @@ import { fakeExposure, fakeHost, Hooks, install, noRulebooks, noSkills, shippedT
 const sessionID = "ses_recovery"
 
 /** The arguments a reported tool call carries in these tests. */
-type CallInput = { readonly agent: string; readonly description?: string }
+type CallInput = { readonly agent?: string; readonly sessionID?: string; readonly description?: string }
 
 function toolHost(hooks: Hooks, delivered: string[], skills: ReadonlyArray<string> = []) {
   return fakeHost({
@@ -160,7 +160,7 @@ test("a subagent call says whether the agent it launches runs on a model of its 
   expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
 
   await call("subagent", { agent: "explore" })
-  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+  expect(sent.at(-1)?.kind).not.toHaveProperty("agent_has_model")
 
   // A hidden agent still has a model of its own, though no description names it.
   await call("subagent", { agent: "compaction" })
@@ -168,11 +168,11 @@ test("a subagent call says whether the agent it launches runs on a model of its 
 
   // The host's primary agents are not something a subagent call launches.
   await call("subagent", { agent: "lead" })
-  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+  expect(sent.at(-1)?.kind).not.toHaveProperty("agent_has_model")
 
-  // Any other tool reports false without reading the host's agents.
+  // Any other tool leaves the field off without reading the host's agents.
   await call("read", { agent: "build" })
-  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+  expect(sent.at(-1)?.kind).not.toHaveProperty("agent_has_model")
   expect(listings).toBe(4)
 
   await plugin.close()
@@ -194,9 +194,89 @@ test("when the host's agents cannot be read, a subagent call's agent counts as h
   await call("subagent", { agent: "build" })
   expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
 
-  // Any other tool reports false without reading the host's agents at all.
+  // Any other tool leaves the field off without reading the host's agents at all.
   await call("read", { agent: "build" })
-  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
+  expect(sent.at(-1)?.kind).not.toHaveProperty("agent_has_model")
+
+  await plugin.close()
+})
+
+test("an agent defined only at the session's location is found", async () => {
+  const hooks = new Hooks()
+  const sent: Signal[] = []
+
+  const host = fakeHost({
+    tool: { hook: hooks.register },
+    session: { get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
+    // The project's own agent is listed only for this session's location.
+    agent: { list: (input?: { readonly location?: { readonly directory?: string } }) => Effect.succeed({ data: input?.location?.directory === "/projects/app"
+      ? [{ id: "project-build", mode: "subagent", hidden: false, model: { id: "gpt-6", providerID: "openai" } }]
+      : [] }) },
+  })
+
+  const plugin = await install(installToolResults(fakeExposure()), host, daemon(sent, []))
+
+  await hooks.emit("execute.after", { sessionID, tool: "subagent", status: "completed", input: { agent: "project-build" }, result: { content: "done" } })
+
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  await plugin.close()
+})
+
+test("a subagent call that continues a child session reports the child's agent", async () => {
+  const hooks = new Hooks()
+  const sent: Signal[] = []
+  const children = new Map([["ses_build", "build"], ["ses_explore", "explore"]])
+
+  const host = fakeHost({
+    tool: { hook: hooks.register },
+    session: {
+      get: (input: { readonly sessionID: string }) => input.sessionID === "ses_gone"
+        ? Effect.fail("gone")
+        : Effect.succeed({ location: { directory: "/projects/app" }, agent: children.get(input.sessionID) }),
+    },
+    agent: { list: () => Effect.succeed({ data: [
+      { id: "build", mode: "subagent", hidden: false, model: { id: "gpt-6", providerID: "openai" } },
+      { id: "explore", mode: "subagent", hidden: false },
+    ] }) },
+  })
+
+  const plugin = await install(installToolResults(fakeExposure()), host, daemon(sent, []))
+  const call = (input: CallInput) => hooks.emit("execute.after", { sessionID, tool: "subagent", status: "completed", input, result: { content: "done" } })
+
+  // The child's agent runs on a model of its own.
+  await call({ sessionID: "ses_build" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  // The child's agent inherits its model.
+  await call({ sessionID: "ses_explore" })
+  expect(sent.at(-1)?.kind).not.toHaveProperty("agent_has_model")
+
+  // An unreadable child session, and a call naming no agent at all, are unknown.
+  await call({ sessionID: "ses_gone" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  await call({})
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  await plugin.close()
+})
+
+test("a host slow to list its agents counts the agent as having a model", async () => {
+  const hooks = new Hooks()
+  const sent: Signal[] = []
+
+  const host = fakeHost({
+    tool: { hook: hooks.register },
+    session: { get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
+    agent: { list: () => Effect.never },
+  })
+
+  const plugin = await install(installToolResults(fakeExposure()), host, daemon(sent, []))
+
+  await hooks.emit("execute.after", { sessionID, tool: "subagent", status: "completed", input: { agent: "build" }, result: { content: "done" } })
+
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
 
   await plugin.close()
 })

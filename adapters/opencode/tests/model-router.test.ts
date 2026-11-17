@@ -19,16 +19,16 @@ const retry = (sessionID: string) => ({
   decision: { retry: true, delay: 1000 },
 })
 
-test("available models carry their variants, without the IDs that name none", () => {
-  const variants = [{ id: "default" }, { id: "" }, { id: "low" }, { id: "high" }]
+test("available models carry their trimmed variants, and no key when they offer none", () => {
+  const variants = [{ id: "default" }, { id: "" }, { id: " " }, { id: " high " }, { id: "low" }]
 
   const entries = available([
     { ...failed, enabled: true, status: "active", variants },
     { providerID: "openai", id: "gpt-6-sol", enabled: true, status: "active" },
   ])
 
-  expect(entries[0]?.variants).toEqual(["low", "high"])
-  expect(entries[1]?.variants).toEqual([])
+  expect(entries[0]?.variants).toEqual(["high", "low"])
+  expect("variants" in (entries[1] ?? {})).toBe(false)
 })
 
 test("a tool in an earlier request does not block failover; a tool in this request does", async () => {

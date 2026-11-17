@@ -899,6 +899,34 @@ fn recommended_models_come_first_and_fast_or_old_editions_are_never_offered() {
 }
 
 #[test]
+fn a_kept_variant_keeps_the_recommended_note_of_the_ranked_row() {
+    // Sol is recommended at high thinking; Opus's unnamed max moves the
+    // candidate to sol#max, which no tier row recommends, so the note must
+    // come from the row sol was ranked at.
+    let note = defaults().texts.recommended_note.as_str().to_owned();
+    let plan = shipped_router().plan(
+        &Situation::default(),
+        &limit_on("anthropic/claude-opus-5-5#max"),
+    );
+
+    assert_eq!(options(&plan), vec!["openai/gpt-6.1-sol#max", STAY]);
+
+    let Plan::Ask(questions) = &plan else {
+        unreachable!()
+    };
+    let QuestionKind::Choice { options } = &questions[0].kind else {
+        unreachable!()
+    };
+
+    assert_eq!(options[0].value, "openai/gpt-6.1-sol#max");
+    assert!(
+        options[0].description.contains(&note),
+        "{:?}",
+        options[0].description
+    );
+}
+
+#[test]
 fn without_a_confident_pick_each_tier_fails_over_like_for_like() {
     let cases = [
         ("anthropic/claude-fable-5-2#high", "openai/gpt-6-astra#high"),
@@ -906,6 +934,8 @@ fn without_a_confident_pick_each_tier_fails_over_like_for_like() {
         ("anthropic/claude-opus-5-5#high", "openai/gpt-6.1-sol#high"),
         ("openai/gpt-6.1-sol#high", "anthropic/claude-opus-5-5#high"),
         // A variant the tables do not name carries over: max stays max.
+        ("anthropic/claude-fable-5-2#max", "openai/gpt-6-astra#max"),
+        ("openai/gpt-6-astra#max", "anthropic/claude-fable-5-2#max"),
         ("anthropic/claude-opus-5-5#max", "openai/gpt-6.1-sol#max"),
         ("openai/gpt-6.1-sol#max", "anthropic/claude-opus-5-5#max"),
         // The host offers terra at low, but Opus's own low names its tier, so
@@ -961,6 +991,35 @@ fn a_variant_the_host_does_not_offer_is_not_kept() {
 }
 
 #[test]
+fn a_model_without_a_tier_carries_no_variant() {
+    // DeepSeek has no table row, so its max is not an effort level the
+    // tables rate: it must not reach astra or terra at max through the
+    // any-tier path, even though the host lists the variant.
+    let mut listed = HOST_MODELS.to_vec();
+    listed.push("deepseek/deepseek-v4.1-flash");
+
+    let mut signal = limit_listed("deepseek/deepseek-v4.1-flash#max", &listed);
+    if let SignalKind::ModelError { available, .. } = &mut signal.kind {
+        for entry in available
+            .iter_mut()
+            .filter(|entry| entry.model.provider == "deepseek")
+        {
+            entry.variants = ["low", "medium", "high", "max"]
+                .map(str::to_string)
+                .to_vec();
+        }
+    }
+
+    let offered = options(&shipped_router().plan(&Situation::default(), &signal));
+
+    assert_eq!(offered[0], "anthropic/claude-fable-5-2#high");
+    assert!(
+        !offered.iter().any(|key| key.ends_with("#max")),
+        "{offered:?}"
+    );
+}
+
+#[test]
 fn a_kept_variant_never_changes_the_candidates_tier() {
     // Sol's low is unnamed, so the failover keeps it, but Opus at low is
     // efficient: the balanced candidate stays at its own high.
@@ -970,6 +1029,24 @@ fn a_kept_variant_never_changes_the_candidates_tier() {
     assert_eq!(
         options(&router.plan(&Situation::default(), &signal)),
         vec!["anthropic/claude-opus-5-5#high", STAY]
+    );
+}
+
+#[test]
+fn a_tried_kept_variant_falls_back_to_the_table_variant() {
+    // What a restart would keep: sol at max was tried, at its table variant
+    // it was not.
+    let mut router = shipped_router();
+    router.load(serde_json::json!({
+        "attempted": { "session": ["openai/gpt-6.1-sol#max"] },
+        "origins": {}
+    }));
+
+    let signal = limit_on("anthropic/claude-opus-5-5#max");
+
+    assert_eq!(
+        options(&router.plan(&Situation::default(), &signal)),
+        vec!["openai/gpt-6.1-sol#high", STAY]
     );
 }
 

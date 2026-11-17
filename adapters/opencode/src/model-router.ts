@@ -259,24 +259,42 @@ export function modelKey(model: ModelRef): string {
 /** A model as the host lists it, with the thinking variants it offers. */
 type HostVariants = { readonly variants?: ReadonlyArray<{ readonly id: string }> | undefined }
 
+/** A model as the host lists it, with the fields the engine judges it by. */
+type HostModelEntry = HostModel & HostVariants & { readonly enabled: boolean; readonly status: string }
+
+/** A model as the engine lists it; `variants` is absent when it offers none. */
+type AvailableModel = { model: ModelRef; usable: boolean; variants?: string[] }
+
 /** Usable models first, each with its variants; the engine accepts at most MAX_MODELS. */
-export function available(models: ReadonlyArray<HostModel & HostVariants & { readonly enabled: boolean; readonly status: string }>) {
+export function available(models: ReadonlyArray<HostModelEntry>): AvailableModel[] {
   return models
-    .map((model) => ({ model: ref(model), usable: model.enabled && model.status === "active", variants: variantIds(model) }))
+    .map(availableModel)
     .toSorted((a, b) => Number(b.usable) - Number(a.usable))
     .slice(0, MAX_MODELS)
 }
 
-/** A model's thinking variants, without the two IDs that name none, at most MAX_VARIANTS. */
+/** One model, with `variants` left off when it offers none: older daemons refuse unknown fields. */
+function availableModel(model: HostModelEntry): AvailableModel {
+  const entry: AvailableModel = { model: ref(model), usable: model.enabled && model.status === "active" }
+  const variants = variantIds(model)
+
+  if (variants.length > 0) entry.variants = variants
+
+  return entry
+}
+
+/** A model's thinking variants, trimmed, without the IDs that name none, at most MAX_VARIANTS. */
 function variantIds(model: HostVariants): string[] {
   const ids: string[] = []
 
   for (const variant of model.variants ?? []) {
+    const id = variant.id.trim()
+
     if (ids.length >= MAX_VARIANTS) break
 
-    if (variant.id === "" || variant.id === "default") continue
+    if (id === "" || id === "default") continue
 
-    ids.push(variant.id)
+    ids.push(id)
   }
 
   return ids
