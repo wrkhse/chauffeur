@@ -165,11 +165,15 @@ jobs:
       - name: Build the OpenCode adapter
         working-directory: adapters/opencode
         run: bun install --frozen-lockfile && bun run build
-      - name: Package and smoke-test
+      - name: Package the tarball
         shell: bash
         run: |
           set -euo pipefail
           target=$(node -p 'process.platform + "-" + process.arch')
           node scripts/package.mjs tarball --target "$target" --binary target/release/chauffeur --out dist
           node scripts/package.mjs sums dist
+      - name: Smoke the packaged tarball
+        shell: bash
+        run: |
+          set -euo pipefail
           node scripts/smoke.mjs dist/chauffeur-*.tar.gz
