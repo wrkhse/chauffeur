@@ -7,7 +7,7 @@ use chauffeur_protocol::{Intent, Navigate, Rejection, Rule, Strategy, Target, pr
 use chauffeur_runtime::{Cancel, Context, EventLog, MAX_EVENTS, Ran, run_strategy};
 use serde_json::{Map, Value, json};
 
-use super::{Call, Router, log_entry};
+use super::{Ask, Router, log_entry};
 use crate::state::Loaded;
 
 /// What an inline strategy's run is logged as.
@@ -20,8 +20,9 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// A [`Rejection`]: `deadline` or `judge_unavailable` for an inline
-    /// strategy, `cancelled` once the caller cancels.
+    /// A [`Rejection`]: `busy` when the daemon's workers cannot take the
+    /// strategy, `deadline` or `judge_unavailable` for an inline strategy,
+    /// `cancelled` once the caller cancels.
     pub fn navigate(
         &self,
         request: Navigate,
@@ -45,19 +46,20 @@ impl Router {
         let project = request.project().map(Path::to_path_buf);
         let answered = match (request.event(), request.into_target()) {
             (Some(event), Target::On(on)) => {
-                let hooked: Vec<&Arc<Rule>> = loaded
+                let hooked: Vec<Arc<Rule>> = loaded
                     .rules
                     .iter()
                     .filter(|rule| rule.hooks(&event))
+                    .cloned()
                     .collect();
-                let call = Call {
-                    event: &on,
-                    session: "",
-                    evidence: &evidence,
+                let ask = Ask {
+                    event: on,
+                    session: String::new(),
+                    evidence: Arc::new(evidence),
                     deadline,
-                    cancel,
+                    cancel: cancel.clone(),
                 };
-                Ok(self.intents(&loaded, &hooked, &call, &send))
+                Ok(self.intents(&loaded, &hooked, &ask, &send))
             }
             (_, Target::Strategy(strategy)) => {
                 allowed(&loaded, &strategy, project.as_deref())?;
@@ -76,8 +78,8 @@ impl Router {
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
-        hooked: &[&Arc<Rule>],
-        call: &Call<'_>,
+        hooked: &[Arc<Rule>],
+        ask: &Ask,
         send: &(dyn Fn(Value) + Sync),
     ) -> Value {
         for rule in hooked {
@@ -93,7 +95,7 @@ impl Router {
             }
         };
         let intents: Vec<Value> = self
-            .run_all(loaded, hooked, call, &ran)
+            .run_all(loaded, hooked, ask, &ran)
             .into_iter()
             .filter_map(|(rule, then)| then.map(|then| Intent::new(rule.id(), &then).to_json()))
             .collect();
@@ -126,7 +128,7 @@ impl Router {
         );
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         entry.insert("elapsed_ms".into(), json!(elapsed));
-        let refused = match &ran {
+        let reason = match &ran {
             Ran::Refused(reason) => Some(reason.clone()),
             Ran::Settled(_) | Ran::Deadline | Ran::Cancelled => None,
         };
@@ -134,14 +136,14 @@ impl Router {
         if let Err(error) = self.audit.append(Value::Object(entry)) {
             eprintln!("chauffeur: a run was not written to the audit log: {error}");
         }
-        match (run, refused) {
+        match (run, reason) {
             (Some(run), _) => {
                 for event in progress::run_events(None, &run.events) {
                     send(event);
                 }
                 Ok(json!({ "verdict": progress::verdict(&run.verdict) }))
             }
-            (None, Some(reason)) => Err(Rejection::JudgeUnavailable(reason)),
+            (None, Some(reason)) => Err(refused(reason)),
             // A cancelled run is answered as cancelled by `navigate`.
             (None, None) => Err(Rejection::Deadline),
         }
@@ -190,4 +192,45 @@ fn available(context: &Context, strategy: &Strategy) -> Result<(), Rejection> {
         }
     }
     Ok(())
+}
+
+/// The rejection for an inline run that never ran: `busy` when the daemon's
+/// workers could not take it, `judge_unavailable` when a judge could not run.
+/// The audit entry keeps the reason either way.
+fn refused(reason: String) -> Rejection {
+    if from_pool(&reason) {
+        return Rejection::Busy;
+    }
+    Rejection::JudgeUnavailable(reason)
+}
+
+/// Whether `reason` came from the pool rather than a judge:
+/// `chauffeur_runtime` refuses a run it cannot start, or whose worker
+/// stopped, in these words; a judge's failure is the judge's own message.
+fn from_pool(reason: &str) -> bool {
+    reason.starts_with("cannot start a worker") || reason == "the run's worker stopped"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Rejection, refused};
+
+    /// A refusal from the pool answers `busy`, so a caller is not told a
+    /// judge is gone when the daemon was merely busy; a judge's own failure
+    /// still answers `judge_unavailable`.
+    #[test]
+    fn a_pool_refusal_is_busy_and_a_judge_refusal_is_unavailable() {
+        assert_eq!(
+            refused("cannot start a worker: all 32 workers are busy".to_owned()),
+            Rejection::Busy
+        );
+        assert_eq!(
+            refused("the run's worker stopped".to_owned()),
+            Rejection::Busy
+        );
+        assert_eq!(
+            refused("no system-one model is registered".to_owned()),
+            Rejection::JudgeUnavailable("no system-one model is registered".to_owned())
+        );
+    }
 }

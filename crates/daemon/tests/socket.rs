@@ -728,3 +728,46 @@ fn events_at_once_in_one_session_return_the_action_once_per_cooldown() {
     let cooling = runs.iter().filter(|run| run["cooldown"] == true).count();
     assert_eq!((returned, cooling), (1, 3), "{runs:?}");
 }
+
+/// A notification runs nothing, whatever its method: the emit it names
+/// writes no run, and the connection holds no call for it.
+#[test]
+fn a_notification_runs_nothing() {
+    let paths = paths("notification", NUDGING);
+    start(&paths);
+    let event = json!({ "event": "tool.after", "session": "s1", "tool": "shell",
+                        "input": { "command": "git commit -m 'fixed stuff'" } });
+    let mut stream = UnixStream::connect(&paths.socket).unwrap();
+    let limit = Some(Duration::from_secs(5));
+    stream.set_read_timeout(limit).unwrap();
+    stream.set_write_timeout(limit).unwrap();
+    let mut reading = BufReader::new(stream.try_clone().unwrap());
+
+    writeln!(
+        stream,
+        "{}",
+        json!({ "jsonrpc": "2.0", "method": "chauffeur.emit", "params": { "event": event } })
+    )
+    .unwrap();
+    writeln!(
+        stream,
+        r#"{{ "jsonrpc": "2.0", "id": 1, "method": "chauffeur.status" }}"#
+    )
+    .unwrap();
+    let mut reply = String::new();
+    reading.read_line(&mut reply).unwrap();
+    assert!(reply.contains("\"result\""), "{reply}");
+
+    // The daemon joins a connection's calls before it closes it, so its EOF
+    // is the barrier after which no run can follow.
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut ended = String::new();
+    let read = reading.read_line(&mut ended).unwrap();
+
+    assert_eq!(read, 0, "the connection ended: {ended:?}");
+    assert!(
+        runs(&paths).is_empty(),
+        "the notification ran a rule: {:?}",
+        runs(&paths)
+    );
+}

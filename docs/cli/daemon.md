@@ -42,10 +42,15 @@ chauffeur daemon run --models fixtures/placeholders.json
   with it, and a reload keeps the list loaded before.
 - **Keys** come from its own environment, so start it where the keys are set,
   or put them in the service's environment file when Homebrew runs it.
-- **Several calls per connection.** Each call runs on its own thread, at
-  most 16 open on one connection, each with an ID not already open.
-  `$/cancelRequest` cancels one by its ID, and a connection that closes, or
-  stops reading for 5 seconds, cancels everything it carried.
+- **Several calls per connection.** Each call runs on its own thread: at
+  most 16 calls open on one connection, and at most 4 of them may be
+  `chauffeur.navigate`; a fifth is refused as `busy` until one finishes. An
+  ID already open is refused too. `$/cancelRequest` cancels a call by its ID,
+  and a connection that closes, or stops reading for 5 seconds, cancels
+  everything it carried. A connection with no call open that sends nothing
+  for 30 seconds is closed.
+- **Notifications run nothing.** A request with no `id` is ignored, except
+  `$/cancelRequest`: no method runs and no reply is written.
 - **Admission.** At most 16 calls run at once, 8 from harnesses
   (`chauffeur.emit`) and 8 from callers (`chauffeur.navigate`); past that a
   call is refused as `busy` at once, never queued.

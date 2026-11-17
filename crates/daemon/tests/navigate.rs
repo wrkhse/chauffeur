@@ -76,9 +76,12 @@ fn models(delay: Duration) -> String {
 }
 
 /// Fresh paths with the triage rule as an integration's, and `models`.
+///
+/// The folder is short and each test's tag keeps it its own: a macOS Unix
+/// socket path is refused past 103 bytes, and the temp folder and the
+/// socket's own `run/daemon.sock` already take most of that.
 fn paths(name: &str, models: &str) -> Paths {
-    let root =
-        std::env::temp_dir().join(format!("chauffeur-navigate-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("cn-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("config/rules/sourcefed")).unwrap();
     fs::write(root.join("config/models.json"), models).unwrap();
@@ -290,7 +293,7 @@ fn system_two(project: &str) -> Value {
 
 #[test]
 fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
-    let paths = paths("system-two-unlisted", &models(Duration::ZERO));
+    let paths = paths("s2-unlisted", &models(Duration::ZERO));
     let mut caller = Caller::new(start(&paths));
 
     caller.navigate(1, &system_two("/nowhere/listed"));
@@ -311,7 +314,7 @@ fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
 
 #[test]
 fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
-    let paths = paths("system-two-listed", &models(Duration::ZERO));
+    let paths = paths("s2-listed", &models(Duration::ZERO));
     fs::write(paths.config.join("projects.json"), r#"["/work/app"]"#).unwrap();
     let mut caller = Caller::new(start(&paths));
 
@@ -333,7 +336,7 @@ fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
 
 #[test]
 fn a_projects_file_naming_a_relative_path_is_refused() {
-    let paths = paths("projects-relative", &models(Duration::ZERO));
+    let paths = paths("relative", &models(Duration::ZERO));
     fs::write(
         paths.config.join("projects.json"),
         r#"["/work/app", "work/app"]"#,
@@ -601,35 +604,6 @@ fn a_line_over_the_limit_is_an_invalid_request_and_closes_the_connection() {
 }
 
 #[test]
-fn an_emit_notification_runs_without_a_reply() {
-    let paths = paths("emit-notify", &models(Duration::ZERO));
-    let mut caller = Caller::new(start(&paths));
-    let event = json!({ "event": "tool.after", "session": "s", "tool": "shell",
-        "input": { "command": "git commit -m x" } });
-    writeln!(
-        caller.stream,
-        "{}",
-        json!({ "jsonrpc": "2.0", "method": "chauffeur.emit",
-        "params": { "event": event } })
-    )
-    .unwrap();
-
-    let started = Instant::now();
-    while runs(&paths).is_empty() {
-        assert!(started.elapsed() < Duration::from_secs(10));
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    writeln!(
-        caller.stream,
-        "{}",
-        json!({ "jsonrpc": "2.0", "id": "status", "method": "chauffeur.status" })
-    )
-    .unwrap();
-    assert_eq!(caller.message()["id"], "status", "no notification reply");
-}
-
-#[test]
 fn one_client_leaves_navigation_capacity_for_another() {
     let paths = paths("client-share", &models(Duration::from_millis(500)));
     let mut first = Caller::new(start(&paths));
@@ -676,7 +650,7 @@ fn malformed_ids_are_invalid_and_strings_are_preserved() {
 
 #[test]
 fn an_oversized_line_can_finish_writing_before_its_error_is_read() {
-    let paths = paths("oversized-whole", &models(Duration::ZERO));
+    let paths = paths("whole", &models(Duration::ZERO));
     let mut caller = Caller::new(start(&paths));
     writeln!(
         caller.stream,

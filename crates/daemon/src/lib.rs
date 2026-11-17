@@ -8,6 +8,10 @@
 //! | `chauffeur.navigate` | A request: `protocol`, `on` or `strategy`, `evidence`, `deadline_ms` | `intents`, or `verdict`; `chauffeur.event` notifications before it |
 //! | `chauffeur.status` | none | Version, protocol, loaded rules, refused rule files |
 //! | `$/cancelRequest` | `id` | Nothing: the call with that ID is answered as `cancelled` |
+//!
+//! A request with no `id` is a notification: apart from `$/cancelRequest`,
+//! which cancels the call it names, it runs nothing, neither a method nor a
+//! reply.
 
 pub mod audit;
 mod paths;

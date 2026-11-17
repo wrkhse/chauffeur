@@ -104,14 +104,20 @@ fn accept_next<S>(mut accept: impl FnMut() -> io::Result<S>, mut log: impl FnMut
 }
 
 fn busy(mut stream: UnixStream) {
-    let error = busy_error(&format!(
-        "the daemon is busy: it serves {MAX_CONNECTIONS} connections already"
-    ));
-    let reply = json!({ "jsonrpc": "2.0", "id": null, "error": error });
+    let reply = busy_reply(
+        &Value::Null,
+        &format!("the daemon is busy: it serves {MAX_CONNECTIONS} connections already"),
+    );
 
     if stream.set_write_timeout(Some(BUSY_WRITE)).is_ok() {
         let _ = writeln!(stream, "{reply}");
     }
+}
+
+/// An error reply to `id` saying the daemon is busy, with `message` in place
+/// of the one it carries.
+fn busy_reply(id: &Value, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": busy_error(message) })
 }
 
 /// Busy's error, with `message` in place of the one it carries.
@@ -124,13 +130,20 @@ fn busy_error(message: &str) -> Value {
 }
 
 /// Reads and admits on this thread; each admitted call gets a fallible
-/// scoped thread. A notification runs only for emit, without a reply.
+/// scoped thread. A notification runs nothing, with no work and no reply,
+/// except `$/cancelRequest`, which this thread handles.
 fn connection(router: &Router, stream: UnixStream) {
     serve_connection(router, stream, IDLE);
 }
 
-/// Serves one connection, ending it after `idle` with no request and no call
-/// open.
+/// Serves one connection until its peer closes, its socket fails, or it is
+/// idle for `idle` with no call open.
+///
+/// Every read waits at most `idle`, whether or not a call is open. A
+/// timeout is a decision point: with no call open the connection is idle and
+/// ends, and with a call open the read simply starts again, so a client that
+/// sent a call and went silent keeps its thread only while that call runs. A
+/// line read so far is kept across a timeout.
 fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
     let Ok(writer) = stream.try_clone() else {
         return;
@@ -144,62 +157,55 @@ fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
     thread::scope(|scope| {
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
-        let mut notification = 0_u64;
+        // A blocking read would hold this thread until the peer hung up, so
+        // the read stays bounded for the connection's whole life.
+        let _ = reader.get_ref().set_read_timeout(Some(idle));
 
         loop {
-            let _ = reader
-                .get_ref()
-                .set_read_timeout(calls.is_empty().then_some(idle));
-            let Some(request) = next(&mut reader, &mut line, &wire) else {
-                break;
-            };
-
-            if request.method == rpc::CANCEL {
-                calls.cancel(request.params.get("id"));
-                continue;
-            }
-
-            let reply = request.id.is_some();
-            if !reply && request.method != "chauffeur.emit" {
-                continue;
-            }
-
-            notification = notification.saturating_add(1);
-            let id = request
-                .id
-                .clone()
-                .unwrap_or_else(|| json!({ "notification": notification }));
-            let navigate = request.method == "chauffeur.navigate";
-            let prepared = calls
-                .room(&id, navigate)
-                .and_then(|()| rpc::prepare(router, request));
-            let call = match prepared {
-                Ok(call) => call,
-                Err(refused) => {
-                    if reply {
-                        let _ = wire.send(&refused);
+            match next(&mut reader, &mut line, &wire) {
+                Next::Request(request) => {
+                    if request.method == rpc::CANCEL {
+                        calls.cancel(request.params.get("id"));
+                        continue;
                     }
-                    continue;
-                }
-            };
-            let cancel = calls.open(id.clone(), navigate);
-            let (calls, wire) = (&calls, &wire);
-            let key = id.clone();
-            let started =
-                thread::Builder::new()
-                    .name("call".into())
-                    .spawn_scoped(scope, move || {
-                        finish_call(router, calls, wire, &key, call, &cancel);
-                    });
 
-            if let Err(error) = started {
-                calls.close(&id);
-                if reply {
-                    let error = busy_error(&format!(
-                        "the daemon is busy: cannot start a call thread: {error}"
-                    ));
-                    let _ = wire.send(&json!({ "jsonrpc": "2.0", "id": &id, "error": error }));
+                    // A notification runs nothing.
+                    let Some(id) = request.id.clone() else {
+                        continue;
+                    };
+
+                    let navigate = request.method == "chauffeur.navigate";
+                    let prepared = calls
+                        .room(&id, navigate)
+                        .and_then(|()| rpc::prepare(router, request));
+                    let call = match prepared {
+                        Ok(call) => call,
+                        Err(refused) => {
+                            let _ = wire.send(&refused);
+                            continue;
+                        }
+                    };
+                    let slot = calls.open(id.clone(), navigate);
+                    let (calls, wire) = (&calls, &wire);
+                    let started =
+                        thread::Builder::new()
+                            .name("call".into())
+                            .spawn_scoped(scope, move || {
+                                finish_call(router, calls, wire, slot, call);
+                            });
+
+                    if let Err(error) = started {
+                        // A spawn that fails runs nothing: dropping the
+                        // closure drops the call's slot with it.
+                        let _ = wire.send(&busy_reply(
+                            &id,
+                            &format!("the daemon is busy: cannot start a call thread: {error}"),
+                        ));
+                    }
                 }
+                Next::Idle if calls.is_empty() => break,
+                Next::Idle => {}
+                Next::Ended => break,
             }
         }
 
@@ -207,23 +213,18 @@ fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
     });
 }
 
-fn finish_call(
-    router: &Router,
-    calls: &Calls,
-    wire: &Wire,
-    key: &Value,
-    call: rpc::Call,
-    cancel: &Cancel,
-) {
+fn finish_call(router: &Router, calls: &Calls, wire: &Wire, slot: Slot<'_>, call: rpc::Call) {
     let notify = |message: Value| {
         if wire.send(&message).is_err() {
             calls.cancel_all();
         }
     };
-    let (reply, permit) = call.answer(router, cancel, &notify);
+    let (reply, permit) = call.answer(router, slot.cancel(), &notify);
     // Late workers retain their copies; settled calls release before reply.
     drop(permit);
-    calls.close(key);
+    // The place is given back before the reply, so its ID may be reused by
+    // the next line.
+    drop(slot);
 
     if let Some(reply) = reply
         && wire.send(&reply).is_err()
@@ -232,42 +233,78 @@ fn finish_call(
     }
 }
 
-/// Answers malformed lines, returning none on EOF, oversized input or I/O.
-fn next(
-    reader: &mut BufReader<UnixStream>,
-    line: &mut Vec<u8>,
-    wire: &Wire,
-) -> Option<rpc::Request> {
+/// What one read found.
+enum Next {
+    /// A request line, read whole.
+    Request(rpc::Request),
+    /// The idle timeout passed with no complete line; what arrived is kept
+    /// in the line buffer for the next read.
+    Idle,
+    /// The connection ended: its peer closed, a line was over the limit, or
+    /// the socket failed.
+    Ended,
+}
+
+/// Reads one request line, answering malformed lines itself and reporting
+/// an idle timeout apart from an end so the caller can decide whether the
+/// connection has gone idle.
+///
+/// The line buffer is cleared only once a request is read: a partial line
+/// read before a timeout stays there, so a slow line is not lost.
+fn next(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>, wire: &Wire) -> Next {
     loop {
-        line.clear();
-        let limit = u64::try_from(MAX_LINE)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
+        let left = MAX_LINE.saturating_add(1).saturating_sub(line.len());
+        let limit = u64::try_from(left.max(1)).unwrap_or(u64::MAX);
 
         match reader.by_ref().take(limit).read_until(b'\n', line) {
-            Ok(0) | Err(_) => return None,
-            Ok(_) if line.len() > MAX_LINE => {
-                let reply = rpc::error(&Value::Null, -32_600, "the request line is over 1 MiB");
-                let _ = wire.send(&reply);
-                let _ = reader.get_ref().shutdown(Shutdown::Write);
-                if !line.ends_with(b"\n") {
-                    drain_line(reader);
-                }
-                return None;
-            }
+            Ok(0) => return Next::Ended,
             Ok(_) => {}
+            Err(error) if timed_out(&error) => return Next::Idle,
+            Err(_) => return Next::Ended,
+        }
+
+        if line.len() > MAX_LINE {
+            return oversized(reader, line, wire);
         }
 
         let text = String::from_utf8_lossy(line);
-        if text.trim().is_empty() {
-            continue;
-        }
+        let trimmed = text.trim();
+        let parsed = if trimmed.is_empty() {
+            None
+        } else {
+            Some(rpc::parse(trimmed))
+        };
+        line.clear();
 
-        match rpc::parse(text.trim()) {
-            Ok(request) => return Some(request),
-            Err(reply) => wire.send(&reply).ok()?,
+        // A malformed line is answered and the next one read; a write that
+        // fails ends the connection.
+        match parsed {
+            Some(Ok(request)) => return Next::Request(request),
+            Some(Err(reply)) if wire.send(&reply).is_err() => return Next::Ended,
+            None | Some(Err(_)) => {}
         }
     }
+}
+
+/// Whether a read error is the socket's read timeout rather than a failure.
+fn timed_out(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// Answers a line over the limit and ends the connection, reading through
+/// its newline so a writer is not left blocked on a daemon that stopped
+/// reading.
+fn oversized(reader: &mut BufReader<UnixStream>, line: &[u8], wire: &Wire) -> Next {
+    let reply = rpc::error(&Value::Null, -32_600, "the request line is over 1 MiB");
+    let _ = wire.send(&reply);
+    let _ = reader.get_ref().shutdown(Shutdown::Write);
+    if !line.ends_with(b"\n") {
+        drain_line(reader);
+    }
+    Next::Ended
 }
 
 /// Drain only through the newline, one more MiB, or 500 ms.
@@ -354,6 +391,28 @@ struct Calls {
     open: Mutex<Vec<(Value, Cancel, bool)>>,
 }
 
+/// A call's place among a connection's open calls, given back when it drops:
+/// a call thread that unwinds still frees its place.
+struct Slot<'a> {
+    calls: &'a Calls,
+    id: Value,
+    cancel: Cancel,
+}
+
+impl Slot<'_> {
+    /// The call's cancellation, shared with `$/cancelRequest` and the
+    /// connection's end.
+    const fn cancel(&self) -> &Cancel {
+        &self.cancel
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.calls.free(&self.id);
+    }
+}
+
 impl Calls {
     fn is_empty(&self) -> bool {
         self.open
@@ -375,14 +434,27 @@ impl Calls {
         if taken {
             return Err(rpc::duplicate(id));
         }
-        if count >= MAX_CALLS || (navigate && navigations >= MAX_NAVIGATIONS) {
-            return Err(json!({ "jsonrpc": "2.0", "id": id, "error": Rejection::Busy.to_error() }));
+        if count >= MAX_CALLS {
+            return Err(busy_reply(
+                id,
+                &format!("the daemon is busy: this connection has {MAX_CALLS} calls open"),
+            ));
+        }
+        if navigate && navigations >= MAX_NAVIGATIONS {
+            return Err(busy_reply(
+                id,
+                &format!(
+                    "the daemon is busy: this connection carries {MAX_NAVIGATIONS} navigations already"
+                ),
+            ));
         }
 
         Ok(())
     }
 
-    fn open(&self, id: Value, navigate: bool) -> Cancel {
+    /// Opens a place for a call with `id`, giving it back and cancelling it
+    /// when the slot drops.
+    fn open(&self, id: Value, navigate: bool) -> Slot<'_> {
         let source = if navigate {
             Source::Integration
         } else {
@@ -392,15 +464,22 @@ impl Calls {
         self.open
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((id, cancel.clone(), navigate));
-        cancel
+            .push((id.clone(), cancel.clone(), navigate));
+        Slot {
+            calls: self,
+            id,
+            cancel,
+        }
     }
 
-    fn close(&self, id: &Value) {
-        self.open
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|(open, _, _)| open != id);
+    /// Removes the call with `id` and cancels it, so any worker still using
+    /// its cancellation stops.
+    fn free(&self, id: &Value) {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        for (_, cancel, _) in open.iter().filter(|(open, _, _)| open == id) {
+            cancel.cancel();
+        }
+        open.retain(|(open, _, _)| open != id);
     }
 
     fn cancel(&self, id: Option<&Value>) {
@@ -424,16 +503,21 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use chauffeur_runtime::{Cancel, Source};
     use serde_json::{Value, json};
 
-    use super::{ACCEPT_RETRY, accept_next, busy_error, serve_connection};
-    use crate::Paths;
+    use super::{
+        ACCEPT_RETRY, Calls, MAX_CALLS, MAX_NAVIGATIONS, Next, Wire, accept_next, busy_error, next,
+        serve_connection,
+    };
     use crate::route::Router;
+    use crate::{Paths, rpc};
 
     /// An error that lasts, such as `EMFILE`, fails every accept at once;
     /// waiting between them keeps the loop from spinning a core.
@@ -624,5 +708,156 @@ mod tests {
             "the call outlives the idle timeout: {reply}"
         );
         assert_ne!(reason, Some("cancelled"), "{reply}");
+    }
+
+    /// A connection that carried a call is idle again once the call is done:
+    /// going quiet after one call cannot hold its thread for ever.
+    #[test]
+    fn a_connection_that_carried_a_call_ends_at_its_idle_timeout() {
+        let router = Arc::new(fixture("after-call", r#"{ "models": {}, "tiers": {} }"#));
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let limit = Some(Duration::from_secs(2));
+        client.set_read_timeout(limit).unwrap();
+        client.set_write_timeout(limit).unwrap();
+        let mut reading = BufReader::new(client.try_clone().unwrap());
+
+        thread::spawn(move || serve_connection(&router, server, Duration::from_millis(200)));
+
+        writeln!(
+            client,
+            r#"{{ "jsonrpc": "2.0", "id": 1, "method": "chauffeur.status" }}"#
+        )
+        .unwrap();
+        let mut reply = String::new();
+        reading.read_line(&mut reply).unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+
+        let mut ended = String::new();
+        let waited = reading.read_line(&mut ended);
+
+        assert!(
+            matches!(waited, Ok(0)),
+            "the connection is still open after its call: {waited:?}"
+        );
+    }
+
+    /// A call's place and its cancellation are given back when its slot
+    /// drops.
+    #[test]
+    fn dropping_a_call_slot_frees_the_call_and_cancels_it() {
+        let calls = Calls::default();
+        let slot = calls.open(json!(1), false);
+        let cancel = slot.cancel().clone();
+
+        assert!(!calls.is_empty(), "the call is open");
+        assert!(!cancel.is_cancelled());
+
+        drop(slot);
+
+        assert!(calls.is_empty(), "the slot gave its place back");
+        assert!(cancel.is_cancelled(), "the slot cancelled its call");
+    }
+
+    /// A call thread that unwinds still gives its place back: its slot drops
+    /// as the thread unwinds.
+    #[test]
+    fn a_call_thread_that_unwinds_gives_its_place_back() {
+        let calls = Calls::default();
+        let slot = calls.open(json!(1), false);
+        let cancel = slot.cancel().clone();
+
+        thread::scope(|scope| {
+            let unwound = scope.spawn(move || {
+                let _slot = slot;
+                panic!("the call unwound");
+            });
+            assert!(unwound.join().is_err(), "the call thread unwound");
+        });
+
+        assert!(calls.is_empty(), "the slot gave its place back");
+        assert!(cancel.is_cancelled(), "the slot cancelled its call");
+    }
+
+    /// A line cut short by the read timeout is kept and completed by the
+    /// next read, and the timeout comes back apart from an end.
+    #[test]
+    fn a_partial_line_survives_the_idle_timeout() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let wire = Wire {
+            writer: Mutex::new(server.try_clone().unwrap()),
+            dead: AtomicBool::new(false),
+        };
+        let mut reader = BufReader::new(server);
+        let mut line = Vec::new();
+
+        client.write_all(b"{ \"jsonrpc\": \"2.0\",").unwrap();
+        assert!(matches!(next(&mut reader, &mut line, &wire), Next::Idle));
+        assert!(!line.is_empty(), "the partial line is kept");
+
+        writeln!(client, "\"id\": 1, \"method\": \"chauffeur.status\" }}").unwrap();
+        let Next::Request(request) = next(&mut reader, &mut line, &wire) else {
+            panic!("the completed line is read as a request");
+        };
+
+        assert_eq!(request.method, "chauffeur.status");
+        assert_eq!(request.id, Some(json!(1)));
+        assert!(line.is_empty(), "the line is cleared once it is read");
+    }
+
+    /// Each cap refuses as busy and says which one it hit, so a caller knows
+    /// what to wait for.
+    #[test]
+    fn a_cap_refuses_as_busy_and_names_its_limit() {
+        let calls = Calls::default();
+        let navigations: Vec<_> = (0..MAX_NAVIGATIONS)
+            .map(|index| calls.open(json!(index), true))
+            .collect();
+
+        let refused = calls.room(&json!("fifth"), true).unwrap_err();
+
+        assert_eq!(refused["error"]["code"], -32_000, "{refused}");
+        assert_eq!(
+            refused["error"]["message"],
+            "the daemon is busy: this connection carries 4 navigations already"
+        );
+
+        let others: Vec<_> = (MAX_NAVIGATIONS..MAX_CALLS)
+            .map(|index| calls.open(json!(index), false))
+            .collect();
+
+        let refused = calls.room(&json!("another"), false).unwrap_err();
+
+        assert_eq!(refused["error"]["code"], -32_000, "{refused}");
+        assert_eq!(
+            refused["error"]["message"],
+            "the daemon is busy: this connection has 16 calls open"
+        );
+
+        drop(navigations);
+        drop(others);
+    }
+
+    /// A call cancelled before it is answered is refused as cancelled,
+    /// whatever its method, not only a navigation.
+    #[test]
+    fn a_cancelled_call_is_answered_as_cancelled() {
+        let router = fixture("cancelled", r#"{ "models": {}, "tiers": {} }"#);
+        let request =
+            rpc::parse(r#"{"jsonrpc": "2.0", "id": 1, "method": "chauffeur.status"}"#).unwrap();
+        let call = rpc::prepare(&router, request).unwrap();
+        let cancel = Cancel::new(Source::Harness);
+        cancel.cancel();
+
+        let (reply, _permit) = call.answer(&router, &cancel, &|_| {});
+        let reply = reply.unwrap();
+
+        assert_eq!(reply["error"]["code"], -32_800, "{reply}");
+        assert_eq!(reply["error"]["data"]["reason"], "cancelled", "{reply}");
     }
 }

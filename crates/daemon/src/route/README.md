@@ -1,8 +1,8 @@
 # `route`
 
-Sends an event, or a navigation, to every rule that hooks it, runs them at
-once, and appends what each did to the audit log. An inline strategy runs on
-its own and returns its verdict.
+Sends an event, or a navigation, to every rule that hooks it, runs them on the
+router's pool of workers, and appends what each did to the audit log. An
+inline strategy runs on its own and returns its verdict.
 
 | File           | Holds                                                                                          |
 | -------------- | ---------------------------------------------------------------------------------------------- |
@@ -23,11 +23,11 @@ sequenceDiagram
     R-->>S: rule_matched, for a navigation
     R->>C: cooling for this rule and session?
     C-->>R: skip, logged as cooldown
-    R->>W: run the rest at once, until the deadline or a cancel
+    R->>W: run the rest on the pool, until the deadline or a cancel
     W-->>R: verdict, refused, deadline or cancelled
     R-->>S: round_ready and step_settled, for a navigation
     R->>C: fire when a rule returned something
-    R->>A: one line per run
+    R->>A: one line per run, in hook order
     R-->>S: actions, or intents
 ```
 
@@ -49,6 +49,13 @@ let permit = router.admit(Source::Integration)?;
 let intents = router.navigate(request, &cancel, &|event| send(event))?;
 ```
 
+- Rules run on the router's own pool: at most 32 at once, with up to 8
+  kept waiting between calls, so a project with hundreds of rules starts no
+  thread of its own. A rule that finds every worker busy waits for one to
+  finish; one still waiting when the call's deadline passes does not run,
+  and a run already going reports just after it.
+- The audit log keeps hook order, one line per run, while a navigation's
+  `chauffeur.event` progress streams as each run settles.
 - A run whose line cannot be written still returns its action, and the
   daemon says so on stderr.
 - A rule that misses the deadline, or fails, returns nothing; the other

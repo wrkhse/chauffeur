@@ -62,7 +62,7 @@ pub fn parse(line: &str) -> Result<Request, Value> {
 pub struct Call {
     id: Option<Value>,
     work: Work,
-    /// Held until the reply is written; none for a call that needs no place.
+    /// The call's place for its source; none for a call that needs no place.
     permit: Option<Permit>,
 }
 
@@ -112,7 +112,13 @@ pub fn prepare(router: &Router, request: Request) -> Result<Call, Value> {
 
 impl Call {
     /// Runs the call, with `notify` given each notification it streams, and
-    /// returns its reply and the permit to drop once the reply is written.
+    /// returns its reply and the permit for its place.
+    ///
+    /// The caller drops the permit once the call is done, before the reply
+    /// is written: a worker still running keeps its own copy, so the place
+    /// may outlive that drop. A call cancelled while it ran, by
+    /// `$/cancelRequest` or its connection's end, is answered with
+    /// [`Rejection::Cancelled`] whatever its method.
     pub fn answer(
         self,
         router: &Router,
@@ -143,9 +149,13 @@ impl Call {
             }
             Work::Status => Ok(status(router)),
         };
-        let reply = match result {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+        let reply = if cancel.is_cancelled() {
+            json!({ "jsonrpc": "2.0", "id": id, "error": Rejection::Cancelled.to_error() })
+        } else {
+            match result {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+            }
         };
         drop(cancel);
         (id.is_some().then_some(reply), self.permit)
