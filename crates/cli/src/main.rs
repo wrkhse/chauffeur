@@ -3,11 +3,14 @@
 
 mod audit;
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use chauffeur_daemon::{DaemonError, Paths};
 use clap::{Parser, Subcommand};
@@ -177,50 +180,45 @@ fn call(name: &str, method: &str, params: &Value, wait: Duration) -> Result<Valu
         "{}",
         json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
     )?;
-    answer(stream, wait)
+    answer(&stream, wait)
 }
 
 /// The daemon's one-line answer to `stream`, read within `wait` end to end:
 /// a daemon that trickles bytes cannot extend the wait.
-fn answer(stream: UnixStream, wait: Duration) -> Result<Value> {
-    let mut reader = BufReader::new(stream);
-    let mut line = Vec::new();
-    let until = Instant::now().checked_add(wait);
+fn answer(stream: &UnixStream, wait: Duration) -> Result<Value> {
+    let (sender, receiver) = mpsc::channel();
+    let line = thread::scope(|scope| {
+        let _reader = scope.spawn(move || {
+            let result = stream.try_clone().and_then(|stream| {
+                let mut line = Vec::new();
+                let limit = u64::try_from(MAX_REPLY)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1);
 
-    loop {
-        let left = until.map_or(Duration::ZERO, |until| {
-            until.saturating_duration_since(Instant::now())
+                BufReader::new(stream)
+                    .take(limit)
+                    .read_until(b'\n', &mut line)?;
+
+                Ok(line)
+            });
+            let _ = sender.send(result);
         });
-        if left.is_zero() {
-            return Err(eyre!("the daemon did not answer in time"));
-        }
-        bound(&reader, left)?;
 
-        let (count, ended) = match reader.fill_buf() {
-            Err(error) if wait_over(&error) => {
-                return Err(eyre!("the daemon did not answer in time"));
+        match receiver.recv_timeout(wait) {
+            Ok(Ok(line)) => Ok(line),
+            Ok(Err(error)) => Err(error).wrap_err("cannot read the daemon's answer"),
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                Err(eyre!("the daemon did not answer in time"))
             }
-            Err(error) => return Err(error).wrap_err("cannot read the daemon's answer"),
-            Ok([]) => break,
-            Ok(bytes) => {
-                let (count, ended) = bytes
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .map_or((bytes.len(), false), |position| {
-                        (position.saturating_add(1), true)
-                    });
-                if line.len().saturating_add(count) > MAX_REPLY {
-                    return Err(eyre!("the daemon's answer is over 4 MiB"));
-                }
-                line.extend_from_slice(bytes.get(..count).unwrap_or_default());
-
-                (count, ended)
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(eyre!("the reader stopped before it sent the answer"))
             }
-        };
-        reader.consume(count);
-        if ended {
-            break;
         }
+    })?;
+
+    if line.len() > MAX_REPLY {
+        return Err(eyre!("the daemon's answer is over 4 MiB"));
     }
 
     let reply: Value = serde_json::from_slice(&line).wrap_err("the daemon's reply is not JSON")?;
@@ -232,25 +230,6 @@ fn answer(stream: UnixStream, wait: Duration) -> Result<Value> {
         ));
     }
     Ok(reply.get("result").cloned().unwrap_or(Value::Null))
-}
-
-/// Bounds the next read by `left`.
-fn bound(reader: &BufReader<UnixStream>, left: Duration) -> Result<()> {
-    match reader.get_ref().set_read_timeout(Some(left)) {
-        // macOS refuses a timeout on a socket whose peer has closed (EINVAL).
-        // Nothing more can arrive then: the next read returns what is
-        // buffered and then end of file, so the wait still ends.
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
-        result => result.wrap_err("cannot bound the wait for the daemon's answer"),
-    }
-}
-
-/// Whether `error` is a read that ran past its timeout.
-fn wait_over(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-    )
 }
 
 #[cfg(test)]
@@ -315,13 +294,19 @@ mod tests {
     }
 
     /// A daemon that never answers must not hold the command: the wait ends
-    /// it, with the same failure a refused call gets.
+    /// it, with the same failure a refused call gets. The peer keeps its end
+    /// open for a few seconds and then drops it, so a wait that never returns
+    /// fails the test on the message instead of hanging it.
     #[test]
     fn an_answer_that_never_comes_is_refused_at_the_wait() {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let _silent = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            drop(peer);
+        });
         let started = Instant::now();
 
-        let error = answer(ours, Duration::from_millis(100)).unwrap_err();
+        let error = answer(&ours, Duration::from_millis(100)).unwrap_err();
 
         assert_eq!(error.to_string(), "the daemon did not answer in time");
         assert!(
@@ -357,10 +342,24 @@ mod tests {
         let writer = thread::spawn(move || {
             let _ = peer.write_all(&line);
         });
-        let answer = answer(ours, wait);
+        let answer = answer(&ours, wait);
         writer.join().unwrap();
 
         answer
+    }
+
+    /// A daemon that writes its reply and closes at once is still read: the
+    /// peer is gone before `answer` starts.
+    #[test]
+    fn a_reply_from_a_peer_that_already_closed_is_returned() {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let (line, padding) = reply_of(64);
+        peer.write_all(&line).unwrap();
+        drop(peer);
+
+        let reply = answer(&ours, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(reply["pad"].as_str().map(str::len), Some(padding));
     }
 
     /// A daemon that trickles bytes without ever finishing its line cannot
@@ -378,15 +377,13 @@ mod tests {
         });
         let started = Instant::now();
 
-        let error = answer(ours, Duration::from_millis(100)).unwrap_err();
+        let error = answer(&ours, Duration::from_millis(100)).unwrap_err();
+        let waited = started.elapsed();
+        drop(ours);
         writer.join().unwrap();
 
         assert_eq!(error.to_string(), "the daemon did not answer in time");
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{:?} waiting",
-            started.elapsed()
-        );
+        assert!(waited < Duration::from_secs(1), "{waited:?} waiting");
     }
 
     /// The last byte the bound admits is accepted, not refused: a line of
