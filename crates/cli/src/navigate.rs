@@ -48,11 +48,14 @@ impl From<Ended> for ExitCode {
 /// writes each message it sends back to `output`, until the reply.
 pub fn navigate(socket: &Path, input: &mut impl Read, output: &mut impl Write) -> Ended {
     let mut text = Vec::new();
+    // The read is bounded so a stdin that never ends cannot exhaust memory,
+    // but it is not judged here: the line written to the daemon adds the
+    // JSON-RPC envelope to this JSON, so it is always the longer of the two,
+    // and the one check on that line refuses everything this bound could
+    // catch, with the same message. A stdin over the bound is therefore
+    // either not JSON, or refused by that check.
     let limit = u64::try_from(chauffeur_daemon::MAX_LINE).unwrap_or(u64::MAX);
     let read = input.take(limit.saturating_add(1)).read_to_end(&mut text);
-    if text.len() > chauffeur_daemon::MAX_LINE {
-        return complain("request over 1 MiB", Ended::Rejected);
-    }
     let params: Value = match read.map(|_| serde_json::from_slice(&text)) {
         Ok(Ok(params)) => params,
         Ok(Err(error)) => {
@@ -282,8 +285,11 @@ mod tests {
         }
     }
 
+    /// A stdin over the read bound is rejected before any connection: the
+    /// read holds at most `MAX_LINE + 1` bytes, so this one is not JSON, and
+    /// the missing socket would end a connection attempt with exit 2.
     #[test]
-    fn request_over_one_mib_is_rejected_before_connecting() {
+    fn stdin_over_the_read_bound_is_rejected_before_connecting() {
         let bytes = vec![b' '; chauffeur_daemon::MAX_LINE.saturating_add(1)];
         let mut input = bytes.as_slice();
         assert_eq!(
@@ -462,7 +468,8 @@ mod tests {
     /// The request on stdin whose serialized line, the newline included, is
     /// `size` bytes. The padding sits inside a JSON string, where spaces
     /// survive serialization, and is counted from the real envelope rather
-    /// than assumed.
+    /// than assumed. Its deadline is short, so a client that wrongly
+    /// connects waits little.
     fn request_of_line_bytes(size: usize) -> Vec<u8> {
         let envelope = |params: Value| {
             json!({
@@ -472,10 +479,12 @@ mod tests {
                 "params": params,
             })
         };
-        let empty = envelope(json!({ "pad": "" })).to_string().len();
+        let empty = envelope(json!({ "deadline_ms": 200, "pad": "" }))
+            .to_string()
+            .len();
         let padding = size.saturating_sub(1).saturating_sub(empty);
         assert!(padding > 0, "the line is {padding} bytes short of padding");
-        let params = json!({ "pad": " ".repeat(padding) });
+        let params = json!({ "deadline_ms": 200, "pad": " ".repeat(padding) });
         let line = envelope(params.clone()).to_string();
         assert_eq!(
             line.len().saturating_add(1),
@@ -485,17 +494,25 @@ mod tests {
         serde_json::to_vec(&params).unwrap()
     }
 
-    /// The listener's next connection, waited for at most five seconds, so a
-    /// request that never arrives fails the test instead of hanging it.
-    fn accepted(listener: &UnixListener) -> UnixStream {
+    /// How long a test's peer waits for the client to connect, and then for
+    /// its request line: a client that never gets there fails the test
+    /// instead of hanging the suite on a read that never returns.
+    const PEER_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// The listener's next connection, waited for at most `PEER_TIMEOUT`, so
+    /// a client that never connects cannot hang the peer. A stream that does
+    /// arrive has its read bounded too.
+    fn connection_within(listener: &UnixListener) -> Option<UnixStream> {
         listener.set_nonblocking(true).unwrap();
-        for _ in 0..500 {
+        let started = Instant::now();
+        while started.elapsed() < PEER_TIMEOUT {
             match listener.accept() {
                 Ok((stream, _)) => {
                     // This platform's accepted streams inherit the listener's
                     // nonblocking mode; the peer reads its line in full.
                     stream.set_nonblocking(false).unwrap();
-                    return stream;
+                    stream.set_read_timeout(Some(PEER_TIMEOUT)).unwrap();
+                    return Some(stream);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -503,7 +520,29 @@ mod tests {
                 Err(error) => panic!("cannot accept a connection: {error}"),
             }
         }
-        panic!("no connection reached the listener");
+        None
+    }
+
+    /// The listener's next connection, which a client inside the limit always
+    /// makes: one that never arrives fails the test instead of hanging it.
+    fn accepted(listener: &UnixListener) -> UnixStream {
+        let Some(stream) = connection_within(listener) else {
+            panic!("no connection reached the listener within {PEER_TIMEOUT:?}");
+        };
+        stream
+    }
+
+    /// The request's line, read through `stream` within `PEER_TIMEOUT`, so a
+    /// client that connects and then stops fails the test instead of hanging
+    /// the peer.
+    fn request_line(stream: &UnixStream) -> String {
+        let mut line = String::new();
+        let read = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
+        assert!(
+            read.is_ok(),
+            "the request's line never arrived within {PEER_TIMEOUT:?}: {read:?}"
+        );
+        line
     }
 
     /// A request whose line, its newline included, is exactly the daemon's
@@ -516,11 +555,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let peer = thread::spawn(move || {
             let mut stream = accepted(&listener);
-            let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            assert_eq!(line.len(), chauffeur_daemon::MAX_LINE);
+            assert_eq!(request_line(&stream).len(), chauffeur_daemon::MAX_LINE);
             writeln!(stream, "{REPLY}").unwrap();
         });
         let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE);
@@ -535,20 +570,35 @@ mod tests {
     }
 
     /// A request one byte over the line limit is refused before connecting,
-    /// so the listener never sees it.
+    /// so the listener never sees it. A peer that does see a connection
+    /// reads its line, records it, and refuses at once, so a client that
+    /// wrongly connected ends instead of blocking on a write nobody drains.
     #[test]
     fn a_request_one_byte_over_the_line_limit_never_connects() {
+        const REFUSAL: &str = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"#,
+            r#""message":"the request line is over 1 MiB","data":{"reason":"over_limit"}}}"#
+        );
         let path = socket_path("over");
         let listener = UnixListener::bind(&path).unwrap();
+        let peer = thread::spawn(move || {
+            let Some(mut stream) = connection_within(&listener) else {
+                return false;
+            };
+            request_line(&stream);
+            let _ = writeln!(stream, "{REFUSAL}");
+            true
+        });
         let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE.saturating_add(1));
         let mut input = request.as_slice();
         let mut output = Vec::new();
 
         assert_eq!(navigate(&path, &mut input, &mut output), Ended::Rejected);
 
-        listener.set_nonblocking(true).unwrap();
-        let error = listener.accept().unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            !peer.join().unwrap(),
+            "the request's line reached the listener"
+        );
         assert_eq!(output, Vec::<u8>::new());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
