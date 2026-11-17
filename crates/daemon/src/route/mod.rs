@@ -94,7 +94,9 @@ impl Router {
         }
     }
 
-    /// Replaces the loaded rules, models and redaction; the next event uses them.
+    /// Replaces the loaded rules, models and redaction; the next event uses
+    /// them. A project's cached rules came from the older load, so the next
+    /// navigation reloads them.
     pub fn replace(&self, loaded: Loaded) {
         if let Ok(mut current) = self.loaded.write() {
             *current = Arc::new(loaded);
