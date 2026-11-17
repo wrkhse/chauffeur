@@ -22,7 +22,11 @@ const CHAUFFEUR: &str = env!("CARGO_BIN_EXE_chauffeur");
 
 const PLACEHOLDERS: &str = r#"{ "models": { "stand-in": { "format": "placeholder",
                                                           "otherwise": { "yes": 0.1, "no": 0.9 } } },
-                               "tiers": { "system-one": ["stand-in"] } }"#;
+                               "tiers": { "system-one": ["stand-in"], "system-two": ["stand-in"] } }"#;
+
+/// The project the inline System Two fixture names, listed so the daemon runs
+/// it rather than refusing it, as a user who listed the project would.
+const PROJECTS: &str = r#"["/Users/me/src/app"]"#;
 
 const TRIAGE: &str = r#"{
   "on": "sourcefed.event",
@@ -38,7 +42,8 @@ fn repo(path: &str) -> PathBuf {
         .join(path)
 }
 
-/// A daemon on a thread, with the triage rule and `--models` placeholders.
+/// A daemon on a thread, with the triage rule, the fixtures' project and
+/// `--models` placeholders.
 fn daemon(name: &str) -> Paths {
     let root = std::env::temp_dir().join(format!(
         "chauffeur-cli-navigate-{name}-{}",
@@ -47,6 +52,7 @@ fn daemon(name: &str) -> Paths {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("config/rules/sourcefed")).unwrap();
     fs::write(root.join("placeholders.json"), PLACEHOLDERS).unwrap();
+    fs::write(root.join("config/projects.json"), PROJECTS).unwrap();
     fs::write(root.join("config/rules/sourcefed/triage.json"), TRIAGE).unwrap();
     let paths = Paths {
         name: "chauffeur-test".into(),
@@ -125,20 +131,25 @@ fn an_event_prints_its_events_then_the_intents_and_exits_0() {
     );
 }
 
-/// The fixtures every binding replays, each with its `fill` applied.
+/// The fixtures every binding replays, each with its `fill` applied: `text`
+/// repeated `times`, put at the JSON pointer `at` in its params.
 fn fixtures() -> Vec<Value> {
     let text = fs::read_to_string(repo("crates/protocol/fixtures/navigate.json")).unwrap();
     let fixtures: Value = serde_json::from_str(&text).unwrap();
     let mut cases = fixtures["cases"].as_array().unwrap().clone();
     for case in &mut cases {
         for fill in case["fill"].as_array().cloned().unwrap_or_default() {
+            let at = fill["at"].as_str().unwrap();
+            let (parent, key) = at.rsplit_once('/').unwrap();
             let times = usize::try_from(fill["times"].as_u64().unwrap()).unwrap();
-            let value = json!(fill["text"].as_str().unwrap().repeat(times));
-            if let Some(pointer) = fill["at"].as_str() {
-                *case["params"].pointer_mut(pointer).unwrap() = value;
+            let text = fill["text"].as_str().unwrap().repeat(times);
+            let into = case["params"].pointer_mut(parent).unwrap();
+            if let Value::Array(items) = into {
+                items[key.parse::<usize>().unwrap()] = json!(text);
             } else {
-                let (into, name) = (fill["in"].as_str().unwrap(), fill["name"].as_str().unwrap());
-                case["params"][into][name] = value;
+                into.as_object_mut()
+                    .unwrap()
+                    .insert(key.to_owned(), json!(text));
             }
         }
     }

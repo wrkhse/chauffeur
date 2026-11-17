@@ -60,3 +60,11 @@ cargo fmt --all -- --check
 cargo clippy -p chauffeur-cli --all-targets --locked -- -D warnings
 cargo build -p chauffeur-cli --locked
 ```
+
+Two of them start processes, so they are `#[ignore]`d: one starts and kills a
+daemon, the other reads one line and closes the pipe. CI runs these two, and
+only these, with:
+
+```sh
+cargo nextest run -p chauffeur-cli --test navigate --run-ignored only --locked
+```

@@ -33,6 +33,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
       - run: cargo nextest run --workspace --locked
+      # The CLI's process tests start and stop a daemon or pipe it through head,
+      # so they are #[ignore]d locally and run here.
+      - run: cargo nextest run -p chauffeur-cli --test navigate --run-ignored only --locked
       - run: cargo test --doc --workspace --locked
       # Each benchmark once, so they keep building and running; timings are compared locally.
       - run: cargo bench --workspace --bench '*' --locked -- -benchtime 1x -count 1
