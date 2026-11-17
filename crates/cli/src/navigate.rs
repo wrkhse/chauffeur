@@ -109,20 +109,7 @@ fn relay(
                 return complain("the daemon's reply exceeds 4 MiB", Ended::Unavailable);
             }
             Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return complain("the daemon did not answer in time", Ended::Unavailable);
-            }
-            Err(error) => {
-                return complain(
-                    &format!("cannot read from the daemon: {error}"),
-                    Ended::Unavailable,
-                );
-            }
+            Err(error) => return complain(&read_failure(&error), Ended::Unavailable),
         }
         let text = line.trim_end();
         // A reader that went away, such as `head -1`, has what it wanted.
@@ -155,6 +142,18 @@ fn relay(
         "the daemon closed the connection without answering",
         Ended::Unavailable,
     )
+}
+
+/// Why reading from the daemon failed: a missed deadline, or anything else.
+fn read_failure(error: &io::Error) -> String {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        "the daemon did not answer in time".to_owned()
+    } else {
+        format!("cannot read from the daemon: {error}")
+    }
 }
 
 fn complain(message: &str, ended: Ended) -> Ended {
@@ -200,6 +199,98 @@ mod tests {
         let mut input = bytes.as_slice();
         assert_eq!(
             navigate(Path::new("/missing"), &mut input, &mut Vec::new()),
+            Ended::Rejected
+        );
+    }
+
+    /// The reply limit as written, a literal so that editing `MAX_REPLY`
+    /// fails these tests instead of moving their target with it.
+    const REPLY_LIMIT: usize = 4 * 1024 * 1024;
+
+    /// A reply to the request, padded with spaces inside its empty result so
+    /// that, with its newline, it is `size` bytes.
+    fn padded_reply(size: usize) -> String {
+        let opening = r#"{"jsonrpc":"2.0","id":1,"result":{"#;
+        let closing = "}}\n";
+        let padding = size
+            .saturating_sub(opening.len())
+            .saturating_sub(closing.len());
+        format!("{opening}{}{closing}", " ".repeat(padding))
+    }
+
+    #[test]
+    fn a_reply_exactly_at_the_limit_is_answered() {
+        let line = padded_reply(REPLY_LIMIT);
+        assert_eq!(line.len(), REPLY_LIMIT);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut output = Vec::new();
+        assert_eq!(
+            relay(&stream, BufReader::new(line.as_bytes()), None, &mut output),
+            Ended::Answered
+        );
+        assert_eq!(output.as_slice(), line.as_bytes());
+    }
+
+    #[test]
+    fn a_reply_one_byte_over_the_limit_is_refused_and_never_printed() {
+        let size = REPLY_LIMIT.saturating_add(1);
+        let line = padded_reply(size);
+        assert_eq!(line.len(), size);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut output = Vec::new();
+        assert_eq!(
+            relay(&stream, BufReader::new(line.as_bytes()), None, &mut output),
+            Ended::Unavailable
+        );
+        assert_eq!(output, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_read_failure_tells_a_missed_deadline_from_a_broken_read() {
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::WouldBlock] {
+            assert_eq!(
+                read_failure(&io::Error::from(kind)),
+                "the daemon did not answer in time"
+            );
+        }
+        let broken = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            read_failure(&broken),
+            format!("cannot read from the daemon: {broken}")
+        );
+    }
+
+    /// `{}` followed by spaces, so it is `size` bytes and still JSON.
+    fn padded_request(size: usize) -> Vec<u8> {
+        let mut bytes = b"{}".to_vec();
+        bytes.resize(size, b' ');
+        bytes
+    }
+
+    #[test]
+    fn a_request_exactly_at_the_limit_reaches_the_socket() {
+        let bytes = padded_request(chauffeur_daemon::MAX_LINE);
+        let mut input = bytes.as_slice();
+        assert_eq!(
+            navigate(
+                Path::new("/nonexistent/chauffeur.sock"),
+                &mut input,
+                &mut Vec::new()
+            ),
+            Ended::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_request_one_byte_over_the_limit_is_rejected() {
+        let bytes = padded_request(chauffeur_daemon::MAX_LINE.saturating_add(1));
+        let mut input = bytes.as_slice();
+        assert_eq!(
+            navigate(
+                Path::new("/nonexistent/chauffeur.sock"),
+                &mut input,
+                &mut Vec::new()
+            ),
             Ended::Rejected
         );
     }
