@@ -65,9 +65,9 @@ fn every_evidence_is_a_navigate_request_for_sourcefed_events() {
     }
 }
 
-/// The evidence sourcefed's builder makes for `case` from its `v1.params`
-/// and `monitor_source`: the event's five lines, its thread label and its
-/// source's `describe()`.
+/// The evidence sourcefed's builder makes for `case` from its `v1.params`,
+/// `monitor_source` and optional `subject.title`: the event's five lines, its
+/// thread and its source's `describe()`.
 fn built_evidence(case: &Value) -> (String, String, String) {
     let params = &case["v1"]["params"];
     let field = |name: &str| params[name].as_str().unwrap();
@@ -86,7 +86,7 @@ fn built_evidence(case: &Value) -> (String, String, String) {
     .join("\n");
 
     let source = &case["monitor_source"];
-    let (thread, monitor) = match source["type"].as_str().unwrap() {
+    let (label, monitor) = match source["type"].as_str().unwrap() {
         "github" => {
             let repo = source["repo"].as_str().unwrap();
             let pr = source["prNumber"].as_u64().unwrap();
@@ -108,6 +108,17 @@ fn built_evidence(case: &Value) -> (String, String, String) {
             format!("unknown thread for `{other}`"),
             format!("unknown monitor source `{other}`"),
         ),
+    };
+
+    let label = label.trim();
+    let label = (!label.is_empty()).then_some(label);
+    let title = case["subject"]["title"].as_str().map(str::trim);
+    let title = title.filter(|title| !title.is_empty());
+    let thread = match (label, title) {
+        (Some(label), Some(title)) => format!("{label}: {title}"),
+        (Some(label), None) => label.to_owned(),
+        (None, Some(title)) => title.to_owned(),
+        (None, None) => String::new(),
     };
 
     (event, thread, monitor)
