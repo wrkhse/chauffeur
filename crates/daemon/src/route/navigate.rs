@@ -74,7 +74,8 @@ impl Router {
     }
 
     /// Every hooked rule's intents; a rule that misses the deadline, fails or
-    /// meets no `then` entry gives none, and the rest still return.
+    /// meets no `then` entry gives none, and the rest still return. A rule is
+    /// announced as its run starts, not when it is matched.
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
@@ -82,9 +83,7 @@ impl Router {
         ask: &Ask,
         send: &(dyn Fn(Value) + Sync),
     ) -> Value {
-        for rule in hooked {
-            send(progress::rule_matched(rule.id()));
-        }
+        let announced = |rule: &Rule| send(progress::rule_matched(rule.id()));
         let ran = |rule: &Rule, done: &super::RuleRun| {
             for event in done
                 .run
@@ -95,7 +94,7 @@ impl Router {
             }
         };
         let intents: Vec<Value> = self
-            .run_all(loaded, hooked, ask, &ran)
+            .run_all(loaded, hooked, ask, &announced, &ran)
             .into_iter()
             .filter_map(|(rule, then)| then.map(|then| Intent::new(rule.id(), &then).to_json()))
             .collect();
@@ -128,22 +127,19 @@ impl Router {
         );
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         entry.insert("elapsed_ms".into(), json!(elapsed));
-        let reason = match &ran {
-            Ran::Refused(reason) => Some(reason.clone()),
-            Ran::Settled(_) | Ran::Deadline | Ran::Cancelled => None,
-        };
+        let refusal = refused(&ran);
         let run = log_entry::ended(&mut entry, ran);
         if let Err(error) = self.audit.append(Value::Object(entry)) {
             eprintln!("chauffeur: a run was not written to the audit log: {error}");
         }
-        match (run, reason) {
+        match (run, refusal) {
             (Some(run), _) => {
                 for event in progress::run_events(None, &run.events) {
                     send(event);
                 }
                 Ok(json!({ "verdict": progress::verdict(&run.verdict) }))
             }
-            (None, Some(reason)) => Err(refused(reason)),
+            (None, Some(rejection)) => Err(rejection),
             // A cancelled run is answered as cancelled by `navigate`.
             (None, None) => Err(Rejection::Deadline),
         }
@@ -194,43 +190,55 @@ fn available(context: &Context, strategy: &Strategy) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// The rejection for an inline run that never ran: `busy` when the daemon's
-/// workers could not take it, `judge_unavailable` when a judge could not run.
-/// The audit entry keeps the reason either way.
-fn refused(reason: String) -> Rejection {
-    if from_pool(&reason) {
-        return Rejection::Busy;
+/// The rejection for an inline run that did not settle: `busy` when the
+/// pool could not start it, `judge_unavailable` when its worker stopped or a
+/// judge could not run. The audit entry keeps the reason either way.
+fn refused(ran: &Ran) -> Option<Rejection> {
+    match ran {
+        Ran::Busy => Some(Rejection::Busy),
+        Ran::Stopped => Some(Rejection::JudgeUnavailable(
+            "the run's worker stopped".to_owned(),
+        )),
+        Ran::Refused(reason) => Some(Rejection::JudgeUnavailable(reason.clone())),
+        Ran::Settled(_) | Ran::Deadline | Ran::Cancelled => None,
     }
-    Rejection::JudgeUnavailable(reason)
-}
-
-/// Whether `reason` came from the pool rather than a judge:
-/// `chauffeur_runtime` refuses a run it cannot start, or whose worker
-/// stopped, in these words; a judge's failure is the judge's own message.
-fn from_pool(reason: &str) -> bool {
-    reason.starts_with("cannot start a worker") || reason == "the run's worker stopped"
 }
 
 #[cfg(test)]
 mod tests {
+    use chauffeur_runtime::Ran;
+
     use super::{Rejection, refused};
 
-    /// A refusal from the pool answers `busy`, so a caller is not told a
-    /// judge is gone when the daemon was merely busy; a judge's own failure
-    /// still answers `judge_unavailable`.
+    /// A run no worker could start answers `busy`: the daemon was at
+    /// capacity, not missing a judge.
     #[test]
-    fn a_pool_refusal_is_busy_and_a_judge_refusal_is_unavailable() {
+    fn a_busy_pool_is_busy() {
+        assert_eq!(refused(&Ran::Busy), Some(Rejection::Busy));
+    }
+
+    /// A worker that stopped is a failure, not capacity, so a caller is not
+    /// told the daemon was busy.
+    #[test]
+    fn a_stopped_worker_is_unavailable() {
         assert_eq!(
-            refused("cannot start a worker: all 32 workers are busy".to_owned()),
-            Rejection::Busy
+            refused(&Ran::Stopped),
+            Some(Rejection::JudgeUnavailable(
+                "the run's worker stopped".to_owned()
+            ))
         );
+    }
+
+    /// A judge's own failure keeps its message, as it did before.
+    #[test]
+    fn a_judge_refusal_keeps_its_reason() {
         assert_eq!(
-            refused("the run's worker stopped".to_owned()),
-            Rejection::Busy
-        );
-        assert_eq!(
-            refused("no system-one model is registered".to_owned()),
-            Rejection::JudgeUnavailable("no system-one model is registered".to_owned())
+            refused(&Ran::Refused(
+                "no system-one model is registered".to_owned()
+            )),
+            Some(Rejection::JudgeUnavailable(
+                "no system-one model is registered".to_owned()
+            ))
         );
     }
 }

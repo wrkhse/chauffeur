@@ -2,6 +2,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::mem::DropGuard;
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -9,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_protocol::Rejection;
-use chauffeur_runtime::{Cancel, Source};
+use chauffeur_runtime::{Cancel, Permit, Source};
 use serde_json::{Value, json};
 
 use crate::DaemonError;
@@ -227,7 +228,29 @@ fn finish_call(router: &Router, calls: &Calls, wire: &Wire, slot: Slot<'_>, call
             calls.cancel_all();
         }
     };
-    let (reply, permit) = call.answer(router, slot.cancel(), &notify);
+
+    answer_and_reply(calls, wire, slot, |cancel| {
+        call.answer(router, cancel, &notify)
+    });
+}
+
+/// Answers the call holding `slot` and sends its reply. A call that panics
+/// is answered as an internal error in place of its own reply, so its caller
+/// hears back and the connection keeps working; the slot frees its place as
+/// it drops.
+fn answer_and_reply(
+    calls: &Calls,
+    wire: &Wire,
+    slot: Slot<'_>,
+    answer: impl FnOnce(&Cancel) -> (Option<Value>, Option<Permit>),
+) {
+    let answered = panic::catch_unwind(AssertUnwindSafe(|| answer(slot.cancel())));
+    let (reply, permit) = answered.unwrap_or_else(|_| {
+        // The payload is left out: a panic can carry what the call was
+        // handling.
+        eprintln!("chauffeur: a call panicked: answered as an internal error");
+        (Some(rpc::error(slot.id(), -32_603, "internal error")), None)
+    });
     // Late workers retain their copies; settled calls release before reply.
     drop(permit);
     // The place is given back before the reply, so its ID may be reused by
@@ -432,6 +455,11 @@ struct Slot<'a> {
 }
 
 impl Slot<'_> {
+    /// The call's ID, which its reply carries.
+    const fn id(&self) -> &Value {
+        &self.id
+    }
+
     /// The call's cancellation, shared with `$/cancelRequest` and the
     /// connection's end.
     const fn cancel(&self) -> &Cancel {
@@ -546,7 +574,7 @@ mod tests {
 
     use super::{
         ACCEPT_RETRY, Calls, MAX_CALLS, MAX_NAVIGATIONS, Next, ReadOutcome, Wire, accept_next,
-        busy_error, classify, next, serve_connection,
+        answer_and_reply, busy_error, classify, next, serve_connection,
     };
     use crate::route::Router;
     use crate::{Paths, rpc};
@@ -808,6 +836,36 @@ mod tests {
 
         assert!(calls.is_empty(), "the slot gave its place back");
         assert!(cancel.is_cancelled(), "the slot cancelled its call");
+    }
+
+    /// A call that panics is answered as an internal error instead of
+    /// leaving its caller without a reply, and its place is free afterwards.
+    #[test]
+    fn a_call_that_panics_is_answered_as_internal_error() {
+        let calls = Calls::default();
+        let slot = calls.open(json!("panicky"), false);
+        let cancel = slot.cancel().clone();
+        let (server, client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let wire = Wire {
+            writer: Mutex::new(server),
+            dead: AtomicBool::new(false),
+        };
+
+        answer_and_reply(&calls, &wire, slot, |_| panic!("the answer panicked"));
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(reply["jsonrpc"], "2.0", "{reply}");
+        assert_eq!(reply["id"], "panicky", "{reply}");
+        assert_eq!(reply["error"]["code"], -32_603, "{reply}");
+        assert_eq!(reply["error"]["message"], "internal error", "{reply}");
+        assert!(calls.is_empty(), "the call's place is free");
+        assert!(cancel.is_cancelled(), "the call is cancelled as it frees");
     }
 
     /// A line cut short by the read timeout is kept and completed by the

@@ -72,8 +72,11 @@ pub enum Waited<T> {
     Deadline,
     /// The caller cancelled first.
     Cancelled,
-    /// The job could not start, or its worker stopped without a result.
-    Refused(String),
+    /// The pool could not start the job: every worker was busy, or a worker
+    /// could not start.
+    Busy,
+    /// The job's worker stopped without a result.
+    Stopped,
 }
 
 /// Runs `job` on `pool` and waits for it until `deadline` or until
@@ -99,8 +102,10 @@ pub fn within<T: Send + 'static>(
         // Late results do not free admission before the job finishes.
         drop(shared);
     }));
-    if let Err(error) = started {
-        return Waited::Refused(format!("cannot start a worker: {error}"));
+    if started.is_err() {
+        // A pool that cannot take the job is not asked again: the deadline
+        // would only pass while waiting.
+        return Waited::Busy;
     }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -115,9 +120,7 @@ pub fn within<T: Send + 'static>(
         match received {
             Ok(done) => return Waited::Done(done),
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                return Waited::Refused("the run's worker stopped".to_owned());
-            }
+            Err(RecvTimeoutError::Disconnected) => return Waited::Stopped,
         }
     }
 }

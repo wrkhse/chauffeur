@@ -18,6 +18,14 @@ pub(super) fn ended(entry: &mut Map<String, Value>, ran: Ran) -> Option<Run<Answ
             entry.insert("refused".into(), json!(reason));
             None
         }
+        Ran::Busy => {
+            entry.insert("refused".into(), json!("the pool could not start the run"));
+            None
+        }
+        Ran::Stopped => {
+            entry.insert("refused".into(), json!("the run's worker stopped"));
+            None
+        }
         Ran::Deadline => {
             entry.insert("deadline".into(), json!(true));
             None

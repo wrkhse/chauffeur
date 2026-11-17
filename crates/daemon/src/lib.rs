@@ -9,6 +9,9 @@
 //! | `chauffeur.status` | none | Version, protocol, loaded rules, refused rule files |
 //! | `$/cancelRequest` | `id` | Nothing: the call with that ID is answered as `cancelled` |
 //!
+//! A connection has at most 16 calls open, at most 4 of them navigations: a
+//! fifth is refused as busy until one finishes.
+//!
 //! A request with no `id` is a notification: apart from `$/cancelRequest`,
 //! which cancels the call it names, it runs nothing, neither a method nor a
 //! reply.
@@ -31,7 +34,7 @@ use notify::{EventKind, PollWatcher, RecursiveMode, Watcher};
 
 pub use paths::{Paths, private_folder};
 pub use route::Router;
-pub use socket::{MAX_CALLS, MAX_CONNECTIONS, MAX_LINE};
+pub use socket::{MAX_CALLS, MAX_CONNECTIONS, MAX_LINE, MAX_NAVIGATIONS};
 
 /// How long file changes settle before a reload.
 const SETTLE: Duration = Duration::from_millis(200);

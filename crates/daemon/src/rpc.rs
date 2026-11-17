@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chauffeur_protocol::{Event, Navigate, Rejection};
-use chauffeur_runtime::{Cancel, Permit, Source};
+use chauffeur_runtime::{Busy, Cancel, Capacity, Permit, Source};
 use serde_json::{Value, json};
 
 use crate::route::Router;
@@ -106,7 +106,7 @@ pub fn prepare(router: &Router, request: Request) -> Result<Call, Value> {
     let permit = source
         .map(|source| router.admit(source))
         .transpose()
-        .map_err(|_| refuse(Rejection::Busy.to_error()))?;
+        .map_err(|busy| refuse(busy_error(busy)))?;
     Ok(Call { id, work, permit })
 }
 
@@ -194,6 +194,32 @@ fn error_object(code: i64, message: &str) -> Value {
     json!({ "code": code, "message": message })
 }
 
+/// `Rejection::Busy`'s error, with a message naming the limit that was
+/// reached and its number: the caller's share of calls, or the daemon's
+/// capacity. `Router` admits against `Capacity::DAEMON`, so these are its
+/// numbers.
+fn busy_error(busy: Busy) -> Value {
+    let capacity = Capacity::DAEMON;
+    let message = if busy.share {
+        format!(
+            "the daemon is busy: this caller's share of {} calls is in use",
+            capacity.per_source
+        )
+    } else {
+        format!(
+            "the daemon is busy: the daemon's capacity of {} calls is in use",
+            capacity.global
+        )
+    };
+
+    let mut error = Rejection::Busy.to_error();
+    if let Some(fields) = error.as_object_mut() {
+        fields.insert("message".into(), json!(message));
+    }
+
+    error
+}
+
 /// An error reply to `id`.
 pub fn error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": error_object(code, message) })
@@ -206,4 +232,38 @@ pub fn duplicate(id: &Value) -> Value {
         INVALID_REQUEST,
         "a call with this id is already open on this connection",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use chauffeur_runtime::{Busy, Source};
+
+    use super::busy_error;
+
+    /// A busy error carries `Rejection::Busy`'s code and reason, and a
+    /// message naming the limit that was reached and its number.
+    #[test]
+    fn a_busy_error_names_the_limit_that_was_reached() {
+        let share = busy_error(Busy {
+            from: Source::Integration,
+            share: true,
+        });
+        let capacity = busy_error(Busy {
+            from: Source::Harness,
+            share: false,
+        });
+
+        assert_eq!(share["code"], -32_000);
+        assert_eq!(share["data"]["reason"], "busy");
+        assert_eq!(
+            share["message"],
+            "the daemon is busy: this caller's share of 8 calls is in use"
+        );
+        assert_eq!(capacity["code"], -32_000);
+        assert_eq!(capacity["data"]["reason"], "busy");
+        assert_eq!(
+            capacity["message"],
+            "the daemon is busy: the daemon's capacity of 16 calls is in use"
+        );
+    }
 }

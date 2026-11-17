@@ -246,7 +246,7 @@ fn a_job_cancelled_before_it_starts_never_runs() {
 }
 
 #[test]
-fn a_job_that_panics_is_refused_and_frees_its_worker_and_slot() {
+fn a_job_that_panics_stops_and_frees_its_worker_and_slot() {
     let admission = Admission::new(Capacity {
         global: 1,
         per_source: 1,
@@ -259,10 +259,7 @@ fn a_job_that_panics_is_refused_and_frees_its_worker_and_slot() {
         panic!("the job fails");
     });
 
-    assert!(
-        matches!(&waited, Waited::Refused(reason) if reason.contains("worker")),
-        "{waited:?}"
-    );
+    assert_eq!(&waited, &Waited::Stopped, "{waited:?}");
     drop(cancel);
     assert!(eventually(|| admission.in_use().total() == 0));
     assert!(eventually(|| pool.alive() == 0 && pool.waiting() == 0));
@@ -290,10 +287,7 @@ fn past_its_most_workers_the_pool_refuses_a_job() {
         (refused, busy.join().unwrap())
     });
 
-    assert!(
-        matches!(&holding.0, Waited::Refused(reason) if reason.contains("busy")),
-        "{holding:?}"
-    );
+    assert_eq!(&holding.0, &Waited::Busy, "{holding:?}");
     assert_eq!(holding.1, Waited::Done(()));
     assert!(eventually(|| pool.alive() == 0));
 }

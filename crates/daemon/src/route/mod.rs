@@ -125,7 +125,7 @@ impl Router {
             deadline,
             cancel: cancel.clone(),
         };
-        self.run_all(&loaded, &hooked, &ask, &|_, _| {})
+        self.run_all(&loaded, &hooked, &ask, &|_| {}, &|_, _| {})
             .into_iter()
             .filter_map(|(rule, then)| {
                 then.map(|then| {
@@ -135,31 +135,46 @@ impl Router {
             .collect()
     }
 
-    /// Runs `hooked` on the router's pool, calling `ran` as each result
-    /// arrives, and returns what each returned, in the order given. Each run
-    /// is written to the log, in that same order.
+    /// Runs `hooked` on the router's pool, calling `announced` as each run
+    /// starts and `ran` as each result arrives, and returns what each
+    /// returned, in the order given. Each run is written to the log, in that
+    /// same order; a rule no worker started before the deadline earns a line
+    /// saying it was skipped.
     fn run_all(
         &self,
         loaded: &Arc<Loaded>,
         hooked: &[Arc<Rule>],
         ask: &Ask,
+        announced: &(dyn Fn(&Rule) + Sync),
         ran: &(dyn Fn(&Rule, &RuleRun) + Sync),
     ) -> Vec<(Arc<Rule>, Option<Then>)> {
         let mut returned: BTreeMap<usize, RuleRun> = BTreeMap::new();
-        let jobs = |index: usize, rule: &Arc<Rule>, send: Sender<(usize, Option<RuleRun>)>| {
-            let rule = Arc::clone(rule);
-            let loaded = Arc::clone(loaded);
-            let cooldowns = Arc::clone(&self.cooldowns);
-            let ask = ask.clone();
-            let job: Job = Box::new(move || {
-                // A rule that panics yields nothing, and its worker runs on.
-                let done = panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::run_one(&loaded, &cooldowns, &rule, &ask)
-                }))
-                .ok();
-                let _ = send.send((index, done));
-            });
-            job
+        let jobs =
+            |index: usize, rule: &Arc<Rule>, send: Sender<(usize, Report<Option<RuleRun>>)>| {
+                let rule = Arc::clone(rule);
+                let loaded = Arc::clone(loaded);
+                let cooldowns = Arc::clone(&self.cooldowns);
+                let ask = ask.clone();
+                let job: Job = Box::new(move || {
+                    let announce = send.clone();
+                    let started = move || {
+                        // A caller that stopped waiting drops this, and the run
+                        // goes on.
+                        let _ = announce.send((index, Report::Started));
+                    };
+                    // A rule that panics yields nothing, and its worker runs on.
+                    let done = panic::catch_unwind(AssertUnwindSafe(|| {
+                        Self::run_one(&loaded, &cooldowns, &rule, &ask, &started)
+                    }))
+                    .ok();
+                    let _ = send.send((index, Report::Finished(done)));
+                });
+                job
+            };
+        let on_start = |index: usize| {
+            if let Some(rule) = hooked.get(index) {
+                announced(rule);
+            }
         };
         let arrived = |index: usize, done: Option<RuleRun>| {
             let (Some(done), Some(rule)) = (done, hooked.get(index)) else {
@@ -168,7 +183,12 @@ impl Router {
             ran(rule, &done);
             returned.insert(index, done);
         };
-        dispatch(&self.rules, ask.deadline, hooked, jobs, arrived);
+        let unstarted = dispatch(&self.rules, ask.deadline, hooked, jobs, on_start, arrived);
+        for index in unstarted {
+            if let Some(rule) = hooked.get(index) {
+                returned.insert(index, Self::skipped(rule, ask));
+            }
+        }
         // The indexes are the hooks', so a BTreeMap gives the runs in hook
         // order, and the audit reads in the order the rules load.
         returned
@@ -189,12 +209,30 @@ impl Router {
             .collect()
     }
 
-    /// One rule's run: its log entry, what it returned, and its run.
+    /// A rule's line when its run never started: the deadline came first, so
+    /// the log says so. Nothing is returned, and the wire has no event for a
+    /// rule that did not run.
+    fn skipped(rule: &Rule, ask: &Ask) -> RuleRun {
+        RuleRun {
+            entry: json!({
+                "rule": rule.id(),
+                "event": ask.event,
+                "session": ask.session,
+                "skipped": "deadline",
+            }),
+            then: None,
+            run: None,
+        }
+    }
+
+    /// One rule's run: its log entry, what it returned, and its run. A rule
+    /// in cooldown returns before `announce`, so it is not announced.
     fn run_one(
         loaded: &Arc<Loaded>,
         cooldowns: &Cooldowns,
         rule: &Arc<Rule>,
         ask: &Ask,
+        announce: &dyn Fn(),
     ) -> RuleRun {
         let key = (rule.id().to_owned(), ask.session.clone());
         let mut entry = Map::new();
@@ -209,7 +247,8 @@ impl Router {
                 run: None,
             };
         }
-        let started = Instant::now();
+        announce();
+        let began = Instant::now();
         let ran = run_strategy(
             &loaded.context,
             rule,
@@ -217,7 +256,7 @@ impl Router {
             ask.deadline,
             &ask.cancel,
         );
-        let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
         entry.insert("elapsed_ms".into(), json!(elapsed));
         let returned = ran.then(rule).cloned();
         let run = log_entry::ended(&mut entry, ran);
@@ -239,18 +278,29 @@ impl Router {
     }
 }
 
-/// Runs one job per item on `pool` and gives each result to `arrived` as it
-/// comes, keeping no more jobs running than the pool has workers: a job that
-/// finds none free looks for a finished one before trying again. Past
-/// `deadline` the items left do not run, and the results still out are not
-/// waited for.
+/// What a job reports before and after its run.
+enum Report<T> {
+    /// Its run starts now, so the rule is announced.
+    Started,
+    /// Its run ended: `None` if it panicked.
+    Finished(T),
+}
+
+/// Runs one job per item on `pool`, calling `started` as each job announces
+/// that its run begins and `arrived` as each result comes, keeping no more
+/// jobs running than the pool has workers: a job that finds none free looks
+/// for a finished one before trying again. Past `deadline` the items left do
+/// not run, and the results still out are not waited for. Returns the indexes
+/// of the items no worker started.
 fn dispatch<T, R>(
     pool: &Pool,
     deadline: Instant,
     items: &[R],
-    job: impl Fn(usize, &R, Sender<(usize, T)>) -> Job,
+    job: impl Fn(usize, &R, Sender<(usize, Report<T>)>) -> Job,
+    mut started: impl FnMut(usize),
     mut arrived: impl FnMut(usize, T),
-) where
+) -> Vec<usize>
+where
     T: Send + 'static,
 {
     let (send, receive) = mpsc::channel();
@@ -267,26 +317,39 @@ fn dispatch<T, R>(
         if left.is_zero() {
             break;
         }
-        if let Some((index, done)) = finished(&receive, left.min(LOOK)) {
-            outstanding = outstanding.saturating_sub(1);
-            arrived(index, done);
+        if let Some((index, report)) = finished(&receive, left.min(LOOK)) {
+            match report {
+                Report::Started => started(index),
+                Report::Finished(done) => {
+                    outstanding = outstanding.saturating_sub(1);
+                    arrived(index, done);
+                }
+            }
         }
     }
-    // The runs stop at `deadline` and report just after it, so the results
+    // The runs stop at `deadline` and report just after it, so the finishes
     // still out are given one grace before the caller stops waiting. Each run
-    // still out is owed exactly one result, so the count is taken here and
-    // the loop runs that many times at most.
+    // still out is owed exactly one finish, so the count is taken here and
+    // the loop waits for that many at most.
     let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
-    for _ in 0..outstanding {
+    let mut results = outstanding;
+    while results > 0 {
         let left = bound.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
-        let Some((index, done)) = finished(&receive, left) else {
+        let Some((index, report)) = finished(&receive, left) else {
             break;
         };
-        arrived(index, done);
+        match report {
+            Report::Started => started(index),
+            Report::Finished(done) => {
+                results = results.saturating_sub(1);
+                arrived(index, done);
+            }
+        }
     }
+    pending.map(|(index, _)| index).collect()
 }
 
 /// One finished result, if one comes within `wait`.
@@ -302,9 +365,11 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use chauffeur_runtime::Pool;
+    use chauffeur_protocol::Rule;
+    use chauffeur_runtime::{Cancel, Pool, Source};
+    use serde_json::json;
 
-    use super::dispatch;
+    use super::{Ask, Report, Router, dispatch};
 
     /// The dispatcher keeps no more jobs running than the pool has workers:
     /// every one of 16 jobs comes back, on a pool worker, with no more than
@@ -323,7 +388,7 @@ mod tests {
             .checked_add(Duration::from_secs(10))
             .unwrap_or_else(Instant::now);
 
-        dispatch(
+        let unstarted = dispatch(
             &pool,
             deadline,
             &jobs,
@@ -342,12 +407,14 @@ mod tests {
                         .push(thread.name().unwrap_or_default().to_owned());
                     thread::sleep(Duration::from_millis(5));
                     running.fetch_sub(1, Ordering::SeqCst);
-                    let _ = send.send((index, index));
+                    let _ = send.send((index, Report::Finished(index)));
                 })
             },
+            |_| {},
             |_, value| done.lock().unwrap().push(value),
         );
 
+        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
         let mut returned = done.lock().unwrap().clone();
         assert_eq!(returned.len(), jobs.len(), "every job came back");
         returned.sort_unstable();
@@ -363,5 +430,90 @@ mod tests {
                 "the job ran on a pool worker: {name}"
             );
         }
+    }
+
+    /// A job still running when the deadline passes holds its worker, so the
+    /// item after it never starts: the dispatcher reports that index and
+    /// returns without waiting for the job still out.
+    #[test]
+    fn a_job_past_the_deadline_leaves_the_items_after_it_unstarted() {
+        let pool = Pool::new(1, 1);
+        let items = [0_usize, 1];
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let arrived = Arc::new(Mutex::new(Vec::new()));
+        let began = Instant::now();
+        let deadline = began
+            .checked_add(Duration::from_millis(30))
+            .unwrap_or_else(Instant::now);
+
+        let unstarted = dispatch(
+            &pool,
+            deadline,
+            &items,
+            |index, item: &usize, send| {
+                let item = *item;
+                Box::new(move || {
+                    let _ = send.send((index, Report::Started));
+                    // Longer than the deadline and its grace together.
+                    thread::sleep(Duration::from_millis(300));
+                    let _ = send.send((index, Report::Finished(item)));
+                })
+            },
+            |index| announced.lock().unwrap().push(index),
+            |_, value| arrived.lock().unwrap().push(value),
+        );
+        let elapsed = began.elapsed();
+
+        assert_eq!(
+            unstarted,
+            [1],
+            "the item after the running job never starts"
+        );
+        assert_eq!(
+            *announced.lock().unwrap(),
+            [0],
+            "the item that started is announced"
+        );
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "the call returns without the slow job: {elapsed:?}"
+        );
+        assert!(
+            arrived.lock().unwrap().is_empty(),
+            "the slow job's result comes too late"
+        );
+    }
+
+    /// A rule the dispatcher never started is logged as skipped for the
+    /// deadline, and returns nothing.
+    #[test]
+    fn a_rule_that_never_started_is_logged_as_skipped() {
+        let rule = Rule::parse(
+            "sourcefed/triage",
+            r#"{ "on": "sourcefed.event", "strategy": [{ "id": "screen", "judge": "system-one",
+                 "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                          "instructions": "Is this noise?" } }] }"#,
+        )
+        .unwrap();
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(Vec::new()),
+            deadline: Instant::now(),
+            cancel: Cancel::new(Source::Harness),
+        };
+
+        let skipped = Router::skipped(&rule, &ask);
+
+        assert_eq!(
+            skipped.entry,
+            json!({
+                "rule": "sourcefed/triage",
+                "event": "sourcefed.event",
+                "session": "s-1",
+                "skipped": "deadline",
+            })
+        );
+        assert!(skipped.then.is_none() && skipped.run.is_none());
     }
 }

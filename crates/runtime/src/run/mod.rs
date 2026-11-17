@@ -49,8 +49,13 @@ pub enum Ran {
     /// Every step settled: the run's events and verdict.
     Settled(Run<Answer>),
     /// The strategy could not run, such as a placeholder whose answers would
-    /// not load, or no worker free.
+    /// not load.
     Refused(String),
+    /// The pool could not start the run: every worker was busy, or a
+    /// worker could not start.
+    Busy,
+    /// The run's worker stopped without a result.
+    Stopped,
     /// The deadline passed first; a late result is dropped.
     Deadline,
     /// The caller cancelled first; a late result is dropped.
@@ -63,7 +68,9 @@ impl Ran {
     pub fn then<'a>(&self, rule: &'a Rule) -> Option<&'a Then> {
         match self {
             Self::Settled(run) => Then::first_met(rule.then(), &run.verdict),
-            Self::Refused(_) | Self::Deadline | Self::Cancelled => None,
+            Self::Refused(_) | Self::Busy | Self::Stopped | Self::Deadline | Self::Cancelled => {
+                None
+            }
         }
     }
 }
@@ -112,7 +119,8 @@ pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
         Waited::Done(ran) => ran,
         Waited::Deadline => Ran::Deadline,
         Waited::Cancelled => Ran::Cancelled,
-        Waited::Refused(reason) => Ran::Refused(reason),
+        Waited::Busy => Ran::Busy,
+        Waited::Stopped => Ran::Stopped,
     }
 }
 
