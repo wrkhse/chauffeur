@@ -273,9 +273,11 @@ fn dispatch<T, R>(
         }
     }
     // The runs stop at `deadline` and report just after it, so the results
-    // still out are given one grace before the caller stops waiting.
+    // still out are given one grace before the caller stops waiting. Each run
+    // still out is owed exactly one result, so the count is taken here and
+    // the loop runs that many times at most.
     let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
-    while outstanding > 0 {
+    for _ in 0..outstanding {
         let left = bound.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -283,7 +285,6 @@ fn dispatch<T, R>(
         let Some((index, done)) = finished(&receive, left) else {
             break;
         };
-        outstanding = outstanding.saturating_sub(1);
         arrived(index, done);
     }
 }

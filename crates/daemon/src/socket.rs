@@ -205,6 +205,14 @@ fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
                 }
                 Next::Idle if calls.is_empty() => break,
                 Next::Idle => {}
+                Next::Oversized => {
+                    oversized(&mut reader, &line, &wire);
+                    break;
+                }
+                Next::Failed(error) => {
+                    eprintln!("chauffeur: a connection's read failed: {error}");
+                    break;
+                }
                 Next::Ended => break,
             }
         }
@@ -240,31 +248,56 @@ enum Next {
     /// The idle timeout passed with no complete line; what arrived is kept
     /// in the line buffer for the next read.
     Idle,
-    /// The connection ended: its peer closed, a line was over the limit, or
-    /// the socket failed.
+    /// A line was over the limit; the caller answers it and ends the
+    /// connection.
+    Oversized,
+    /// The connection ended: its peer closed.
     Ended,
+    /// A read failed; the connection ends, and the caller logs `error`.
+    Failed(io::Error),
 }
 
-/// Reads one request line, answering malformed lines itself and reporting
-/// an idle timeout apart from an end so the caller can decide whether the
-/// connection has gone idle.
+/// What one read returned.
+enum ReadOutcome {
+    /// The read returned, with the byte count it read; zero means the peer
+    /// closed.
+    Line(usize),
+    /// The read timeout passed before a complete line arrived.
+    TimedOut,
+    /// The read failed; the connection ends.
+    Failed(io::Error),
+}
+
+/// Sorts what one read returned: bytes, the read timeout, or a failure.
+fn classify(result: io::Result<usize>) -> ReadOutcome {
+    match result {
+        Ok(read) => ReadOutcome::Line(read),
+        Err(error) if timed_out(&error) => ReadOutcome::TimedOut,
+        Err(error) => ReadOutcome::Failed(error),
+    }
+}
+
+/// Reads one request line, answering malformed lines itself. An idle
+/// timeout comes back apart from an end or a failed read, so the caller can
+/// decide whether the connection has gone idle; a line over the limit comes
+/// back as [`Next::Oversized`] for the caller to answer.
 ///
 /// The line buffer is cleared only once a request is read: a partial line
 /// read before a timeout stays there, so a slow line is not lost.
-fn next(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>, wire: &Wire) -> Next {
+fn next(reader: &mut impl BufRead, line: &mut Vec<u8>, wire: &Wire) -> Next {
     loop {
         let left = MAX_LINE.saturating_add(1).saturating_sub(line.len());
         let limit = u64::try_from(left.max(1)).unwrap_or(u64::MAX);
 
-        match reader.by_ref().take(limit).read_until(b'\n', line) {
-            Ok(0) => return Next::Ended,
-            Ok(_) => {}
-            Err(error) if timed_out(&error) => return Next::Idle,
-            Err(_) => return Next::Ended,
+        match classify(reader.by_ref().take(limit).read_until(b'\n', line)) {
+            ReadOutcome::TimedOut => return Next::Idle,
+            ReadOutcome::Line(0) => return Next::Ended,
+            ReadOutcome::Failed(error) => return Next::Failed(error),
+            ReadOutcome::Line(_) => {}
         }
 
         if line.len() > MAX_LINE {
-            return oversized(reader, line, wire);
+            return Next::Oversized;
         }
 
         let text = String::from_utf8_lossy(line);
@@ -294,17 +327,16 @@ fn timed_out(error: &io::Error) -> bool {
     )
 }
 
-/// Answers a line over the limit and ends the connection, reading through
-/// its newline so a writer is not left blocked on a daemon that stopped
-/// reading.
-fn oversized(reader: &mut BufReader<UnixStream>, line: &[u8], wire: &Wire) -> Next {
+/// Answers a line over the limit, reading through its newline so a writer is
+/// not left blocked on a daemon that stopped reading; the caller ends the
+/// connection.
+fn oversized(reader: &mut BufReader<UnixStream>, line: &[u8], wire: &Wire) {
     let reply = rpc::error(&Value::Null, -32_600, "the request line is over 1 MiB");
     let _ = wire.send(&reply);
     let _ = reader.get_ref().shutdown(Shutdown::Write);
     if !line.ends_with(b"\n") {
         drain_line(reader);
     }
-    Next::Ended
 }
 
 /// Drain only through the newline, one more MiB, or 500 ms.
@@ -499,7 +531,7 @@ impl Calls {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, BufRead, BufReader, Write};
+    use std::io::{self, BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
@@ -513,8 +545,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ACCEPT_RETRY, Calls, MAX_CALLS, MAX_NAVIGATIONS, Next, Wire, accept_next, busy_error, next,
-        serve_connection,
+        ACCEPT_RETRY, Calls, MAX_CALLS, MAX_NAVIGATIONS, Next, ReadOutcome, Wire, accept_next,
+        busy_error, classify, next, serve_connection,
     };
     use crate::route::Router;
     use crate::{Paths, rpc};
@@ -808,6 +840,94 @@ mod tests {
         assert_eq!(request.method, "chauffeur.status");
         assert_eq!(request.id, Some(json!(1)));
         assert!(line.is_empty(), "the line is cleared once it is read");
+    }
+
+    /// The read timeout is told apart from a failure: a reset or a broken
+    /// pipe ends the connection rather than idling it.
+    #[test]
+    fn a_read_timeout_is_told_apart_from_a_failed_read() {
+        assert!(matches!(classify(Ok(0)), ReadOutcome::Line(0)));
+        assert!(matches!(classify(Ok(7)), ReadOutcome::Line(7)));
+
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            assert!(
+                matches!(classify(Err(kind.into())), ReadOutcome::TimedOut),
+                "{kind:?} is the read timeout"
+            );
+        }
+
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+            let ReadOutcome::Failed(error) = classify(Err(kind.into())) else {
+                panic!("{kind:?} is a failure, not the read timeout");
+            };
+            assert_eq!(error.kind(), kind);
+        }
+    }
+
+    /// A reader whose every read fails with the error it was made with.
+    struct Failing {
+        kind: io::ErrorKind,
+    }
+
+    impl Read for Failing {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(self.kind.into())
+        }
+    }
+
+    impl BufRead for Failing {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Err(self.kind.into())
+        }
+
+        fn consume(&mut self, _amount: usize) {}
+    }
+
+    /// A wire for a read that fails before anything is answered.
+    fn unwritten() -> Wire {
+        let (writer, _reader) = UnixStream::pair().unwrap();
+        Wire {
+            writer: Mutex::new(writer),
+            dead: AtomicBool::new(false),
+        }
+    }
+
+    /// A read that failed ends the connection as a failure carrying its
+    /// error, not as the idle timeout or an end.
+    #[test]
+    fn a_failed_read_ends_the_connection_as_a_failure() {
+        let wire = unwritten();
+        let mut line = Vec::new();
+
+        let Next::Failed(error) = next(
+            &mut Failing {
+                kind: io::ErrorKind::ConnectionReset,
+            },
+            &mut line,
+            &wire,
+        ) else {
+            panic!("a reset is a failure, not the idle timeout");
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    /// A read that would block is the read timeout: the caller reads again,
+    /// keeping what it has, rather than ending the connection.
+    #[test]
+    fn a_read_that_would_block_is_the_idle_timeout() {
+        let wire = unwritten();
+        let mut line = Vec::new();
+
+        let outcome = next(
+            &mut Failing {
+                kind: io::ErrorKind::WouldBlock,
+            },
+            &mut line,
+            &wire,
+        );
+
+        assert!(matches!(outcome, Next::Idle), "WouldBlock is the timeout");
     }
 
     /// Each cap refuses as busy and says which one it hit, so a caller knows
