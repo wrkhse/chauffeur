@@ -2,7 +2,13 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { connect, navigate, NavigateError, socketPath } from "../src/client/index.ts"
+import {
+  connect,
+  navigate,
+  NavigateError,
+  socketPath,
+  type NavigateRequest
+} from "../src/client/index.ts"
 import { eventually, standIn } from "./stand-in.ts"
 
 const EVENT = { on: "sourcefed.event", evidence: { event: "thanks, looks good" } }
@@ -49,6 +55,20 @@ test("navigate sends protocol 1 and the request, streams events, and closes once
       params: { protocol: 1, ...EVENT }
     } as never)
     await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a request naming another protocol is sent as the client's", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+
+  try {
+    await navigate({ ...EVENT, protocol: 2 } as NavigateRequest, {
+      socket: daemon.socket
+    })
+
+    expect(daemon.messages[0]?.params.protocol).toBe(1)
   } finally {
     await daemon.close()
   }
@@ -180,6 +200,39 @@ test("a kept connection carries calls at once, cancels an aborted one by ID, and
   }
 })
 
+test("a connection carries four navigations at once; a fifth is busy", async () => {
+  const daemon = await standIn(() => "silent")
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const calls = Array.from({ length: 4 }, () =>
+      chauffeur.navigate({ on: "slow" }).then(
+        () => "resolved",
+        (error: unknown) => error
+      )
+    )
+
+    await eventually(() => daemon.messages.length === 4)
+
+    const fifth = chauffeur.navigate({ on: "slow" })
+    await expect(fifth).rejects.toBeInstanceOf(NavigateError)
+    await expect(fifth).rejects.toMatchObject({ reason: "busy" })
+    await expect(fifth).rejects.toThrow("4 navigations")
+    expect(daemon.messages).toHaveLength(4)
+
+    chauffeur.close()
+
+    for (const call of calls) {
+      const error = await call
+      expect(error).toBeInstanceOf(NavigateError)
+      expect((error as NavigateError).reason).toBe("unavailable")
+    }
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
+
 test("a kept connection opens again after the daemon restarts", async () => {
   const folder = mkdtempSync(join(tmpdir(), "chauffeur-restart-"))
   const socket = join(folder, "daemon.sock")
@@ -303,6 +356,61 @@ test("reads lines split across chunks and across a UTF-8 character", async () =>
   }
 })
 
+test("a request over the daemon's 1 MiB line is refused before it is written", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+  const huge = { ...EVENT, evidence: { event: "x".repeat(1_100_000) } }
+
+  try {
+    const refused = navigate(huge, { socket: daemon.socket })
+    await expect(refused).rejects.toBeInstanceOf(NavigateError)
+    await expect(refused).rejects.toMatchObject({ reason: "limit_exceeded" })
+    await expect(refused).rejects.toThrow("the request is over 1 MiB")
+    expect(daemon.messages).toHaveLength(0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("an error with no id rejects every call on the connection", async () => {
+  let seen = 0
+  const daemon = await standIn(() => {
+    seen += 1
+
+    return seen === 2
+      ? {
+          chunks: [
+            Buffer.from(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: null,
+                error: { code: -32600, message: "the request line is over 1 MiB" }
+              }) + "\n"
+            )
+          ]
+        }
+      : "silent"
+  })
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const calls = ["a", "b"].map((on) =>
+      chauffeur.navigate({ on }).then(
+        () => "resolved",
+        (error: unknown) => error
+      )
+    )
+
+    for (const error of await Promise.all(calls)) {
+      expect(error).toBeInstanceOf(NavigateError)
+      expect((error as NavigateError).reason).toBe("invalid")
+      expect((error as NavigateError).message).toBe("the request line is over 1 MiB")
+    }
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
+
 test("a complete line over the receive limit closes the connection", async () => {
   const line = Buffer.from("x".repeat(4 * 1024 * 1024 + 1) + "\n")
   const daemon = await standIn(() => ({ chunks: [line] }))
@@ -316,17 +424,30 @@ test("a complete line over the receive limit closes the connection", async () =>
   }
 })
 
-test("unknown event names are not delivered to listeners", async () => {
+test("an event this client does not know fails its call and cancels it", async () => {
   const daemon = await standIn(() => ({
     events: [{ event: "future_event" }],
     result: { intents: [] }
   }))
+  const chauffeur = connect({ socket: daemon.socket })
   const events: unknown[] = []
 
   try {
-    await navigate(EVENT, { socket: daemon.socket, onEvent: (event) => events.push(event) })
+    const failed = chauffeur.navigate(EVENT, {
+      onEvent: (event) => events.push(event)
+    })
+
+    await expect(failed).rejects.toBeInstanceOf(NavigateError)
+    await expect(failed).rejects.toThrow("future_event")
     expect(events).toEqual([])
+    await eventually(() =>
+      daemon.messages.some((message) => message.method === "$/cancelRequest")
+    )
+    expect(
+      daemon.messages.find((message) => message.method === "$/cancelRequest")?.params
+    ).toEqual({ id: 1 })
   } finally {
+    chauffeur.close()
     await daemon.close()
   }
 })

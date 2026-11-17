@@ -17,11 +17,12 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import Ajv2020 from "ajv/dist/2020.js"
 import {
+  connect,
   navigate,
   NavigateError,
   type NavigateRequest
 } from "../src/client/index.ts"
-import { ask, judge, noul, connect } from "../src/judge/index.ts"
+import { ask, judge, noul } from "../src/judge/index.ts"
 import { eventually } from "./stand-in.ts"
 
 const ROOT = resolve(import.meta.dir, "../../..")
@@ -205,7 +206,7 @@ describe.skipIf(!BIN)("against the real daemon", () => {
     return { status: ran.status, reply: JSON.parse(last) as Record<string, any> }
   }
 
-  test("the client and chauffeur navigate accept and reject every fixture alike", async () => {
+  test("the client and chauffeur navigate match the fixtures, the client on protocol 1", async () => {
     for (const each of cases()) {
       const client: unknown = await navigate(each.params as NavigateRequest, {
         socket
@@ -215,14 +216,19 @@ describe.skipIf(!BIN)("against the real daemon", () => {
       )
       const { status, reply } = cli(each.params)
 
-      // The client always sends its own protocol, so a request without one
-      // reaches the daemon as version 1; only the CLI can send it bare.
-      if (!Array.isArray(each.params) && !("protocol" in each.params)) {
+      // The client always sends its own protocol, so a request naming none or
+      // another one reaches the daemon as version 1; only the CLI sees the
+      // fixture's own protocol.
+      if (!Array.isArray(each.params) && each.params.protocol !== 1) {
         expect({ name: each.name, client: Object.keys(client as object) }).toEqual({
           name: each.name,
           client: ["result"]
         })
-        expect({ name: each.name, status }).toEqual({ name: each.name, status: 1 })
+        const unsupported = each.reject?.reason === "unsupported_protocol"
+        expect({ name: each.name, status }).toEqual({
+          name: each.name,
+          status: unsupported ? 2 : 1
+        })
         continue
       }
 
@@ -268,20 +274,26 @@ describe.skipIf(!BIN)("against the real daemon", () => {
       evidence
     }
 
-    const done = await ask(noul("Is the migration finished?"), {
-      judge: quick,
-      evidence,
-      client: connect({ socket })
-    })
-    const { verdict } = await navigate(request, { socket })
-    const { reply } = cli({ protocol: 1, ...request })
+    const client = connect({ socket })
 
-    expect(verdict).toEqual(reply.result.verdict)
-    expect(done).toEqual({
-      ok: true,
-      ...(verdict.ask as { answer: object }).answer
-    } as never)
-    expect(done.ok && done.outcome).toBe("no")
+    try {
+      const done = await ask(noul("Is the migration finished?"), {
+        judge: quick,
+        evidence,
+        client
+      })
+      const { verdict } = await navigate(request, { socket })
+      const { reply } = cli({ protocol: 1, ...request })
+
+      expect(verdict).toEqual(reply.result.verdict)
+      expect(done).toEqual({
+        ok: true,
+        ...(verdict.ask as { answer: object }).answer
+      } as never)
+      expect(done.ok && done.outcome).toBe("no")
+    } finally {
+      client.close()
+    }
   })
 
   const slow = {
@@ -311,16 +323,22 @@ describe.skipIf(!BIN)("against the real daemon", () => {
     ).rejects.toThrow()
     await eventually(() => cancelled() === before + 1)
 
-    const asked = await ask(
-      { instructions: "Finished?", outcomes: ["yes", "no"] },
-      {
-        judge: judge({ tier: "system-one", model: "slow" }),
-        client: connect({ socket }),
-        deadlineMs: 10_000,
-        signal: AbortSignal.timeout(200)
-      }
-    )
-    expect(asked).toEqual({ ok: false, reason: "cancelled" })
+    const client = connect({ socket })
+
+    try {
+      const asked = await ask(
+        { instructions: "Finished?", outcomes: ["yes", "no"] },
+        {
+          judge: judge({ tier: "system-one", model: "slow" }),
+          client,
+          deadlineMs: 10_000,
+          signal: AbortSignal.timeout(200)
+        }
+      )
+      expect(asked).toEqual({ ok: false, reason: "cancelled" })
+    } finally {
+      client.close()
+    }
     await eventually(() => cancelled() === before + 2)
 
     const child = spawn(BIN ?? "", ["navigate"], {

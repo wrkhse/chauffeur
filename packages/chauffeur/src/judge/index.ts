@@ -1,4 +1,4 @@
-import { connect, navigate, type Chauffeur } from "../client/navigate.js"
+import { navigate, type Chauffeur } from "../client/navigate.js"
 import {
   NavigateError,
   type Blocks,
@@ -78,7 +78,10 @@ export type AskOptions = {
    * projects.json.
    */
   readonly project?: string
-  /** A client kept with `connect()`; without one, a connection of its own. */
+  /**
+   * A client kept with `connect()` from `@fdcn/chauffeur/client`; without
+   * one, a connection of its own.
+   */
   readonly client?: Chauffeur
 }
 
@@ -139,5 +142,3 @@ export async function ask<O extends string>(
     }
   }
 }
-
-export { connect, type Chauffeur }

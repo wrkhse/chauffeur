@@ -13,6 +13,10 @@
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "exports": {
     "./client": {
       "types": "./dist/client/index.d.ts",
@@ -24,7 +28,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "bun build src/client/index.ts src/judge/index.ts --root src --outdir dist --target node --format esm --splitting && tsc -p tsconfig.build.json",

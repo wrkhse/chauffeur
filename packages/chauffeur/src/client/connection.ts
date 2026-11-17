@@ -9,7 +9,15 @@ import {
 
 /** Maximum UTF-16 code units in a line, excluding its newline. */
 const MAX_LINE = 4 * 1024 * 1024
-const MAX_PENDING = 256
+
+/**
+ * The daemon's longest request line, its newline included: it answers a
+ * longer one with an error whose ID is null, then stops reading.
+ */
+const MAX_REQUEST_LINE = 1_048_576
+
+/** The most navigations the daemon carries at once on one connection. */
+const MAX_NAVIGATIONS = 4
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 /** How much longer than the request's deadline the daemon is waited for. */
@@ -88,13 +96,30 @@ export class Connection {
     }
 
     if (signal?.aborted) return Promise.reject(signal.reason)
-    if (this.#pending.size >= MAX_PENDING) {
-      return Promise.reject(new NavigateError("unavailable", "too many pending calls"))
+    if (this.#pending.size >= MAX_NAVIGATIONS) {
+      return Promise.reject(
+        new NavigateError(
+          "busy",
+          `the daemon carries at most ${MAX_NAVIGATIONS} navigations at once`
+        )
+      )
     }
 
     const id = this.#next++
     const wait = (request.deadline_ms ?? DEFAULT_DEADLINE_MS) + MARGIN_MS
-    const params = { protocol: PROTOCOL, ...request }
+    const params = { ...request, protocol: PROTOCOL }
+    const line = JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "chauffeur.navigate",
+      params
+    })
+
+    if (line.length + 1 > MAX_REQUEST_LINE) {
+      return Promise.reject(
+        new NavigateError("limit_exceeded", "the request is over 1 MiB")
+      )
+    }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -120,8 +145,10 @@ export class Connection {
 
       this.#pending.set(id, settle)
       signal?.addEventListener("abort", aborted, { once: true })
-      if (!this.#write({ jsonrpc: "2.0", id, method: "chauffeur.navigate", params })) {
-        settle.reject(new NavigateError("unavailable", "socket output buffer is full"))
+      if (!this.#writeLine(`${line}\n`)) {
+        settle.reject(
+          new NavigateError("unavailable", "socket output buffer is full")
+        )
       }
     })
   }
@@ -136,12 +163,23 @@ export class Connection {
   #cancel(id: number): void {
     if (this.#closed || !this.#pending.has(id)) return
 
-    this.#write({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id } })
+    const sent = this.#write({
+      jsonrpc: "2.0",
+      method: "$/cancelRequest",
+      params: { id }
+    })
+
+    // A dropped cancel would leave the daemon running a call we gave up on;
+    // closing the connection cancels every call it carries.
+    if (!sent) this.#socket.destroy()
   }
 
   #write(message: unknown): boolean {
-    const line = `${JSON.stringify(message)}\n`
+    return this.#writeLine(`${JSON.stringify(message)}\n`)
+  }
 
+  /** Writes one line, its newline included; false when the output buffer is full. */
+  #writeLine(line: string): boolean {
     if (this.#socket.writableLength + Buffer.byteLength(line) > MAX_OUTPUT_BYTES) {
       return false
     }
@@ -186,6 +224,17 @@ export class Connection {
       return
     }
 
+    // The daemon answers a line it cannot take, such as one over its limit,
+    // with an error whose ID is null; one request per call means the error
+    // belongs to the connection, not to one call.
+    if (message.error && (message.id === null || message.id === undefined)) {
+      for (const pending of [...this.#pending.values()]) {
+        pending.reject(rejected(message.error))
+      }
+
+      return
+    }
+
     if (message.method === "chauffeur.event") {
       const { id, ...event } = message.params ?? {}
       const pending = typeof id === "number" ? this.#pending.get(id) : undefined
@@ -193,7 +242,19 @@ export class Connection {
         event.event !== "rule_matched" &&
         event.event !== "round_ready" &&
         event.event !== "step_settled"
-      ) return
+      ) {
+        if (typeof id !== "number" || !pending) return
+
+        this.#cancel(id)
+        pending.reject(
+          new NavigateError(
+            "unavailable",
+            `the daemon sent an event this client does not know: ${String(event.event)}`
+          )
+        )
+
+        return
+      }
 
       // A listener that throws ends its own call, never the connection's others.
       try {
