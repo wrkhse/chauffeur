@@ -14,9 +14,12 @@ back once the limit clears, as in
 ### The `context-renewal` and `warming` plugins
 
 A long, cold session summarized by a cheaper model before the next prompt,
-and an idle session's cache kept warm while that is cheaper, using the
-session events and the `session.compact`, `session.warm` and `session.update`
-actions the fidelity table marks as supported.
+or while it is still idle once its cache expires, and a turn waiting on the
+agent's question to the user renewed the same way; an idle session's cache
+kept warm while that is cheaper, stopping when a keep-alive misses the cache.
+They use the session events, `question.asked` and `question.answered`, and
+the `session.compact`, `session.interrupt`, `session.warm` and
+`session.update` actions the fidelity table marks as supported.
 
 Files: `plugins/context-renewal/`, `plugins/warming/`
 
@@ -30,7 +33,14 @@ ctx.on("session.resumed", (e) => {
   if (cold && long) session.compact(e.session, { model: summaryModel(e) })
 })
 
-ctx.on("session.idle", (e) => schedule(e, () => session.warm(e.session)))
+ctx.on("session.idle", (e) => {
+  schedule(e, () => session.warm(e.session))
+  renewWhenIdle(e, cacheSeconds(e.provider) + warmingSpan(e) + idleMargin)
+})
+
+ctx.on("question.asked", (e) =>
+  renewWhenIdle(e, cacheSeconds(e.provider) + idleMargin)
+)
 ```
 
 Verified by:
@@ -39,7 +49,10 @@ Verified by:
 
 ### The `model-router` plugin
 
-Failover on a usage limit and switch-back, with each provider's tier table.
+Failover on a usage limit and switch-back, with each provider's tier table:
+frontier, balanced, efficient and fast, each recommending at most one model,
+so a failover with no confident pick stays in its tier on the other
+provider.
 
 Files: `plugins/model-router/`, `distribution/providers/`
 

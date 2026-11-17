@@ -130,8 +130,9 @@ function to import, and `/judge` works the same from any program.
 `ask` hands the decision to the user, so a slow or failed judge never lets an
 action through silently. A harness denial always wins over a plugin.
 
-Events are the adapters', such as `tool.after` and `session.idle`, and
-callers' own, such as `sourcefed.event`. A plugin's own events carry its
+Events are the adapters', such as `tool.after`, `session.idle`, and
+`question.asked` and `question.answered` around the agent's question to the
+user, and callers' own, such as `sourcefed.event`. A plugin's own events carry its
 ID before a dot, `notes.saved` here; the daemon refuses any other name from
 it. See [Events](../plans/pluggability.md#events).
 
