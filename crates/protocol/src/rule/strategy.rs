@@ -1,0 +1,122 @@
+use std::collections::BTreeMap;
+
+use chauffeur_core::{Plan, Step};
+use chauffeur_judges::{ConfidenceError, Question, Tier};
+
+use super::ask;
+use super::error::RuleError;
+use super::file::{AskFile, AskRef, JudgeFile, StepFile};
+use super::judge::{self, JudgeSpec};
+use crate::limits::{Exceeded, Limit, count};
+
+/// A strategy: the judges its steps name, and its steps as a core plan.
+/// A rule holds one, and a request may send one inline.
+#[derive(Debug)]
+pub struct Strategy {
+    judges: BTreeMap<String, JudgeSpec>,
+    plan: Plan<Question>,
+}
+
+impl Strategy {
+    /// Checks the strategy of `id`: each step's judge and question, and each
+    /// judge's confidence against the outcomes of the steps it answers.
+    pub(crate) fn build(
+        id: &str,
+        judges: BTreeMap<String, JudgeFile>,
+        asks: &BTreeMap<String, AskFile>,
+        strategy: Vec<StepFile>,
+    ) -> Result<Self, RuleError> {
+        let limit = |source| RuleError::Limit {
+            rule: id.to_owned(),
+            source,
+        };
+        Limit::Steps.check(count(strategy.len())).map_err(limit)?;
+        Limit::Judges.check(count(judges.len())).map_err(limit)?;
+        Limit::Asks.check(count(asks.len())).map_err(limit)?;
+        check_names(&judges, asks, &strategy).map_err(limit)?;
+        // Every ask, used or not, so an unused one cannot carry unbounded text.
+        let inline = strategy.iter().filter_map(|step| match &step.ask {
+            AskRef::Inline(ask) => Some(ask),
+            AskRef::Named(_) => None,
+        });
+        for ask in asks.values().chain(inline) {
+            ask::check_bounds(ask).map_err(limit)?;
+        }
+        if strategy.iter().any(|step| step.id.trim().is_empty()) {
+            return Err(RuleError::BlankStep {
+                rule: id.to_owned(),
+            });
+        }
+        let mut specs = BTreeMap::new();
+        for (name, judge) in judges {
+            specs.insert(name.clone(), judge::judge_spec(id, &name, judge)?);
+        }
+        let mut steps = Vec::with_capacity(strategy.len());
+        for step in strategy {
+            let question = ask::resolve_ask(id, &step, asks)?;
+            let spec = judge::resolve_judge(id, &step, &mut specs)?;
+            spec.confidence
+                .check(question.outcomes())
+                .map_err(|error: ConfidenceError| RuleError::Confidence {
+                    rule: id.to_owned(),
+                    step: step.id.clone(),
+                    reason: error.to_string(),
+                })?;
+            steps.push(Step::new(step.id, step.judge, question));
+        }
+        let plan = Plan::new(steps).map_err(|source| RuleError::Plan {
+            rule: id.to_owned(),
+            source,
+        })?;
+        Ok(Self {
+            judges: specs,
+            plan,
+        })
+    }
+
+    /// The judges its steps name, including tiers named directly.
+    #[must_use]
+    pub const fn judges(&self) -> &BTreeMap<String, JudgeSpec> {
+        &self.judges
+    }
+
+    /// Whether any judge its steps name, including a tier named directly, is
+    /// of `tier`.
+    #[must_use]
+    pub fn uses_tier(&self, tier: Tier) -> bool {
+        self.judges.values().any(|judge| judge.tier == tier)
+    }
+
+    /// Its steps as a core plan.
+    #[must_use]
+    pub const fn plan(&self) -> &Plan<Question> {
+        &self.plan
+    }
+}
+
+/// Checks the bytes of every name `judges`, `asks` and the steps use, before
+/// anything reads them.
+fn check_names(
+    judges: &BTreeMap<String, JudgeFile>,
+    asks: &BTreeMap<String, AskFile>,
+    strategy: &[StepFile],
+) -> Result<(), Exceeded> {
+    for (name, judge) in judges {
+        Limit::TextBytes.check(count(name.len()))?;
+
+        if let Some(model) = &judge.model {
+            Limit::TextBytes.check(count(model.len()))?;
+        }
+    }
+
+    for name in asks.keys() {
+        Limit::TextBytes.check(count(name.len()))?;
+    }
+
+    for step in strategy {
+        Limit::TextBytes.check(count(step.id.len()))?;
+        Limit::TextBytes.check(count(step.judge.len()))?;
+    }
+
+    Ok(())
+}

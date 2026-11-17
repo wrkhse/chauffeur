@@ -4,6 +4,7 @@ use chauffeur_judges::{Confidence, Milli, Tier};
 
 use super::error::RuleError;
 use super::file::{ConfidenceFile, JudgeFile, StepFile};
+use crate::limits::{Limit, count};
 
 /// A named judge in a rule: its tier, an optional model, and its confidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,15 +30,23 @@ pub(super) fn judge_spec(rule: &str, name: &str, judge: JudgeFile) -> Result<Jud
         Some(ConfidenceFile::Bar(bar)) => {
             Confidence::Bar(Milli::from_f64(bar).ok_or_else(|| invalid(bar))?)
         }
-        Some(ConfidenceFile::PerOutcome(bars)) => Confidence::PerOutcome(
-            bars.into_iter()
-                .map(|(outcome, bar)| {
-                    Milli::from_f64(bar)
-                        .map(|bar| (outcome, bar))
-                        .ok_or_else(|| invalid(bar))
-                })
-                .collect::<Result<_, _>>()?,
-        ),
+        Some(ConfidenceFile::PerOutcome(bars)) => {
+            Limit::Outcomes
+                .check(count(bars.len()))
+                .map_err(|source| RuleError::Limit {
+                    rule: rule.to_owned(),
+                    source,
+                })?;
+            Confidence::PerOutcome(
+                bars.into_iter()
+                    .map(|(outcome, bar)| {
+                        Milli::from_f64(bar)
+                            .map(|bar| (outcome, bar))
+                            .ok_or_else(|| invalid(bar))
+                    })
+                    .collect::<Result<_, _>>()?,
+            )
+        }
     };
     Ok(JudgeSpec {
         tier: judge.tier,

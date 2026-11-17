@@ -1,13 +1,17 @@
 # Slice 2: sourcefed triage
 
-**Status:** Planned.
+**Status:** In progress: requests, intents and limits are built; admission,
+the daemon's socket and rule sources, the bindings and sourcefed's side are
+next.
 
 **You can:** let sourcefed ask Chauffeur before it queues each event, so
 OpenCode, Pi, MCP and the CLI receive the same filtered stream, as in
 [sourcefed: one triage for every host](../pluggability.md#sourcefed-one-triage-for-every-host).
-sourcefed's daemon navigates `sourcefed.event`, its installer adds
-`sourcefed/triage` with the System One screen, and its OpenCode adapter's
-`chauffeur.gate` call goes.
+sourcefed's daemon navigates `sourcefed.event` once a v2 daemon answers its
+handshake, and marks the events v2 triaged; its installer adds
+`sourcefed/triage` with the System One screen, and its OpenCode adapter keeps
+calling v1's `chauffeur.gate` for the events that are not marked until
+cutover.
 
 A caller sends an event or an inline strategy, with its evidence and a
 deadline, and receives the events and the intents or verdict. It sends data,
@@ -25,8 +29,8 @@ flowchart LR
 
 ## Wire contract
 
-A `navigate` request, `event` notifications, then the result, as
-[JSON-RPC 2.0](../pluggability.md#json-rpc-2-0) lines. `chauffeur navigate` reads the request's
+A `chauffeur.navigate` request, `chauffeur.event` notifications, then the
+result, as [JSON-RPC 2.0](../pluggability.md#json-rpc-2-0) lines. `chauffeur navigate` reads the request's
 `params` on stdin and prints the messages it receives:
 
 ```sh
@@ -42,11 +46,12 @@ goes, then the result. Their contents, in order:
 ```text
 event   rule_matched  { "rule": "sourcefed/triage" }
 event   round_ready   { "rule": "sourcefed/triage", "round": 1, "steps": ["screen"] }
-event   step_settled  { "step": "screen", "answer": { "outcome": "no", … } }
+event   step_settled  { "rule": "sourcefed/triage", "step": "screen",
+                        "answer": { "outcome": "no", … } }
 result  intents       [{ "rule": "sourcefed/triage", "withhold": "event" }]
 ```
 
-A rejection is a JSON-RPC error whose `data.reason` names it:
+A rejection is a JSON-RPC error whose `data.reason` names it: `invalid`,
 `limit_exceeded`, `judge_unavailable`, `busy`, `deadline` or
 `unsupported_protocol`.
 
@@ -55,19 +60,43 @@ A request with `strategy` in place of `on` ends with `{"verdict": {…}}`.
 directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
 
 - **Answers and failures** are distinct: a step settles to
-  `{"answer": {"outcome", "p", "level"}}` or `{"failed": "<reason>"}`.
-  Probabilities have at most three decimals.
+  `{"answer": {"outcome", "p", "level", "model", "placeholder"}}` or
+  `{"failed": "<reason>"}`. Probabilities and the level have at most three
+  decimals, and `placeholder` marks a stand-in's answer.
 - **Intents** carry the rule that produced them. A rule's intents are dropped
   if its strategy misses the deadline; other rules' intents still return.
 - **Evidence** is named once per navigation and referenced by steps, so a
   batched provider call carries each block once.
-- **Versioning:** `protocol` is required; the daemon answers
-  `unsupported_protocol` with the versions it accepts, and each binding reports
-  it as `unavailable`.
-- **Limits**, checked before admission: 32 steps per strategy, counting each
-  copy `for_each` makes; 16 `after` entries per step; 64 outcomes per
-  question; 64 evidence blocks and candidates; 256 KiB of evidence; 30 s
-  deadline. Each rejection names its limit.
+- **Versioning:** `protocol` is a required whole number; the daemon answers
+  one it does not accept with `unsupported_protocol` and the versions it
+  accepts, and each binding reports it as `unavailable`. Any other value is
+  `invalid`.
+- **Project:** a request may name the `project` it works in, as the absolute
+  path of at most 4096 bytes, the `project_bytes` limit; a relative path, or
+  one that is not text, is `invalid`. The daemon then reads that project's
+  `.chauffeur/rules/` too, bounded and cached, and applies the project's
+  System Two allowance.
+- **Inline trust:** an inline strategy carries its caller's user-level trust,
+  so a judge that names a `model`, and a `person` judge, are allowed. Inline
+  System Two, a judge whose tier is `system-two` or a step naming
+  `system-two`, runs only when the request names a `project` that the
+  user-level `projects.json` in Chauffeur's config folder lists. That file is
+  a JSON list of absolute project paths, empty by default. Without a
+  `project` the request is refused at parse with `judge_unavailable`; a
+  project the list does not name is refused by the daemon with
+  `judge_unavailable` too. System Two stays unconfigured until slice 11.
+- **Nulls:** a JSON null anywhere in `params` is `invalid`; a field with no
+  value is left out.
+- **Limits**, checked before admission: a request line of 1 MiB; a `project`
+  of at most 4096 bytes; 32 steps per strategy, counting each copy `for_each`
+  makes; 16 `after` entries per step; 32 judges and 32 asks per strategy; 64
+  outcomes per question, and 64 bars in a per-outcome confidence; 64 evidence
+  blocks, 64 candidates, and 64 blocks named by one ask; 256 KiB of evidence
+  and candidates together, names included; 16 KiB in each text a strategy
+  names: instructions, descriptions, outcome values, step IDs, judge and ask
+  names, evidence names, and a judge's `model`; a 30 s deadline. Each
+  rejection names its limit. The `after` and `for_each` limits are checked
+  with those fields, in slices 3 and 4.
 
 ## What it builds
 
@@ -78,7 +107,8 @@ The `navigate` request and its intents, the limits above, and the one
 replay.
 
 Files: `crates/protocol/src/request.rs`, `intent.rs`, `limits.rs`,
-`schema/navigate.json`, `fixtures/`
+`progress.rs`, `rule/strategy.rs`, `schema/navigate.json`,
+`fixtures/navigate.json`
 
 ```json
 {
@@ -92,11 +122,181 @@ Files: `crates/protocol/src/request.rs`, `intent.rs`, `limits.rs`,
 }
 ```
 
+Structure:
+
+`Navigate::parse` checks a request's `params` in order: the protocol first, so
+a newer caller's fields read as `unsupported_protocol`, then the fields, the
+limits, and an inline strategy. A `protocol` that is not a whole number,
+such as `"1"`, `1.5` or `-1`, is `invalid`. A request without `deadline_ms` gets
+`DEFAULT_DEADLINE`, 3 seconds. An empty `on` is refused, and so is an inline
+step naming evidence the request does not send. `event` is what rules match:
+named by `on`, with each evidence block as a field, so a block named `event`
+stays a field.
+
+```rust
+pub const PROTOCOLS: [u64; 1];
+pub const DEFAULT_DEADLINE: Duration;
+
+pub struct Navigate { … }
+
+impl Navigate {
+    pub fn parse(params: &Value) -> Result<Self, Rejection>;
+    pub const fn deadline(&self) -> Duration;
+    pub fn evidence(&self) -> &[(String, String)];
+    pub fn candidates(&self) -> &[(String, String)];
+    pub const fn target(&self) -> &Target;
+    pub fn event(&self) -> Option<Event>;
+}
+
+impl Event {
+    pub const fn new(name: String, fields: Map<String, Value>) -> Self;
+}
+
+pub enum Target {
+    On(String),
+    Strategy(Strategy),
+}
+```
+
+A rejection is the JSON-RPC error a binding receives. `to_error` adds
+`limit` and `max` for a limit, and `accepted` for a protocol. The code is
+`-32602` for what the caller sent and `-32000` for what the daemon could
+not serve.
+
+```rust
+pub enum Rejection {
+    Invalid(String),
+    LimitExceeded(Exceeded),
+    UnsupportedProtocol,
+    Busy,
+    Deadline,
+    JudgeUnavailable(String),
+}
+
+impl Rejection {
+    pub const fn reason(&self) -> &'static str;
+    pub fn to_error(&self) -> Value;
+}
+
+impl Display for Rejection {}
+impl Error for Rejection {}
+impl From<Exceeded> for Rejection {}
+impl From<RuleError> for Rejection {}
+```
+
+Rule files are held to the same limits as requests: a strategy of 33 steps or
+33 judges, or an ask of 65 outcomes or a text over 16 KiB, used or not, is
+refused when it loads, as `RuleError::Limit`; a blank step ID is
+`RuleError::BlankStep`. A described outcome refuses fields beside `value`
+and `description`. A rule file over 1 MiB is refused with its path.
+
+```rust
+pub enum Limit {
+    Steps,
+    Outcomes,
+    EvidenceBlocks,
+    Candidates,
+    EvidenceBytes,
+    Deadline,
+    Judges,
+    Asks,
+    TextBytes,
+    ProjectBytes,
+}
+
+impl Limit {
+    pub const ALL: [Self; 10];
+    pub const fn name(self) -> &'static str;
+    pub const fn max(self) -> u64;
+    pub const fn check(self, count: u64) -> Result<(), Exceeded>;
+}
+
+pub struct Exceeded {
+    pub limit: Limit,
+    pub count: u64,
+}
+
+impl Display for Exceeded {}
+impl Error for Exceeded {}
+```
+
+A rule and an inline strategy share `Strategy`: the judges its steps name
+and its steps as a core plan.
+
+```rust
+pub struct Strategy { … }
+
+impl Strategy {
+    pub const fn judges(&self) -> &BTreeMap<String, JudgeSpec>;
+    pub const fn plan(&self) -> &Plan<Question>;
+}
+
+impl Rule {
+    pub const fn strategy(&self) -> &Strategy;
+}
+```
+
+An intent is one object on the wire, `rule` and the intent itself.
+`from_json` refuses an object with no `rule` or more than one intent, and a
+rule file may not name a `then` entry `rule`.
+
+```rust
+pub struct Intent { … }
+
+impl Intent {
+    pub fn new(rule: &str, then: &Then) -> Self;
+    pub fn from_json(value: &Value) -> Option<Self>;
+    pub fn to_json(&self) -> Value;
+    pub fn rule(&self) -> &str;
+    pub fn name(&self) -> &str;
+    pub const fn payload(&self) -> &Value;
+}
+```
+
+`progress` turns a run into what the caller sees: the `chauffeur.event`
+params, without the request's `id`, and the verdict by step.
+
+```rust
+pub mod progress {
+    pub fn rule_matched(rule: &str) -> Value;
+    pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>;
+    pub fn settled(outcome: &Outcome<Answer>) -> Value;
+    pub fn verdict(verdict: &Verdict<Answer>) -> Value;
+}
+```
+
+The fixtures are one file of cases, each with `params` and either
+`"expect": "on"` or `"strategy"`, or a `reject` with its `reason` and
+`limit`. A case with `fill` has `text` repeated `times` put at the JSON
+pointer `at` in its params before it is sent, so the file stays small. A
+rejected case the schema cannot see as rejected, such as one over a byte
+limit, carries `"schema": "accepts"`.
+
+```json
+{
+  "name": "evidence over 256 KiB",
+  "params": { "protocol": 1, "on": "sourcefed.event", "evidence": { "log": "" } },
+  "fill": [{ "at": "/evidence/log", "text": "€", "times": 87381 }],
+  "reject": { "reason": "limit_exceeded", "limit": "evidence_bytes" },
+  "schema": "accepts"
+}
+```
+
 Verified by:
 
 - Round-trip and rejection cases for every limit and malformed field,
-  including duplicate outcomes, reserved outcome names and a per-outcome
-  confidence that misses an outcome.
+  including a JSON null in `params`, duplicate outcomes, reserved outcome
+  names and a per-outcome confidence that misses an outcome:
+  `crates/protocol/tests/navigate.rs` replays the fixture cases and checks
+  that every limit has one, at and over it, that bytes count as UTF-8 across
+  evidence, candidates and every named text, and that a relative `project` is
+  refused. Each accepted case keeps its deadline, evidence, candidates, step
+  IDs and judges.
+- The same test file checks every case against `schema/navigate.json`
+  with the `jsonschema` crate: accepted cases, and rejected ones tagged
+  `"schema": "accepts"`, fit it; every other rejected case does not.
+- Every shipped rule file loads within the limits, and one over 1 MiB is
+  refused with its path.
 
 ### Admission and running
 
@@ -127,10 +327,15 @@ Verified by:
 
 ### The daemon's socket and rule sources
 
-Several calls per connection, `$/cancelRequest`, and cancelling on close;
-`--models FILE` for tests. The integration and project rule sources, refusing
-System Two in a project rule the user has not allowed and any model or
-placeholder entry from a project. Matching rules run concurrently.
+Several calls per connection, at most 16 open calls and at most 4 of them
+`chauffeur.navigate`; a fifth navigation is refused at once with `busy`,
+which keeps the integration share free for other connections.
+`$/cancelRequest`, and a close, cancels what the connection carried.
+`--models FILE` for tests. The integration and project rule sources: a
+request's `project` adds that project's `.chauffeur/rules/`, read bounded
+and cached, and the project may run System Two only when the user-level
+`projects.json` lists it. A project rule may not name a `model` or a
+placeholder, and such a rule is refused. Matching rules run concurrently.
 
 Files: `crates/daemon/src/socket.rs`, `rules.rs`
 
@@ -148,9 +353,16 @@ distribution/rules/                     shipped
 
 Verified by:
 
-- Each of the four sources loads.
-- A project rule naming System Two, and a model or placeholder entry in a
-  project's `.chauffeur/`, are refused.
+- Each of the four sources loads; a request's `project` adds its rules, read
+  within bounds and cached.
+- A fifth open navigation on one connection is `busy` while another
+  connection is still served.
+- A project rule naming System Two in a project that `projects.json` does
+  not list, and a `model` or placeholder entry in a project's
+  `.chauffeur/`, are refused.
+- An inline strategy naming `system-two` is `judge_unavailable` without a
+  `project` at parse, and from the daemon when the list does not name the
+  project.
 - Two matching rules both return their intents; a rule that misses the
   deadline drops only its own intents.
 
@@ -195,8 +407,15 @@ Verified by:
 
 ### sourcefed
 
-Its daemon navigates before queuing each event, its installer adds
-`sourcefed/triage`, and its OpenCode adapter's `chauffeur.gate` call goes.
+Its daemon asks v2 only when a v2 daemon answers its `chauffeur.status`
+handshake, looking for the socket of `chauffeur` first and then
+`chauffeur-next`. Events that v2 triaged are marked triaged; the OpenCode
+bridge keeps calling v1's `chauffeur.gate` for events that are not marked,
+and that call is removed at slice 13 (cutover). Its installer puts `sourcefed/triage`
+under the v2 installation's `rules/sourcefed/`, never in v1's
+`~/.config/chauffeur/rules`.
+
+Before queuing each event it navigates `sourcefed.event`:
 
 Files, in sourcefed: its daemon, its installer, `adapters/opencode/bridge.ts`
 
@@ -210,10 +429,27 @@ const { intents } = await chauffeur.navigate({
 if (!intents.some((intent) => intent.withhold === "event")) queue(target, event)
 ```
 
-Verified by the end-to-end checks below.
+The `thread` evidence is `<label>: <title>`, such as `#42: Fix the tick race`:
+the monitor's label, such as `#42`, `ENG-42` or `thread`, and the event's
+subject title, the label alone when the event has no title, the title alone
+when there is no label, and empty when neither, clamped to 16 KiB. `event` is
+five lines, `source:`, `kind:`, `summary:`, `body:` and `actionable: yes` or
+`actionable: no (informational)`, and `monitor` is the source's `describe()`,
+such as `GitHub wrkhse/chauffeur#42`. Nothing looks up earlier history.
+
+Verified by the end-to-end checks below. The sourcefed side is tracked in
+wrkhse/sourcefed#27.
 
 ## End to end
 
 - sourcefed, for real: v1's 12 labelled events give the same deliveries;
   events reaching OpenCode, Pi and the CLI are filtered alike; with Chauffeur
   stopped, sourcefed delivers.
+- With only v1's daemon running, sourcefed's `chauffeur.status` handshake
+  goes unanswered, no event is marked triaged, and the OpenCode bridge's
+  `chauffeur.gate` filters as before.
+
+The 12 labelled events and v1's recorded gate replies are in
+`crates/protocol/fixtures/sourcefed-events.json` and
+`sourcefed-events.v1.json`, checked by
+`crates/protocol/tests/sourcefed_events.rs`.

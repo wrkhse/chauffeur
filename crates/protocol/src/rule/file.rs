@@ -1,4 +1,8 @@
 //! A rule file as written, before its checks.
+//!
+//! Only `rule` and its modules read these files, so its types are
+//! `pub(super)` except the three `rule` re-exports; the module is private, so
+//! `pub(crate)` would be redundant.
 
 use std::collections::BTreeMap;
 
@@ -24,9 +28,10 @@ pub(super) struct RuleFile {
     pub(super) cooldown_seconds: Option<u64>,
 }
 
+/// A named judge as written, before its confidence and model are checked.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JudgeFile {
+pub struct JudgeFile {
     pub(super) tier: Tier,
     pub(super) model: Option<String>,
     pub(super) confidence: Option<ConfidenceFile>,
@@ -39,9 +44,10 @@ pub(super) enum ConfidenceFile {
     PerOutcome(BTreeMap<String, f64>),
 }
 
+/// A question as written, inline in a step or named in `asks`.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct AskFile {
+pub struct AskFile {
     pub(super) instructions: String,
     pub(super) outcomes: Vec<LabelFile>,
     #[serde(default)]
@@ -52,7 +58,14 @@ pub(super) struct AskFile {
 #[serde(untagged)]
 pub(super) enum LabelFile {
     Value(String),
-    Described { value: String, description: String },
+    Described(DescribedFile),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DescribedFile {
+    pub(super) value: String,
+    pub(super) description: String,
 }
 
 #[derive(Deserialize)]
@@ -62,9 +75,10 @@ pub(super) enum AskRef {
     Inline(AskFile),
 }
 
+/// One step as written: its ID, its judge, and its ask.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct StepFile {
+pub struct StepFile {
     pub(super) id: String,
     pub(super) judge: String,
     pub(super) ask: AskRef,
