@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_protocol::Rejection;
-use chauffeur_runtime::Cancel;
+use chauffeur_runtime::{Cancel, Source};
 use serde_json::{Value, json};
 
 use crate::DaemonError;
@@ -383,7 +383,12 @@ impl Calls {
     }
 
     fn open(&self, id: Value, navigate: bool) -> Cancel {
-        let cancel = Cancel::new();
+        let source = if navigate {
+            Source::Integration
+        } else {
+            Source::Harness
+        };
+        let cancel = Cancel::new(source);
         self.open
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

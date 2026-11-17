@@ -39,7 +39,11 @@ use chauffeur_daemon::audit::{Audit, MAX_BYTES};
 let router = Router::new(loaded, Audit::new(&paths.state, MAX_BYTES));
 
 let permit = router.admit(Source::Harness)?;
-let actions = router.emit(&event, Duration::from_millis(1500), &Cancel::new());
+let actions = router.emit(
+    &event,
+    Duration::from_millis(1500),
+    &Cancel::new(Source::Harness),
+);
 
 let permit = router.admit(Source::Integration)?;
 let intents = router.navigate(request, &cancel, &|event| send(event))?;
