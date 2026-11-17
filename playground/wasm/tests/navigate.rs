@@ -11,6 +11,36 @@ fn navigated(input: &Value) -> Value {
     serde_json::from_str(&navigate(&input.to_string())).unwrap()
 }
 
+#[test]
+fn browser_examples_match_the_schema_and_expected_results() {
+    let cases: Value =
+        serde_json::from_str(include_str!("../../src/features/navigate-examples.json")).unwrap();
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../crates/protocol/schema/navigate.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut count = 0;
+
+    for (name, case) in cases.as_object().unwrap() {
+        count += 1;
+        let input = &case["input"];
+        assert_eq!(
+            validator.is_valid(&input["request"]),
+            case["valid"].as_bool().unwrap(),
+            "{name}"
+        );
+        let reply = navigated(input);
+        assert_eq!(
+            reply.pointer(case["pointer"].as_str().unwrap()),
+            Some(&case["expected"]),
+            "{name}: {reply}"
+        );
+    }
+
+    assert!(count > 0);
+}
+
 fn triage() -> Value {
     json!({
         "on": "sourcefed.event",
@@ -60,6 +90,71 @@ fn confident_noise_is_withheld_after_the_runs_events() {
 }
 
 #[test]
+fn all_matches_precede_runs_in_rule_order() {
+    let mut input = event("thanks", &json!({ "yes": 0.06, "no": 0.94 }));
+    input["rules"] = json!({ "a": triage(), "b": triage() });
+    let reply = navigated(&input);
+    let events = reply["events"].as_array().unwrap();
+    let sequence: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .map(|event| (event["event"].as_str().unwrap(), event["rule"].as_str()))
+        .collect();
+    assert_eq!(
+        sequence,
+        [
+            ("rule_matched", Some("a")),
+            ("rule_matched", Some("b")),
+            ("round_ready", Some("a")),
+            ("step_settled", Some("a")),
+            ("round_ready", Some("b")),
+            ("step_settled", Some("b")),
+        ]
+    );
+    assert_eq!(reply["result"]["intents"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn distinct_steps_receive_their_own_replies() {
+    let reply = navigated(&json!({
+        "request": { "protocol": 1, "strategy": [
+            { "id": "first", "judge": "system-one", "ask": { "outcomes": ["yes", "no"], "instructions": "Same question?" } },
+            { "id": "second", "judge": "system-one", "ask": { "outcomes": ["yes", "no"], "instructions": "Same question?" } }
+        ] },
+        "answers": { "first": { "yes": 0.9, "no": 0.1 }, "second": { "yes": 0.1, "no": 0.9 } }
+    }));
+    assert_eq!(
+        reply["result"]["verdict"]["first"]["answer"]["outcome"], "yes",
+        "{reply}"
+    );
+    assert_eq!(
+        reply["result"]["verdict"]["second"]["answer"]["outcome"], "no",
+        "{reply}"
+    );
+}
+
+#[test]
+fn invalid_answers_report_the_step_and_expected_shape_or_failure_names() {
+    let invalid = navigated(&event("x", &json!(42)));
+    assert_eq!(
+        invalid["error"],
+        "answers.screen: expected {outcome:p,...} or {failed:name}"
+    );
+    let invalid = navigated(&event("x", &json!({ "failed": "typo" })));
+    let error = invalid["error"].as_str().unwrap();
+    for name in [
+        "screen",
+        "typo",
+        "unavailable",
+        "rate_limited",
+        "timeout",
+        "invalid",
+        "deadline",
+    ] {
+        assert!(error.contains(name), "{error}");
+    }
+}
+
+#[test]
 fn unsure_a_failure_and_no_reply_give_no_intent() {
     for screen in [
         json!({ "yes": 0.48, "no": 0.52 }),
@@ -103,5 +198,7 @@ fn a_request_over_a_limit_is_rejected_as_a_caller_sees_it() {
         navigated(&json!({ "request": { "protocol": 1, "on": "x", "deadline_ms": 30_001 } }));
 
     assert_eq!(reply["rejected"]["data"]["limit"], "deadline_ms");
+    assert_eq!(reply["rejected"]["data"]["reason"], "limit_exceeded");
+    assert_eq!(reply["rejected"]["data"]["max"], 30_000);
     assert!(navigated(&json!({ "nope": 1 }))["error"].is_string());
 }

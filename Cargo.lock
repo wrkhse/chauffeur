@@ -244,6 +244,7 @@ dependencies = [
  "chauffeur-core",
  "chauffeur-judges",
  "chauffeur-protocol",
+ "jsonschema",
  "serde",
  "serde_json",
  "wasm-bindgen",

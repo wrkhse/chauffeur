@@ -19,6 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = { workspace = true }
 
+[dev-dependencies]
+jsonschema = { version = "0.61", default-features = false }
+
 [lints]
 workspace = true
 

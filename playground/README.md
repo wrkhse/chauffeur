@@ -18,6 +18,10 @@ its own tab.
 - **Check:** `bun run check` builds the release module and the page, and
   type-checks.
 
+Navigate keys stand-in answers by step ID across all rules. It does not model
+cooldowns, deadlines during a run, `judge_unavailable` for an inline strategy
+without a model, busy or cancelled requests, redaction, or the 4,096-byte cap.
+
 ## Adding a feature tab
 
 1. Export the Rust function from `wasm/src/lib.rs` with `#[wasm_bindgen]`.

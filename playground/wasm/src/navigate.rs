@@ -10,9 +10,14 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// What a stand-in judge answers for one step: a probability per outcome,
 /// or a failure.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum Reply {
+#[serde(untagged, deny_unknown_fields)]
+enum RawReply {
     Failed { failed: String },
+    P(BTreeMap<String, f64>),
+}
+
+enum Reply {
+    Failed(Failure),
     P(BTreeMap<String, f64>),
 }
 
@@ -24,7 +29,7 @@ struct Input {
     rules: BTreeMap<String, Value>,
     /// Each step's stand-in reply, by step ID.
     #[serde(default)]
-    answers: BTreeMap<String, Reply>,
+    answers: BTreeMap<String, Value>,
 }
 
 /// Navigates as the daemon does, with stand-in replies in place of models.
@@ -45,6 +50,7 @@ pub fn navigate(input: &str) -> String {
 
 fn navigate_json(input: &str) -> Result<Value, String> {
     let input: Input = serde_json::from_str(input).map_err(|error| error.to_string())?;
+    let answers = parse_answers(input.answers)?;
     let request = match Navigate::parse(&input.request) {
         Ok(request) => request,
         Err(rejection) => return Ok(json!({ "rejected": rejection.to_error() })),
@@ -52,12 +58,13 @@ fn navigate_json(input: &str) -> Result<Value, String> {
     let mut events = Vec::new();
     let result = match (request.target(), request.event()) {
         (Target::Strategy(strategy), _) => {
-            let verdict = run(strategy, &input.answers, None, &mut events)?;
+            let verdict = run(strategy, &answers, None, &mut events)?;
             json!({ "verdict": progress::verdict(&verdict) })
         }
         (Target::On(_), Some(event)) => {
             let mut refused = Vec::new();
             let mut intents = Vec::new();
+            let mut matched = Vec::new();
             for (id, text) in &input.rules {
                 let rule = match Rule::parse(id, &text.to_string()) {
                     Ok(rule) => rule,
@@ -70,7 +77,10 @@ fn navigate_json(input: &str) -> Result<Value, String> {
                     continue;
                 }
                 events.push(progress::rule_matched(id));
-                let verdict = run(rule.strategy(), &input.answers, Some(id), &mut events)?;
+                matched.push((id, rule));
+            }
+            for (id, rule) in matched {
+                let verdict = run(rule.strategy(), &answers, Some(id), &mut events)?;
                 let met = chauffeur_protocol::Then::first_met(rule.then(), &verdict);
                 intents.extend(met.map(|then| Intent::new(id, then).to_json()));
             }
@@ -83,6 +93,19 @@ fn navigate_json(input: &str) -> Result<Value, String> {
     Ok(json!({ "events": events, "result": result }))
 }
 
+fn parse_answers(values: BTreeMap<String, Value>) -> Result<BTreeMap<String, Reply>, String> {
+    values.into_iter().map(|(step, value)| {
+        let reply: RawReply = serde_json::from_value(value)
+            .map_err(|_| format!("answers.{step}: expected {{outcome:p,...}} or {{failed:name}}"))?;
+        let reply = match reply {
+            RawReply::Failed { failed } => Reply::Failed(Failure::from_name(&failed)
+                .ok_or_else(|| format!("answers.{step}: unknown failure {failed}; expected unavailable, rate_limited, timeout, invalid, deadline"))?),
+            RawReply::P(p) => Reply::P(p),
+        };
+        Ok((step, reply))
+    }).collect()
+}
+
 /// Runs `strategy` with each step answered by its stand-in reply, settled
 /// under its judge's confidence, and records the run's events.
 fn run(
@@ -91,6 +114,8 @@ fn run(
     rule: Option<&str>,
     events: &mut Vec<Value>,
 ) -> Result<chauffeur_core::Verdict<Answer>, String> {
+    // Plan::run passes the stored step request by reference to its judge.
+    // Its identity distinguishes steps even when their questions are equal.
     let step_of = |question: &Question| {
         strategy
             .plan()
@@ -134,9 +159,7 @@ fn stand_in(
     };
     match reply {
         None => Outcome::Failed(Failure::Unavailable),
-        Some(Reply::Failed { failed }) => {
-            Outcome::Failed(Failure::from_name(failed).unwrap_or(Failure::Invalid))
-        }
+        Some(Reply::Failed(failure)) => Outcome::Failed(*failure),
         Some(Reply::P(p)) => {
             match Probabilities::read(
                 question.outcomes(),
