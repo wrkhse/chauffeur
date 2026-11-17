@@ -316,9 +316,8 @@ impl Renewal {
 pub struct ErrorWords {
     /// Phrases found anywhere in the error message.
     pub messages: Vec<String>,
-    /// Error types. Spaces and dashes read as underscores, and a known type
-    /// matches any whole underscore-separated run of a provider's code, so
-    /// `usage_limit` matches `subscription_sharing_usage_limit_exceeded`.
+    /// Exact error types, after a `provider.` namespace, with spaces and
+    /// dashes read as underscores.
     pub types: Vec<String>,
 }
 
@@ -391,9 +390,19 @@ impl ModelRouterConfig {
     /// Whether `model` is a last-resort fallback.
     #[must_use]
     pub fn is_last_resort(&self, model: &ModelRef) -> bool {
+        self.last_resort_rank(model).is_some()
+    }
+
+    /// The position of the first `last_resort` pattern matching `model`, so the
+    /// list is a priority order: a model the first pattern names comes before
+    /// one only a later pattern names.
+    #[must_use]
+    pub fn last_resort_rank(&self, model: &ModelRef) -> Option<usize> {
         let key = format!("{}/{}", model.provider, model.model);
 
-        self.last_resort.iter().any(|pattern| glob(pattern, &key))
+        self.last_resort
+            .iter()
+            .position(|pattern| glob(pattern, &key))
     }
 
     /// Whether the router must never select `model`, regardless of variant.
@@ -452,15 +461,9 @@ impl ErrorWords {
         let normalized = normalized(error_type);
         // OpenCode namespaces provider errors, e.g. `provider.quota`.
         let kind = normalized.strip_prefix("provider.").unwrap_or(&normalized);
-        // Providers also compose their codes, e.g.
-        // `subscription_sharing_usage_limit_exceeded`: a known type matches a
-        // whole underscore-separated run of the code, never part of a word.
-        let padded = format!("_{kind}_");
         let message = message.to_lowercase();
 
-        self.types
-            .iter()
-            .any(|known| padded.contains(&format!("_{known}_")))
+        self.types.iter().any(|known| known == kind)
             || self.messages.iter().any(|phrase| message.contains(phrase))
     }
 }
@@ -494,7 +497,8 @@ mod tests {
         assert_eq!(config.max_candidates, 8);
         assert_eq!(config.limit.messages.len(), 14);
         assert_eq!(config.lasting.messages.len(), 10);
-        assert_eq!(config.limit.types.len(), 12);
+        assert_eq!(config.lasting.types.len(), 8);
+        assert_eq!(config.limit.types.len(), 15);
         assert_eq!(config.unusable.messages.len(), 6);
         assert_eq!(config.unusable.types.len(), 10);
         assert_eq!(config.limit.types[0], "capacity_exhausted");
@@ -611,25 +615,33 @@ mod tests {
     }
 
     #[test]
-    fn a_providers_composed_code_matches_a_whole_word_of_it() {
+    fn opencodes_classified_provider_limits_are_limits_that_last() {
         let config = ModelRouterConfig::default();
 
-        // OpenCode reports an exhausted subscription by its own code.
+        // OpenCode classifies an exhausted subscription itself and reports no
+        // status a limit check could see.
+        for error_type in [
+            "provider.chatgpt-limit",
+            "provider.free-limit",
+            "provider.go-limit",
+        ] {
+            assert!(
+                config.is_limit_error(error_type, Some(200), ""),
+                "{error_type}"
+            );
+            assert!(
+                config.is_lasting_error(error_type, Some(200), ""),
+                "{error_type}"
+            );
+        }
         assert!(config.is_limit_error(
-            "provider.subscription_sharing_usage_limit_exceeded",
-            None,
-            ""
+            "provider.chatgpt-limit",
+            Some(200),
+            "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details."
         ));
-        assert!(config.is_lasting_error("subscription_sharing_usage_limit_exceeded", None, ""));
-        assert!(config.is_limit_error("provider.rate_limit_error", None, ""));
-        // The broadened rule is not a substring match, and the words that
-        // make an auth failure unusable do not make it a limit.
+        // Types are exact: a longer word is another type.
+        assert!(!config.is_limit_error("provider.chatgpt_limit_pending", None, ""));
+        assert!(!config.is_limit_error("provider.rate-limited", None, ""));
         assert!(!config.is_limit_error("provider.internal", None, ""));
-        assert!(!config.is_limit_error("provider.permission_denied", None, ""));
-        assert!(config.is_unusable_error("provider.permission_denied", None, ""));
-        assert!(config.is_unusable_error("provider.authentication_error", None, ""));
-        // Runs match whole and in order.
-        assert!(!config.is_limit_error("provider.limited_usage", None, ""));
-        assert!(!config.is_limit_error("provider.quotas_exceeded", None, ""));
     }
 }

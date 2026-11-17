@@ -226,7 +226,6 @@ test("a switched-to model whose own subscription is used up fails over again, to
   const hooks = new Hooks()
   const events = eventStream()
   const signals: Signal[] = []
-  const synthetic: Array<{ readonly text: string; readonly resume?: boolean }> = []
   const opus = { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" }
   const sol = { provider: "openai", model: "gpt-6.1-sol", variant: "high" }
   const deepseek = { provider: "opencode-go", model: "deepseek-v4.1-flash" }
@@ -237,14 +236,12 @@ test("a switched-to model whose own subscription is used up fails over again, to
       hook: hooks.register,
       switchModel: (input: { readonly model: typeof opus }) => Effect.sync(() => { selection = input.model }),
       get: () => Effect.sync(() => ({ model: selection })),
-      synthetic: (input: { readonly text: string; readonly resume?: boolean }) => Effect.sync(() => { synthetic.push(input) }),
     },
     model: { list: () => Effect.succeed({ data: [
       { ...opus, enabled: true, status: "active" },
       { providerID: "openai", id: "gpt-6.1-sol", variant: "high", enabled: true, status: "active" },
       { providerID: "opencode-go", id: "deepseek-v4.1-flash", enabled: true, status: "active" },
     ] }) },
-    skill: { list: () => Effect.succeed({ data: [] }) },
     tool: { hook: hooks.register },
     event: { subscribe: events.subscribe },
   })
@@ -275,31 +272,36 @@ test("a switched-to model whose own subscription is used up fails over again, to
     expect(selection.id).toBe("gpt-6.1-sol")
     expect(limited.decision).toEqual({ retry: true, delay: 0 })
 
-    // The used-up subscription ends the execution instead of being retried.
-    await events.publish({ type: "session.execution.failed", data: { sessionID, error: {
-      type: "provider.subscription_sharing_usage_limit_exceeded",
-      message: "subscription_sharing_usage_limit_exceeded: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
-    } } })
-    await settle()
+    // The classification OpenCode reports for an exhausted subscription, with
+    // no status a limit check could see.
+    const usedUp = {
+      sessionID,
+      model: { providerID: "openai", id: "gpt-6.1-sol", variant: "high" },
+      error: {
+        type: "provider.chatgpt-limit",
+        status: 200,
+        message: "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
+      },
+      decision: { retry: true, delay: 1000 },
+    }
+
+    await hooks.emit("retry", usedUp)
 
     expect(signals.at(-1)?.kind).toMatchObject({
       type: "model_error",
       model: { provider: "openai", model: "gpt-6.1-sol", variant: "high" },
-      error_type: "provider.subscription_sharing_usage_limit_exceeded",
+      error_type: "provider.chatgpt-limit",
+      status: 200,
       message: expect.stringContaining("usage limit"),
       tool_executed: false,
     })
-    // Both failures carry the host's own classification, unchanged.
+    // Both failures reach the daemon with the host's own classification.
     expect(signals.map((value) => (value.kind.type === "model_error" ? value.kind.error_type : ""))).toEqual([
-      "provider.rate-limit", "provider.subscription_sharing_usage_limit_exceeded",
+      "provider.rate-limit", "provider.chatgpt-limit",
     ])
     expect(selection.providerID).toBe("opencode-go")
     expect(selection.id).toBe("deepseek-v4.1-flash")
-    expect(synthetic).toHaveLength(1)
-    expect(synthetic[0]).toMatchObject({
-      resume: true,
-      text: expect.stringContaining("moved this session to opencode-go/deepseek-v4.1-flash because openai/gpt-6.1-sol#high failed"),
-    })
+    expect(usedUp.decision).toEqual({ retry: true, delay: 0 })
   } finally {
     await plugin.close()
   }

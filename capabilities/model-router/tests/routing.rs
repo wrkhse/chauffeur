@@ -1047,14 +1047,14 @@ fn used_up(
 
 #[test]
 fn a_switched_model_that_hits_its_own_limit_chains_to_the_last_resort() {
-    // The first names only the provider's code, with no limit phrase in the
-    // message, so the code alone must classify it; the second is a plain
-    // invalid request whose message names the usage limit.
+    // OpenCode's own classification of an exhausted subscription: a provider
+    // failure with no status a limit check could see. The second is the raw
+    // provider text, which only a host that forwarded response.body would send.
     let errors = [
         (
-            "provider.subscription_sharing_usage_limit_exceeded",
-            None,
-            "The ChatGPT user has reached their Subscription Sharing limit for this account.",
+            "provider.chatgpt-limit",
+            Some(200),
+            "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
         ),
         (
             "provider.invalid-request",
@@ -1122,9 +1122,9 @@ fn a_chained_limit_asks_among_the_last_resorts_and_never_offers_stay() {
         let sol = used_up(
             "openai/gpt-6.1-sol#high",
             &order,
-            "provider.subscription_sharing_usage_limit_exceeded",
-            None,
-            "subscription_sharing_usage_limit_exceeded: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
+            "provider.chatgpt-limit",
+            Some(200),
+            "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
         );
         let plan = router.plan(&Situation::default(), &sol);
         let offered = options(&plan);
@@ -1150,6 +1150,66 @@ fn a_chained_limit_asks_among_the_last_resorts_and_never_offers_stay() {
                 Some(&[choice("opencode-go/deepseek-v4.1-flash", 0.9)])
             ),
             switch("opencode-go/deepseek-v4.1-flash")
+        );
+    }
+}
+
+/// The host's models with Zen's free models listed before Go's DeepSeek.
+fn go_models_free_first() -> Vec<&'static str> {
+    vec![
+        "opencode/fledge-alpha-free",
+        "opencode/ling-3.1-flash-free",
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode/claude-sonnet-5-5",
+        "anthropic/claude-fable-5-2",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5-5",
+        "openai/gpt-6-astra",
+        "openai/gpt-6-luna",
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6.1-terra",
+    ]
+}
+
+#[test]
+fn last_resorts_follow_the_configured_patterns_not_the_host_order() {
+    // The overlay lists DeepSeek first, then the go and zen free models. The
+    // host lists the free models first here; the reverse order tests the
+    // other way round.
+    let listed = go_models_free_first();
+    let mut reversed = listed.clone();
+    reversed.reverse();
+
+    for order in [listed, reversed] {
+        let mut router = go_router();
+        let opus = limit_listed("anthropic/claude-opus-5-5#high", &order);
+
+        router.plan(&Situation::default(), &opus);
+        assert_eq!(
+            router.decide(&opus, None),
+            switch("openai/gpt-6.1-sol#high")
+        );
+
+        let sol = used_up(
+            "openai/gpt-6.1-sol#high",
+            &order,
+            "provider.chatgpt-limit",
+            Some(200),
+            "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
+        );
+        let plan = router.plan(&Situation::default(), &sol);
+
+        // No confident pick: the posture takes the first option, which the
+        // overlay's first pattern names whatever order the host lists them in.
+        assert_eq!(
+            options(&plan)[0],
+            "opencode-go/deepseek-v4.1-flash",
+            "{order:?}"
+        );
+        assert_eq!(
+            router.decide(&sol, None),
+            switch("opencode-go/deepseek-v4.1-flash"),
+            "{order:?}"
         );
     }
 }

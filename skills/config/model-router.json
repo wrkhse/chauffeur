@@ -35,6 +35,9 @@
     ],
     "types": [
       "capacity_exhausted",
+      "chatgpt_limit",
+      "free_limit",
+      "go_limit",
       "insufficient_quota",
       "overloaded",
       "overloaded_error",
@@ -62,6 +65,9 @@
       "request_too_large"
     ],
     "types": [
+      "chatgpt_limit",
+      "free_limit",
+      "go_limit",
       "insufficient_quota",
       "quota",
       "quota_exceeded",

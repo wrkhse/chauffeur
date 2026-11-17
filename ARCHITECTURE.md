@@ -596,18 +596,18 @@ create`, `*create_pr`, `*open_pr`), a Jira key in a Jira call, or a Slack
 ### Model router
 
 On a usage-limit error the router acts. A limit is HTTP 402, 429, 503, or 529;
-a limit error type (OpenCode's `provider.quota`, `rate_limit`, `overloaded`,
-and similar); or wording in the message ("credit balance", "insufficient
-funds", "quota", "rate limit", "usage limit", "billing", "high demand",
-"capacity"), which catches providers that report an empty balance as an
-invalid request, and a subscription that is used up ("The ChatGPT user has
-reached their Subscription Sharing usage limit"). An error type matches whole
-underscore-separated words of the provider's code, never part of a word, so
-`subscription_sharing_usage_limit_exceeded` is a `usage_limit` and
-`provider.permission_denied` is a permission error. A model the router switched
-to that cannot serve the agent (401, 403, 404, or an auth, permission, or
-not-found error) is a failed switch: the router moves on to the next candidate.
-The same error on a model the user chose is left to the host.
+a limit error type, matched exactly after OpenCode's `provider.` namespace
+with spaces and dashes read as underscores (`quota`, `rate_limit`,
+`chatgpt_limit`, `free_limit`, `go_limit`, and similar); or wording in the
+message ("credit balance", "insufficient funds", "quota", "rate limit",
+"usage limit", "billing", "high demand", "capacity"), which catches providers
+that report an empty balance as an invalid request. OpenCode reports an
+exhausted ChatGPT subscription as `provider.chatgpt-limit` with status 200 and
+the message "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for
+details.", so the type and the message both catch it. A model the router
+switched to that cannot serve the agent (401, 403, 404, or an auth, permission,
+or not-found error) is a failed switch: the router moves on to the next
+candidate. The same error on a model the user chose is left to the host.
 
 **Tiers depend on thinking.** A model reference carries the host's thinking
 variant (`anthropic/claude-opus-5-5#high`), and each provider plugin's tier
@@ -630,10 +630,11 @@ variant from all router selections, overriding pins, tier ratings, last-resort
 patterns, and remembered switch-back origins. The shipped blacklist is
 `["opencode-go/*"]`: Go is not subscribed; Zen's free models remain available.
 Set `"blacklist": []` to remove the shipped exclusion when Go is subscribed.
-`last_resort` in `model-router.json` (shipped:
-`opencode/*-free`) names models offered only when no
-rated candidate is left. The order is: same tier, then any tier on providers
-you use directly, then the last resort:
+`last_resort` in `model-router.json` (shipped: `opencode/*-free`) names models
+offered only when no rated candidate is left. The patterns are a priority
+order: a model the first pattern names comes before one only a later pattern
+names, and host order breaks ties. The order is: same tier, then any tier on
+providers you use directly, then the last resort:
 
 | Tier      | Recommended                                 | Other variants and fallbacks                                                                                                               |
 | --------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -685,21 +686,23 @@ The router:
    failure or confidence below 0.2 it switches to the first candidate, keeping
    the agent unblocked.
 
-A completed model step clears the session's tried set; an HTTP 200 alone does not.
-Some failures never reach OpenCode's retry hook: a provider plugin that rejects
-the request before sending it ends the execution instead. When an execution fails
+A completed model step clears the session's tried set; an HTTP 200 alone does
+not. OpenCode runs the retry hook after it classifies a provider failure and
+before it schedules any retry, so a limit is reported and answered before the
+next attempt. Some failures never reach it: a provider plugin that rejects the
+request before sending it ends the execution instead. When an execution fails
 on a model Chauffeur switched to before any step completed on it, and the retry
-hook never saw that failure, the OpenCode adapter reports it as a model error, so
-failover chains: a second model that is also limited is left as well, a provider
-the agent already hit a limit on is not offered again until a model serves the
-agent, and the last resort is reached before the router gives up. If the router
-picks another model, the adapter switches and wakes the agent with a note saying
-why. If the router keeps the model, a note says no other model is left. Context
-overflows skip the retry hook too, so OpenCode compacts the session as usual. A
-cancelled execution invalidates pending model effects, and an abandoned daemon
-reply restores the router's prior state. A switch sets the model's thinking
-variant too. `$CHAUFFEUR_CONFIG_DIR/model-router.json` pins preferred fallbacks,
-with a variant where it matters:
+hook never saw that failure, the adapter reports it as a model error too.
+Either way failover chains: a second model that is also limited is left as
+well, a provider the agent already hit a limit on is not offered again until a
+model serves the agent, and the last resort is reached before the router gives
+up. If the router picks another model, the adapter switches and wakes the agent
+with a note saying why. If the router keeps the model, a note says no other
+model is left. Context overflows skip the retry hook too, so OpenCode compacts
+the session as usual. A cancelled execution invalidates pending model effects,
+and an abandoned daemon reply restores the router's prior state. A switch sets
+the model's thinking variant too. `$CHAUFFEUR_CONFIG_DIR/model-router.json` pins
+preferred fallbacks, with a variant where it matters:
 `{"pins": ["openai/gpt-6-sol", "anthropic/claude-opus-5-5#low"]}`. The same file
 tunes the pick confidence, the switch-back wait and bar, the candidate count,
 and the limit, lasting and unusable phrases and error types, all shipped in
