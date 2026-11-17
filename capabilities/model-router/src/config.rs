@@ -316,7 +316,8 @@ impl Renewal {
 pub struct ErrorWords {
     /// Phrases found anywhere in the error message.
     pub messages: Vec<String>,
-    /// Exact error types, spaces and dashes read as underscores.
+    /// Exact error types, after a `provider.` namespace, with spaces and
+    /// dashes read as underscores.
     pub types: Vec<String>,
 }
 
@@ -389,9 +390,19 @@ impl ModelRouterConfig {
     /// Whether `model` is a last-resort fallback.
     #[must_use]
     pub fn is_last_resort(&self, model: &ModelRef) -> bool {
+        self.last_resort_rank(model).is_some()
+    }
+
+    /// The position of the first `last_resort` pattern matching `model`, so the
+    /// list is a priority order: a model the first pattern names comes before
+    /// one only a later pattern names.
+    #[must_use]
+    pub fn last_resort_rank(&self, model: &ModelRef) -> Option<usize> {
         let key = format!("{}/{}", model.provider, model.model);
 
-        self.last_resort.iter().any(|pattern| glob(pattern, &key))
+        self.last_resort
+            .iter()
+            .position(|pattern| glob(pattern, &key))
     }
 
     /// Whether the router must never select `model`, regardless of variant.
@@ -484,8 +495,10 @@ mod tests {
         assert!((config.pick_confidence.value() - 0.2).abs() < f32::EPSILON);
         assert_eq!(config.switch_back.after_seconds, 300);
         assert_eq!(config.max_candidates, 8);
-        assert_eq!(config.limit.messages.len(), 13);
-        assert_eq!(config.limit.types.len(), 12);
+        assert_eq!(config.limit.messages.len(), 14);
+        assert_eq!(config.lasting.messages.len(), 10);
+        assert_eq!(config.lasting.types.len(), 8);
+        assert_eq!(config.limit.types.len(), 15);
         assert_eq!(config.unusable.messages.len(), 6);
         assert_eq!(config.unusable.types.len(), 10);
         assert_eq!(config.limit.types[0], "capacity_exhausted");
@@ -599,5 +612,36 @@ mod tests {
         // The list replaced the shipped phrases.
         assert!(!config.is_limit_error("internal", None, "insufficient funds"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn opencodes_classified_provider_limits_are_limits_that_last() {
+        let config = ModelRouterConfig::default();
+
+        // OpenCode classifies an exhausted subscription itself and reports no
+        // status a limit check could see.
+        for error_type in [
+            "provider.chatgpt-limit",
+            "provider.free-limit",
+            "provider.go-limit",
+        ] {
+            assert!(
+                config.is_limit_error(error_type, Some(200), ""),
+                "{error_type}"
+            );
+            assert!(
+                config.is_lasting_error(error_type, Some(200), ""),
+                "{error_type}"
+            );
+        }
+        assert!(config.is_limit_error(
+            "provider.chatgpt-limit",
+            Some(200),
+            "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details."
+        ));
+        // Types are exact: a longer word is another type.
+        assert!(!config.is_limit_error("provider.chatgpt_limit_pending", None, ""));
+        assert!(!config.is_limit_error("provider.rate-limited", None, ""));
+        assert!(!config.is_limit_error("provider.internal", None, ""));
     }
 }

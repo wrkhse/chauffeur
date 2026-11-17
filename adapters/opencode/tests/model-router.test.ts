@@ -221,6 +221,92 @@ test("a switched-to model that fails outside the retry hook is reported, and the
   }
 })
 
+test("a switched-to model whose own subscription is used up fails over again, to the last resort", async () => {
+  const sessionID = "ses_chain"
+  const hooks = new Hooks()
+  const events = eventStream()
+  const signals: Signal[] = []
+  const opus = { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" }
+  const sol = { provider: "openai", model: "gpt-6.1-sol", variant: "high" }
+  const deepseek = { provider: "opencode-go", model: "deepseek-v4.1-flash" }
+  let selection = opus
+
+  const host = fakeHost({
+    session: {
+      hook: hooks.register,
+      switchModel: (input: { readonly model: typeof opus }) => Effect.sync(() => { selection = input.model }),
+      get: () => Effect.sync(() => ({ model: selection })),
+    },
+    model: { list: () => Effect.succeed({ data: [
+      { ...opus, enabled: true, status: "active" },
+      { providerID: "openai", id: "gpt-6.1-sol", variant: "high", enabled: true, status: "active" },
+      { providerID: "opencode-go", id: "deepseek-v4.1-flash", enabled: true, status: "active" },
+    ] }) },
+    tool: { hook: hooks.register },
+    event: { subscribe: events.subscribe },
+  })
+
+  // Anthropic's limit moves the session to Sol; Sol's own subscription is
+  // used up, so the next choice is the subscribed Go last resort.
+  const daemon: DaemonClient = { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: (value) => Effect.sync(() => {
+    signals.push(value)
+    const failed = value.kind.type === "model_error" ? value.kind.model.provider : ""
+
+    return [{ type: "model", agent_id: value.agent_id, model: failed === "anthropic" ? sol : deepseek }]
+  }) }
+
+  const plugin = await install(installModelRouter, host, daemon)
+
+  try {
+    await events.publish({ type: "session.execution.started", data: { sessionID } })
+    await settle()
+
+    const limited = {
+      sessionID,
+      model: opus,
+      error: { type: "provider.rate-limit", status: 429, message: "rate limit reached" },
+      decision: { retry: true, delay: 1000 },
+    }
+
+    await hooks.emit("retry", limited)
+    expect(selection.id).toBe("gpt-6.1-sol")
+    expect(limited.decision).toEqual({ retry: true, delay: 0 })
+
+    // The classification OpenCode reports for an exhausted subscription, with
+    // no status a limit check could see.
+    const usedUp = {
+      sessionID,
+      model: { providerID: "openai", id: "gpt-6.1-sol", variant: "high" },
+      error: {
+        type: "provider.chatgpt-limit",
+        status: 200,
+        message: "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
+      },
+      decision: { retry: true, delay: 1000 },
+    }
+
+    await hooks.emit("retry", usedUp)
+
+    expect(signals.at(-1)?.kind).toMatchObject({
+      type: "model_error",
+      model: { provider: "openai", model: "gpt-6.1-sol", variant: "high" },
+      error_type: "provider.chatgpt-limit",
+      status: 200,
+      message: expect.stringContaining("usage limit"),
+      tool_executed: false,
+    })
+    // Both failures reach the daemon with the host's own classification.
+    expect(signals.map((value) => (value.kind.type === "model_error" ? value.kind.error_type : ""))).toEqual([
+      "provider.rate-limit", "provider.chatgpt-limit",
+    ])
+    expect(selection.providerID).toBe("opencode-go")
+    expect(selection.id).toBe("deepseek-v4.1-flash")
+    expect(usedUp.decision).toEqual({ retry: true, delay: 0 })
+  } finally {
+    await plugin.close()
+  }
+})
+
 test("running sessions past the cap are forgotten, and a forgotten one keeps the host's retry decision", async () => {
   const hooks = new Hooks()
   const events = eventStream()

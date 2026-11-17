@@ -222,8 +222,8 @@ impl ModelRouter {
         self.exhausted.remove(agent_id);
     }
 
-    /// Usable last-resort models, in host order, once each, at most the
-    /// configured `max_candidates`.
+    /// Usable last-resort models, by the order of the `last_resort` patterns,
+    /// then host order, once each, at most the configured `max_candidates`.
     fn last_resort(
         &self,
         agent_id: &str,
@@ -237,6 +237,10 @@ impl ModelRouter {
             .filter(|model| self.config.is_last_resort(model))
             .collect();
 
+        // The list is a priority order: the first pattern a model matches
+        // wins, and host order breaks ties, so a free model the host lists
+        // first cannot beat the model the user wrote first.
+        candidates.sort_by_key(|model| self.config.last_resort_rank(model));
         candidates.retain(|model| offered.insert(format!("{}/{}", model.provider, model.model)));
         candidates.truncate(self.config.max_candidates);
 
