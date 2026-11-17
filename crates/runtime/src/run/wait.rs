@@ -13,34 +13,42 @@ use crate::{Permit, Source};
 const LOOK: Duration = Duration::from_millis(10);
 
 /// A navigation's cancellation, shared by its caller and its runs. Once
-/// cancelled it stays cancelled.
-#[derive(Clone, Debug, Default)]
+/// cancelled it stays cancelled. Its source picks the pool its runs use.
+#[derive(Clone, Debug)]
 pub struct Cancel {
     flag: Arc<AtomicBool>,
-    permit: Option<Permit>,
+    source: Source,
+    // Held only for its Drop: the last copy gives the place back.
+    _permit: Option<Permit>,
 }
 
 impl Cancel {
-    /// A cancellation not yet made.
+    /// A cancellation not yet made, for `source`.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(source: Source) -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            source,
+            _permit: None,
+        }
     }
 
     /// Shares this cancellation, retaining the admitted navigation's place
-    /// until every worker using it is really free.
+    /// until every worker using it is really free. The result runs for the
+    /// permit's source.
     #[must_use]
     pub fn admitted(&self, permit: Permit) -> Self {
         Self {
             flag: Arc::clone(&self.flag),
-            permit: Some(permit),
+            source: permit.source(),
+            _permit: Some(permit),
         }
     }
 
-    /// Which source owns this run, or Harness for a run without admission.
+    /// The source whose pool its runs use.
     #[must_use]
-    pub fn source(&self) -> Source {
-        self.permit.as_ref().map_or(Source::Harness, Permit::source)
+    pub const fn source(&self) -> Source {
+        self.source
     }
 
     /// Cancels every run that shares it.

@@ -49,42 +49,31 @@ fn the_ledger_stays_within_its_capacity() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
 fn the_last_permit_copy_gives_back_exactly_one_slot() {
     let admission = Admission::new(Capacity {
         global: 2,
         per_source: 2,
     });
     let source = any_source();
-    let kept = admission.admit(source);
-    let ending = admission.admit(source);
-    let worker_copy = ending.as_ref().ok().cloned();
-    assert!(kept.is_ok() && ending.is_ok());
-
-    // Different owners may drop their copies in different containers; only
-    // the last copy returns the slot. Runtime tests cover the real waits.
-    let path: u8 = kani::any();
-    kani::assume(path < 4);
-    match path {
-        0 => drop(ending),
-        1 => {
-            let deliver = move || drop(ending);
-            deliver();
-        }
-        2 => {
-            let late: Option<_> = ending.ok();
-            drop(late);
-        }
-        _ => {
-            let navigations = vec![ending];
-            drop(navigations);
-        }
-    }
-
+    let permit = admission.admit(source).ok();
+    let ending = admission.admit(source).ok();
+    let copy = ending.clone();
+    assert!(permit.is_some() && ending.is_some() && copy.is_some());
     assert!(admission.in_use().held(source) == 2);
-    drop(worker_copy);
+
+    // A clone shares its permit's slot, so either copy may drop first and
+    // the slot comes back only with the last one.
+    let (first, second) = if kani::any::<bool>() {
+        (ending, copy)
+    } else {
+        (copy, ending)
+    };
+    drop(first);
+    assert!(admission.in_use().held(source) == 2);
+    drop(second);
     assert!(admission.in_use().held(source) == 1);
-    drop(kept);
+    drop(permit);
+    assert!(admission.in_use().held(source) == 0);
     assert!(admission.in_use().total() == 0);
 }
 

@@ -75,7 +75,13 @@ pub fn run(context: &Arc<Context>, rule: &Arc<Rule>, event: &Event, deadline: Du
     let Some(deadline) = deadline else {
         return Ran::Refused("the deadline is too far away".to_owned());
     };
-    run_strategy(context, rule, &event.evidence(), deadline, &Cancel::new())
+    run_strategy(
+        context,
+        rule,
+        &event.evidence(),
+        deadline,
+        &Cancel::new(Source::Harness),
+    )
 }
 
 /// Runs `strategy` over `evidence` on a pooled worker thread, until

@@ -7,13 +7,13 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_core::{Failure, Outcome};
 use chauffeur_judges::Models;
-use chauffeur_protocol::{Event, Rule};
+use chauffeur_protocol::{Event, Rule, Strategy};
 use chauffeur_protocol::{Navigate, Target};
 use chauffeur_runtime::{
     Admission, Cancel, Capacity, Context, Ran, Redactor, Source, run, run_strategy,
@@ -239,6 +239,36 @@ fn in_ms(milliseconds: u64) -> Instant {
         .unwrap()
 }
 
+/// Fills the integration pool: each run cancels itself inside `keys` and then
+/// waits for the test's release, so its worker stays busy after
+/// `run_strategy` returns. The first eight are admitted; admission refuses
+/// the rest. Returns how many were admitted and how many refused.
+fn hold_integration_workers(
+    admission: &Admission,
+    slow: &Arc<Context>,
+    strategy: &Arc<Strategy>,
+    evidence: &[(String, String)],
+    active: &Mutex<Option<Cancel>>,
+) -> (usize, usize) {
+    let (mut admitted, mut busy) = (0_usize, 0_usize);
+    for _ in 0..32 {
+        let cancel = admission.admit(Source::Integration).map_or_else(
+            |_| {
+                busy = busy.saturating_add(1);
+                Cancel::new(Source::Integration)
+            },
+            |permit| {
+                admitted = admitted.saturating_add(1);
+                Cancel::new(Source::Integration).admitted(permit)
+            },
+        );
+        *active.lock().unwrap() = Some(cancel.clone());
+        let ran = run_strategy(slow, strategy, evidence, in_ms(5_000), &cancel);
+        assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
+    }
+    (admitted, busy)
+}
+
 #[test]
 fn an_inline_strategy_settles_over_the_requests_evidence() {
     let answers = r#"{ "answers": [{ "evidence": { "log": "migrated 42 of 42 tables" },
@@ -250,7 +280,7 @@ fn an_inline_strategy_settles_over_the_requests_evidence() {
         &strategy,
         &evidence,
         in_ms(2_000),
-        &Cancel::new(),
+        &Cancel::new(Source::Harness),
     );
 
     let Ran::Settled(ran) = ran else {
@@ -266,7 +296,7 @@ fn an_inline_strategy_settles_over_the_requests_evidence() {
 fn a_cancelled_run_returns_at_once_while_its_judge_is_still_asked() {
     let (strategy, evidence) = inline("migrated 41 of 42 tables");
     let context = context("cancelled", &slow_jev(Duration::from_secs(2)), &[]);
-    let cancel = Cancel::new();
+    let cancel = Cancel::new(Source::Harness);
     let canceller = cancel.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
@@ -282,13 +312,16 @@ fn a_cancelled_run_returns_at_once_while_its_judge_is_still_asked() {
 
 #[test]
 fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    // Admission caps integration at 8, the pool at 32: the first 8 keep
+    // their admitted slots and the rest fill the pool without one.
     let admission = Admission::new(Capacity::DAEMON);
     let release = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicUsize::new(0));
     let active = Arc::new(Mutex::new(None::<Cancel>));
     let held = Arc::clone(&release);
+    let done = Arc::clone(&finished);
     let cancelling = Arc::clone(&active);
     let models = r#"{ "models": { "jev": { "format": "systemone",
         "endpoint": "http://127.0.0.1:9", "model": "jev", "key": { "env": "TEST" } } },
@@ -300,26 +333,33 @@ fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() 
             while !held.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(1));
             }
+            done.fetch_add(1, Ordering::SeqCst);
             None
         }),
         ..base
     });
     let (strategy, evidence) = inline("waiting");
-    let (mut cancelled, mut busy) = (0, 0);
+    let (admitted, busy) =
+        hold_integration_workers(&admission, &slow, &strategy, &evidence, &active);
 
-    for _ in 0..32 {
-        let Ok(permit) = admission.admit(Source::Integration) else {
-            busy += 1;
-            continue;
-        };
-        let cancel = Cancel::new().admitted(permit);
-        *active.lock().unwrap() = Some(cancel.clone());
-        let ran = run_strategy(&slow, &strategy, &evidence, in_ms(5_000), &cancel);
-        assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
-        cancelled += 1;
-    }
+    // The admitted jobs still run, so their eight slots are still held.
+    assert_eq!(admission.in_use().total(), 8);
 
-    let harness = Cancel::new().admitted(admission.admit(Source::Harness).unwrap());
+    // Every integration worker is busy, so the next run is refused at once.
+    let refused = run_strategy(
+        &placeholder("filled", r#"{ "answers": [] }"#),
+        &strategy,
+        &evidence,
+        in_ms(1_000),
+        &Cancel::new(Source::Integration),
+    );
+    assert!(
+        matches!(&refused, Ran::Refused(reason) if reason.contains("busy")),
+        "{refused:?}"
+    );
+
+    // The harness pool is separate, so its strategy still settles.
+    let harness = Cancel::new(Source::Harness).admitted(admission.admit(Source::Harness).unwrap());
     let ran = run_strategy(
         &placeholder("unstarved", r#"{ "answers": [] }"#),
         &strategy,
@@ -331,10 +371,10 @@ fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() 
     *active.lock().unwrap() = None;
     drop(harness);
 
-    assert_eq!((cancelled, busy), (8, 24));
+    assert_eq!((admitted, busy), (8, 24));
     assert!(matches!(ran, Ran::Settled(_)), "{ran:?}");
     let started = Instant::now();
-    while admission.in_use().total() != 0 {
+    while admission.in_use().total() != 0 || finished.load(Ordering::SeqCst) != 32 {
         assert!(started.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(1));
     }

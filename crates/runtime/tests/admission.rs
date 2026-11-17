@@ -141,7 +141,7 @@ fn a_permit_is_given_back_when_its_thread_panics() {
 fn a_job_that_finishes_in_time_is_done() {
     let pool = Pool::new(1, 4);
 
-    let waited = within(&pool, soon(2_000), &Cancel::new(), |_, _| 42);
+    let waited = within(&pool, soon(2_000), &Cancel::new(Source::Harness), |_, _| 42);
 
     assert_eq!(waited, Waited::Done(42));
 }
@@ -152,11 +152,16 @@ fn a_job_past_its_deadline_is_dropped_and_its_worker_freed() {
     let finished = Arc::new(AtomicBool::new(false));
     let late = Arc::clone(&finished);
 
-    let waited = within(&pool, soon(20), &Cancel::new(), move |_, _| {
-        thread::sleep(Duration::from_millis(150));
-        late.store(true, Ordering::SeqCst);
-        "late"
-    });
+    let waited = within(
+        &pool,
+        soon(20),
+        &Cancel::new(Source::Harness),
+        move |_, _| {
+            thread::sleep(Duration::from_millis(150));
+            late.store(true, Ordering::SeqCst);
+            "late"
+        },
+    );
 
     assert_eq!(waited, Waited::Deadline);
     assert!(!finished.load(Ordering::SeqCst), "the job is still running");
@@ -167,7 +172,7 @@ fn a_job_past_its_deadline_is_dropped_and_its_worker_freed() {
 #[test]
 fn cancelling_stops_the_wait_and_the_job_sees_it() {
     let pool = Pool::new(1, 4);
-    let cancel = Cancel::new();
+    let cancel = Cancel::new(Source::Harness);
     let saw = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&saw);
     let canceller = cancel.clone();
@@ -188,9 +193,45 @@ fn cancelling_stops_the_wait_and_the_job_sees_it() {
 }
 
 #[test]
+fn a_cancelled_wait_keeps_the_slot_until_the_job_finishes() {
+    let admission = Admission::new(Capacity {
+        global: 1,
+        per_source: 1,
+    });
+    let pool = Pool::new(1, 1);
+    let cancel =
+        Cancel::new(Source::Integration).admitted(admission.admit(Source::Integration).unwrap());
+    let started = Arc::new(AtomicBool::new(false));
+    let starting = Arc::clone(&started);
+    let release = Arc::new(AtomicBool::new(false));
+    let released = Arc::clone(&release);
+    let canceller = cancel.clone();
+    let stopping = thread::spawn(move || {
+        while !starting.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        canceller.cancel();
+    });
+
+    let waited = within(&pool, soon(4_000), &cancel, move |_, _| {
+        started.store(true, Ordering::SeqCst);
+        while !released.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    stopping.join().unwrap();
+
+    assert_eq!(waited, Waited::Cancelled);
+    drop(cancel);
+    assert_eq!(admission.in_use().total(), 1);
+    release.store(true, Ordering::SeqCst);
+    assert!(eventually(|| admission.in_use().total() == 0));
+}
+
+#[test]
 fn a_job_cancelled_before_it_starts_never_runs() {
     let pool = Pool::new(1, 4);
-    let cancel = Cancel::new();
+    let cancel = Cancel::new(Source::Harness);
     cancel.cancel();
     let ran = Arc::new(AtomicBool::new(false));
     let running = Arc::clone(&ran);
@@ -205,11 +246,34 @@ fn a_job_cancelled_before_it_starts_never_runs() {
 }
 
 #[test]
+fn a_job_that_panics_is_refused_and_frees_its_worker_and_slot() {
+    let admission = Admission::new(Capacity {
+        global: 1,
+        per_source: 1,
+    });
+    let pool = Pool::new(1, 1);
+    let cancel =
+        Cancel::new(Source::Integration).admitted(admission.admit(Source::Integration).unwrap());
+
+    let waited = within(&pool, soon(2_000), &cancel, |_, _| {
+        panic!("the job fails");
+    });
+
+    assert!(
+        matches!(&waited, Waited::Refused(reason) if reason.contains("worker")),
+        "{waited:?}"
+    );
+    drop(cancel);
+    assert!(eventually(|| admission.in_use().total() == 0));
+    assert!(eventually(|| pool.alive() == 0 && pool.waiting() == 0));
+}
+
+#[test]
 fn past_its_most_workers_the_pool_refuses_a_job() {
     let pool = Pool::new(0, 1);
     let release = Arc::new(AtomicBool::new(false));
     let held = Arc::clone(&release);
-    let first = Cancel::new();
+    let first = Cancel::new(Source::Harness);
     let holding = thread::scope(|scope| {
         let busy = scope.spawn(|| {
             within(&pool, soon(2_000), &first, move |_, _| {
@@ -220,7 +284,7 @@ fn past_its_most_workers_the_pool_refuses_a_job() {
         });
         assert!(eventually(|| pool.alive() == 1));
 
-        let refused = within(&pool, soon(1_000), &Cancel::new(), |_, _| ());
+        let refused = within(&pool, soon(1_000), &Cancel::new(Source::Harness), |_, _| ());
 
         release.store(true, Ordering::SeqCst);
         (refused, busy.join().unwrap())
@@ -251,9 +315,14 @@ fn a_deadline_already_past_never_takes_a_worker() {
     let ran = Arc::new(AtomicBool::new(false));
     let running = Arc::clone(&ran);
 
-    let waited = within(&pool, Instant::now(), &Cancel::new(), move |_, _| {
-        running.store(true, Ordering::SeqCst);
-    });
+    let waited = within(
+        &pool,
+        Instant::now(),
+        &Cancel::new(Source::Harness),
+        move |_, _| {
+            running.store(true, Ordering::SeqCst);
+        },
+    );
 
     assert_eq!(waited, Waited::Deadline);
     assert!(!ran.load(Ordering::SeqCst));
@@ -261,7 +330,7 @@ fn a_deadline_already_past_never_takes_a_worker() {
 }
 
 #[test]
-fn a_jobs_copy_keeps_admission_after_the_waiter_cancels() {
+fn the_last_permit_copy_returns_the_slot() {
     let admission = Admission::new(Capacity::DAEMON);
     let permit = admission.admit(Source::Integration).unwrap();
     let job = permit.clone();

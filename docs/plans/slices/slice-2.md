@@ -421,15 +421,17 @@ cancellation to check before each round. Plans have one round until slice 3
 adds `after`; that slice moves the check into `Plan::run` as a closure.
 Whatever arrives after the deadline or a cancel is dropped. Each source has
 its own pool, with 8 workers waiting and 32 alive at most, so integration
-work cannot occupy harness workers; past that a job is refused.
+work cannot occupy harness workers; past that a job is refused. A `Cancel`
+is made for a source, and `admitted` takes the permit's source, so a run's
+pool is never guessed.
 
 ```rust
 pub struct Cancel { … }
 
 impl Cancel {
-    pub fn new() -> Self;
+    pub fn new(source: Source) -> Self;
     pub fn admitted(&self, permit: Permit) -> Self;
-    pub fn source(&self) -> Source;
+    pub const fn source(&self) -> Source;
     pub fn cancel(&self);
     pub fn is_cancelled(&self) -> bool;
 }
@@ -475,16 +477,21 @@ impl<T> EventLog<T> {
 Verified by:
 
 - Miri over `crates/runtime/tests/admission.rs`, which touches no file or
-  network: a deadline, a cancel during the wait and before the start, a late
-  result, a full pool, a permit given back when its thread panics, a share
-  and the capacity in use, and audit A3's flood: 81 submissions with
-  capacity 8 admit 8 and refuse 73 as `Busy`.
+  network: a deadline, a cancel during the wait and before the start, a
+  cancelled wait that keeps its slot until its job finishes, a panicking job
+  refused with its worker and slot freed, a late result, a full pool, a
+  permit given back when its thread panics, a share and the capacity in use,
+  and audit A3's flood: 81 submissions with capacity 8 admit 8 and refuse 73
+  as `Busy`.
 - Kani, in `crates/runtime/src/proofs.rs`: the ledger stays within its
-  capacity over any six takes and gives; the last copy of a permit gives back exactly one slot; the event log never exceeds its bound.
+  capacity over any six takes and gives; the last copy of a permit gives the
+  slot back exactly once, whichever copy drops first; the event log never
+  exceeds its bound.
 - `crates/runtime/tests/run.rs`: an inline strategy settles over the
   request's evidence, and a cancelled run returns at once while its judge is
-  still being asked; 32 integration submissions followed by cancels admit
-  8 slow jobs and refuse 24, while a harness strategy still settles.
+  still being asked; 32 cancelled integration runs, 8 admitted and 24
+  refused admission, fill all 32 integration workers, so the next is
+  refused while a harness strategy still settles.
 
 ### The daemon's socket and rule sources
 
