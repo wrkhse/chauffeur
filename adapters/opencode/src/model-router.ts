@@ -12,7 +12,7 @@ const MAX_SESSIONS = 256
 
 const MAX_MODELS = 256
 
-/** The engine accepts at most this many variants per model. */
+/** The engine accepts at most this many variants per model; it mirrors `MAX_MODEL_VARIANTS` in crates/core/src/contracts/signal.rs. */
 const MAX_VARIANTS = 32
 
 type HostEvent = Stream.Success<ReturnType<Plugin.Context["event"]["subscribe"]>>
@@ -267,7 +267,7 @@ export function available(models: ReadonlyArray<HostModel & HostVariants & { rea
     .slice(0, MAX_MODELS)
 }
 
-/** A model's thinking variants, without the two IDs that name none; the engine accepts at most MAX_VARIANTS. */
+/** A model's thinking variants, without the two IDs that name none, at most MAX_VARIANTS. */
 function variantIds(model: HostVariants): string[] {
   const ids: string[] = []
 

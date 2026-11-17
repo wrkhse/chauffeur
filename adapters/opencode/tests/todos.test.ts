@@ -188,6 +188,51 @@ test("a request names the agents that need no model, sorted, after the guidance"
   }
 })
 
+test("a request does not name a hidden agent on a model of its own", async () => {
+  const hooks = new Hooks()
+
+  const host = fakeHost({
+    session: { hook: hooks.register },
+    agent: { list: () => Effect.succeed({ data: [
+      { id: "build", mode: "subagent", hidden: false, model: { id: "m", providerID: "p" } },
+      { id: "compaction", mode: "subagent", hidden: true, model: { id: "m", providerID: "p" } },
+    ] }) },
+  })
+
+  const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
+  const event = { tools: { subagent: tool("A long subagent description.") } }
+
+  try {
+    await hooks.emit("context", event)
+
+    expect(event.tools.subagent.description).toBe(
+      `A long subagent description.\n\n${SUBAGENT_GUIDANCE}\n\n${fill(OWN_MODEL_LINE, { agents: "build" })}`,
+    )
+  } finally {
+    await plugin.close()
+  }
+})
+
+test("when the host's agents cannot be read, the description carries the guidance and names none", async () => {
+  const hooks = new Hooks()
+
+  const host = fakeHost({
+    session: { hook: hooks.register },
+    agent: { list: () => Effect.fail("host down") },
+  })
+
+  const plugin = await install(installToolDescriptions, host, daemon, fixedTexts())
+  const event = { tools: { subagent: tool("A long subagent description.") } }
+
+  try {
+    await hooks.emit("context", event)
+
+    expect(event.tools.subagent.description).toBe(`A long subagent description.\n\n${SUBAGENT_GUIDANCE}`)
+  } finally {
+    await plugin.close()
+  }
+})
+
 test("a request without the subagent tool does not read the host's agents", async () => {
   const hooks = new Hooks()
   let listings = 0

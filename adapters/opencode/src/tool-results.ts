@@ -57,7 +57,10 @@ function report(event: ToolResult, exposure: ExposureControl, texts: HostTexts):
 
     // Only the subagent tool names an agent, so only it needs the host's agents.
     const agents = event.tool === SUBAGENT_TOOL ? yield* ownModelAgents() : []
-    const agentHasModel = agents.includes(launchedAgent(event.input))
+    // Unknown is treated as having its own model, so no rule suggests
+    // overriding it: missing a cheaper-model hint is harmless, overriding a
+    // configured model is not. A hidden agent still counts.
+    const agentHasModel = agents === undefined || agents.some((agent) => agent.id === launchedAgent(event.input))
 
     // An unreadable session still reports the result, as a top-level session without a workspace.
     const session = yield* host.session.get({ sessionID: event.sessionID }).pipe(

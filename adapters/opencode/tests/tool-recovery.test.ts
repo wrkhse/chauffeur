@@ -137,9 +137,10 @@ test("a subagent call says whether the agent it launches runs on a model of its 
   let listings = 0
 
   const agents = [
-    { id: "build", mode: "subagent", model: { id: "gpt-6", providerID: "openai" } },
-    { id: "explore", mode: "subagent" },
-    { id: "lead", mode: "primary", model: { id: "gpt-6", providerID: "openai" } },
+    { id: "build", mode: "subagent", hidden: false, model: { id: "gpt-6", providerID: "openai" } },
+    { id: "explore", mode: "subagent", hidden: false },
+    { id: "compaction", mode: "subagent", hidden: true, model: { id: "gpt-6", providerID: "openai" } },
+    { id: "lead", mode: "primary", hidden: false, model: { id: "gpt-6", providerID: "openai" } },
   ]
 
   const host = fakeHost({
@@ -161,6 +162,10 @@ test("a subagent call says whether the agent it launches runs on a model of its 
   await call("subagent", { agent: "explore" })
   expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
 
+  // A hidden agent still has a model of its own, though no description names it.
+  await call("subagent", { agent: "compaction" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
   // The host's primary agents are not something a subagent call launches.
   await call("subagent", { agent: "lead" })
   expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
@@ -168,7 +173,30 @@ test("a subagent call says whether the agent it launches runs on a model of its 
   // Any other tool reports false without reading the host's agents.
   await call("read", { agent: "build" })
   expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
-  expect(listings).toBe(3)
+  expect(listings).toBe(4)
+
+  await plugin.close()
+})
+
+test("when the host's agents cannot be read, a subagent call's agent counts as having a model", async () => {
+  const hooks = new Hooks()
+  const sent: Signal[] = []
+
+  const host = fakeHost({
+    tool: { hook: hooks.register },
+    session: { get: () => Effect.succeed({ location: { directory: "/projects/app" } }) },
+    agent: { list: () => Effect.fail("host down") },
+  })
+
+  const plugin = await install(installToolResults(fakeExposure()), host, daemon(sent, []))
+  const call = (tool: string, input: CallInput) => hooks.emit("execute.after", { sessionID, tool, status: "completed", input, result: { content: "done" } })
+
+  await call("subagent", { agent: "build" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: true }))
+
+  // Any other tool reports false without reading the host's agents at all.
+  await call("read", { agent: "build" })
+  expect(sent.at(-1)?.kind).toEqual(expect.objectContaining({ agent_has_model: false }))
 
   await plugin.close()
 })

@@ -1,6 +1,6 @@
 import type { SessionContext } from "@opencode/plugin/effect/session"
 import { Effect, type Scope } from "effect"
-import { ownModelAgents, SUBAGENT_TOOL } from "./agents.js"
+import { ownModelAgents, type OwnModelAgent, SUBAGENT_TOOL } from "./agents.js"
 import { Host } from "./host.js"
 import { fill, type HostTexts, Texts } from "./texts.js"
 
@@ -12,7 +12,8 @@ import { fill, type HostTexts, Texts } from "./texts.js"
  * `subagent`, so the agent reads it before launching one. Worded as the
  * user's instruction: the host's own text says to set a subagent's model
  * only when the user asks. The instruction applies only to agents without a
- * model of their own; the agents that have one are named after it.
+ * model of their own; the agents that have one are named after it, except the
+ * host's hidden ones, which are not the user's to choose by name.
  */
 export const installToolDescriptions: Effect.Effect<void, never, Host | Texts | Scope.Scope> = Effect.gen(function* () {
   const host = yield* Host
@@ -20,7 +21,7 @@ export const installToolDescriptions: Effect.Effect<void, never, Host | Texts | 
 
   const rewrite = (event: SessionContext) => event.tools[SUBAGENT_TOOL]
     ? ownModelAgents().pipe(
-      Effect.map((agents) => rewriteDescriptions(event.tools, texts.current(), agents)),
+      Effect.map((agents) => rewriteDescriptions(event.tools, texts.current(), namedAgents(agents))),
       Effect.provideService(Host, host),
     )
     // No subagent tool to name agents in, so the host's agents are not read.
@@ -32,6 +33,19 @@ export const installToolDescriptions: Effect.Effect<void, never, Host | Texts | 
   yield* host.session.hook("compaction", rewrite)
   yield* host.session.hook("generate", rewrite)
 })
+
+/** The agents the description may name: the known ones the host does not hide. */
+function namedAgents(agents: ReadonlyArray<OwnModelAgent> | undefined): ReadonlyArray<string> {
+  const ids: string[] = []
+
+  for (const agent of agents ?? []) {
+    if (agent.hidden) continue
+
+    ids.push(agent.id)
+  }
+
+  return ids
+}
 
 /** Rewrite `tools`' descriptions in place from `texts`, naming the agents that need no model. */
 export function rewriteDescriptions(tools: SessionContext["tools"], texts: HostTexts, ownModel: ReadonlyArray<string> = []): void {
