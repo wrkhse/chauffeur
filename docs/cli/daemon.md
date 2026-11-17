@@ -59,6 +59,9 @@ chauffeur daemon run --models fixtures/placeholders.json
   limit reached:
   `the daemon is busy: this caller's share of 8 calls is in use` or
   `the daemon is busy: the daemon's capacity of 16 calls is in use`.
+  Because 16 is exactly 8 + 8, both shares cannot be full at once, so a
+  refused call always names its share; the capacity message is for a
+  capacity smaller than the two shares together.
   A connection's own caps are separate: 16 open calls, 4 of them navigations.
 - **Every run** goes to the audit log, with a line of its own for a rule no
   worker started before the deadline,

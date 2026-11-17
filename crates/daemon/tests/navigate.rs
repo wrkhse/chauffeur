@@ -736,15 +736,15 @@ fn two_matching_rules_both_return_and_a_late_one_drops_only_its_own() {
     );
 }
 
-/// A deadline that passes before a rule's strategy settles still answers: no
-/// step event is sent, and each hooked rule's line says the deadline came
-/// first. The deadline is long enough for the dispatcher to start and
-/// announce both rules, and short enough that neither settles against the
-/// 300 ms stand-in. A `skipped` line takes more hooked rules than the
-/// dispatcher has workers, which one request cannot arrange through the
-/// socket; the daemon's own test covers that line.
+/// A deadline that cuts a rule short after it starts still answers: each
+/// hooked rule is announced, then settles its step as `failed` for the
+/// deadline, and neither runs its strategy. The deadline is long enough for
+/// the dispatcher to start and announce both rules, and short enough that
+/// neither settles against the 300 ms stand-in. A `skipped` line takes more
+/// hooked rules than the dispatcher has workers, which one request cannot
+/// arrange through the socket; the daemon's own test covers that line.
 #[test]
-fn a_deadline_that_passes_before_a_rule_runs_its_strategy_still_answers() {
+fn a_deadline_that_cuts_a_rule_short_settles_each_step_as_failed() {
     let paths = paths("deadline-rules", &models(Duration::from_millis(300)));
     let slow = TRIAGE.replace("\"confidence\": 0.7", "\"model\": \"slow\"");
     fs::write(paths.config.join("rules/sourcefed/triage.json"), &slow).unwrap();
@@ -763,11 +763,32 @@ fn a_deadline_that_passes_before_a_rule_runs_its_strategy_still_answers() {
 
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(messages.last().unwrap()["result"], json!({ "intents": [] }));
-    let announced = messages
+    for rule in ["sourcefed/also", "sourcefed/triage"] {
+        let announced = messages
+            .iter()
+            .position(|message| {
+                message["params"]["event"] == "rule_matched" && message["params"]["rule"] == rule
+            })
+            .unwrap_or_else(|| panic!("{rule} was not announced: {messages:?}"));
+        let settled = messages
+            .iter()
+            .position(|message| {
+                message["params"]["event"] == "step_settled"
+                    && message["params"]["rule"] == rule
+                    && message["params"]["step"] == "screen"
+                    && message["params"]["failed"] == "deadline"
+            })
+            .unwrap_or_else(|| panic!("{rule} did not settle its step: {messages:?}"));
+        assert!(
+            announced < settled,
+            "{rule} settled before it was announced: {messages:?}"
+        );
+    }
+    let settled = messages
         .iter()
-        .filter(|message| message["params"]["event"] == "rule_matched")
+        .filter(|message| message["params"]["event"] == "step_settled")
         .count();
-    assert_eq!(announced, 2, "{messages:?}");
+    assert_eq!(settled, 2, "one step each: {messages:?}");
     assert!(
         !messages
             .iter()

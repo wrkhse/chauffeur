@@ -270,6 +270,7 @@ pub mod progress {
     pub fn rule_matched(rule: &str) -> Value;
     pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>;
     pub fn settled(outcome: &Outcome<Answer>) -> Value;
+    pub fn settled_failed(rule: &str, step: &str, failed: &str) -> Value;
     pub fn verdict(verdict: &Verdict<Answer>) -> Value;
 }
 ```
@@ -335,9 +336,10 @@ The daemon admits each navigation for its source: `Harness` for
 allows 16 at once, 8 from each source, so a flood from one source leaves the
 other its share. A cancelled or late job keeps its permit until its worker
 finishes; cancellation cannot refill a share with work still running. A
-refused navigation never waits in a queue. The socket belongs to the user:
-shares protect against accidental floods, not hostile local callers, who can
-choose either method.
+refused navigation never waits in a queue, and names the source that asked
+and the limit it reached, with how many calls that limit allows. The socket
+belongs to the user: shares protect against accidental floods, not hostile
+local callers, who can choose either method.
 
 ```rust
 pub enum Source {
@@ -372,7 +374,12 @@ impl Clone for Permit {}
 
 pub struct Busy {
     pub from: Source,
-    pub share: bool,
+    pub limit: Limit,
+}
+
+pub enum Limit {
+    Share(usize),
+    Global(usize),
 }
 ```
 
@@ -407,6 +414,7 @@ pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
     cancel: &Cancel,
 ) -> Ran;
 
+#[non_exhaustive]
 pub enum Ran {
     Settled(Run<Answer>),
     Refused(String),
@@ -427,7 +435,8 @@ cancellation to check before each round. Plans have one round until slice 3
 adds `after`; that slice moves the check into `Plan::run` as a closure.
 Whatever arrives after the deadline or a cancel is dropped. Each source has
 its own pool, with 8 workers waiting and 32 alive at most, so integration
-work cannot occupy harness workers; past that a job is refused. A `Cancel`
+work cannot occupy harness workers; past that a job is refused as `Busy`,
+and one whose worker cannot start as `Spawn`, keeping the error. A `Cancel`
 is made for a source, and `admitted` takes the permit's source, so a run's
 pool is never guessed.
 
@@ -449,19 +458,26 @@ pub fn within<T: Send + 'static>(
     job: impl FnOnce(Instant, &Cancel) -> T + Send + 'static,
 ) -> Waited<T>;
 
+#[non_exhaustive]
 pub enum Waited<T> {
     Done(T),
     Deadline,
     Cancelled,
     Busy,
+    Failed(io::Error),
     Stopped,
 }
 
 impl Pool {
     pub fn new(keep: usize, max: usize) -> Self;
-    pub fn execute(&self, job: Job) -> io::Result<()>;
+    pub fn execute(&self, job: Job) -> Result<(), ExecuteError>;
     pub fn waiting(&self) -> usize;
     pub fn alive(&self) -> usize;
+}
+
+pub enum ExecuteError {
+    Busy,
+    Spawn(io::Error),
 }
 ```
 
@@ -551,9 +567,12 @@ matches, then its `round_ready` and `step_settled` as they settle, at most
 4,096 events, and returns the intents in the order the rules load. A rule that
 finds no worker before the deadline runs nothing and sends no event; it earns
 an audit line of its own,
-`{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. An inline
-strategy whose judge has no model is `judge_unavailable` before it runs, and
-one past its deadline is `deadline`.
+`{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. A rule cut
+short after it starts, by the deadline, a cancel, a busy pool, a stopped
+worker or a refusal, settles each of its steps with `failed` set to that
+failure word, so a caller that saw the rule start also sees each step end. An
+inline strategy whose judge has no model is `judge_unavailable` before it
+runs, and one past its deadline is `deadline`.
 
 ```rust
 impl Router {
@@ -612,7 +631,8 @@ Verified by:
   `project` at parse, and from the daemon when the list does not name the
   project.
 - Two matching rules both return their intents; a rule that misses the
-  deadline drops only its own intents.
+  deadline drops only its own intents, and settles each of its steps with
+  `failed` for the deadline.
 
 ### The bindings
 

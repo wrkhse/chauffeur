@@ -34,6 +34,27 @@ pub(super) fn ended(entry: &mut Map<String, Value>, ran: Ran) -> Option<Run<Answ
             entry.insert("cancelled".into(), json!(true));
             None
         }
+        // A variant a newer runtime adds: it has no result, so it reads as
+        // refused.
+        _ => {
+            entry.insert("refused".into(), json!("the run ended without a result"));
+            None
+        }
+    }
+}
+
+/// The word for a run that ended without settling, as a `step_settled`
+/// names it: `deadline`, `cancelled`, `busy`, `stopped` or `refused`. None
+/// when the run settled.
+pub(super) const fn unsettled(ran: &Ran) -> Option<&'static str> {
+    match ran {
+        Ran::Settled(_) => None,
+        Ran::Deadline => Some("deadline"),
+        Ran::Cancelled => Some("cancelled"),
+        Ran::Busy => Some("busy"),
+        Ran::Stopped => Some("stopped"),
+        // A refusal, and a variant a newer runtime adds, has no result.
+        _ => Some("refused"),
     }
 }
 

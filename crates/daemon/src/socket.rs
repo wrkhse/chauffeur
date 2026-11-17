@@ -235,9 +235,10 @@ fn finish_call(router: &Router, calls: &Calls, wire: &Wire, slot: Slot<'_>, call
 }
 
 /// Answers the call holding `slot` and sends its reply. A call that panics
-/// is answered as an internal error in place of its own reply, so its caller
-/// hears back and the connection keeps working; the slot frees its place as
-/// it drops.
+/// is answered as cancelled when its cancel was set, and as an internal
+/// error when it was not, in place of its own reply, so its caller hears
+/// back and the connection keeps working; the slot frees its place as it
+/// drops.
 fn answer_and_reply(
     calls: &Calls,
     wire: &Wire,
@@ -246,10 +247,28 @@ fn answer_and_reply(
 ) {
     let answered = panic::catch_unwind(AssertUnwindSafe(|| answer(slot.cancel())));
     let (reply, permit) = answered.unwrap_or_else(|_| {
-        // The payload is left out: a panic can carry what the call was
-        // handling.
-        eprintln!("chauffeur: a call panicked: answered as an internal error");
-        (Some(rpc::error(slot.id(), -32_603, "internal error")), None)
+        // This line carries no payload; the default panic hook has already
+        // printed it to stderr, so the payload is whatever the hook wrote.
+        let cancelled = slot.cancel().is_cancelled();
+        let outcome = if cancelled {
+            "cancelled"
+        } else {
+            "an internal error"
+        };
+        eprintln!(
+            "chauffeur: a call panicked: answered as {outcome}; \
+             the payload was printed by the panic hook"
+        );
+        let reply = if cancelled {
+            json!({
+                "jsonrpc": "2.0",
+                "id": slot.id(),
+                "error": Rejection::Cancelled.to_error(),
+            })
+        } else {
+            rpc::error(slot.id(), -32_603, "internal error")
+        };
+        (Some(reply), None)
     });
     // Late workers retain their copies; settled calls release before reply.
     drop(permit);
@@ -866,6 +885,41 @@ mod tests {
         assert_eq!(reply["error"]["message"], "internal error", "{reply}");
         assert!(calls.is_empty(), "the call's place is free");
         assert!(cancel.is_cancelled(), "the call is cancelled as it frees");
+    }
+
+    /// A call whose cancel was set and then panicked is answered as
+    /// cancelled, with the reason its caller named, not as an internal
+    /// error.
+    #[test]
+    fn a_panicking_call_that_was_cancelled_is_answered_as_cancelled() {
+        let calls = Calls::default();
+        let slot = calls.open(json!("stopped"), false);
+        let cancel = slot.cancel().clone();
+        let (server, client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let wire = Wire {
+            writer: Mutex::new(server),
+            dead: AtomicBool::new(false),
+        };
+
+        cancel.cancel();
+        answer_and_reply(&calls, &wire, slot, |_| panic!("the answer panicked"));
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(reply["jsonrpc"], "2.0", "{reply}");
+        assert_eq!(reply["id"], "stopped", "{reply}");
+        assert_eq!(reply["error"]["code"], -32_800, "{reply}");
+        assert_eq!(
+            reply["error"]["message"], "the caller cancelled the request",
+            "{reply}"
+        );
+        assert_eq!(reply["error"]["data"]["reason"], "cancelled", "{reply}");
+        assert!(calls.is_empty(), "the call's place is free");
     }
 
     /// A line cut short by the read timeout is kept and completed by the

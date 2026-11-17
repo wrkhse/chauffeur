@@ -5,7 +5,8 @@ use chauffeur_core::{Event as RunEvent, Failure, Outcome, Verdict};
 use chauffeur_judges::Answer;
 use serde_json::{Map, Value, json};
 
-/// `rule_matched`: a rule's `on` and `when` matched the request.
+/// `rule_matched`: a rule's run started, its `on` and `when` having
+/// matched the request.
 #[must_use]
 pub fn rule_matched(rule: &str) -> Value {
     json!({ "event": "rule_matched", "rule": rule })
@@ -67,6 +68,14 @@ pub fn settled(outcome: &Outcome<Answer>) -> Value {
         }
         Outcome::Failed(failure) => json!({ "failed": failure.name() }),
     }
+}
+
+/// A step's `step_settled` when its rule's run ended without settling: the
+/// failure word names how, such as `deadline`, so a rule that started does
+/// not leave its steps open.
+#[must_use]
+pub fn settled_failed(rule: &str, step: &str, failed: &str) -> Value {
+    json!({ "event": "step_settled", "rule": rule, "step": step, "failed": failed })
 }
 
 /// Every step's result, by step ID.

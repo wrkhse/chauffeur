@@ -9,6 +9,10 @@ A `chauffeur.event` carries, in `params`, the `id` of the call that produced
 it, added by the daemon, so events from two calls on one connection stay
 apart.
 
+A rule that starts and is then cut short settles each of its steps with
+`failed` naming why: `deadline`, `cancelled`, `busy`, `stopped` or
+`refused`.
+
 ```sh
 chauffeur navigate <<'EOF'
 { "protocol": 1, "deadline_ms": 3000, "on": "sourcefed.event",

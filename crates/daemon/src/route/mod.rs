@@ -4,7 +4,7 @@ mod navigate;
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,10 @@ struct RuleRun {
     entry: Value,
     then: Option<Then>,
     run: Option<chauffeur_core::Run<Answer>>,
+    /// How the run ended without settling, for a `step_settled` line:
+    /// `deadline`, `cancelled`, `busy`, `stopped` or `refused`. None when it
+    /// settled.
+    unsettled: Option<&'static str>,
 }
 
 impl Router {
@@ -202,6 +206,7 @@ impl Router {
                     entry,
                     then,
                     run: _,
+                    unsettled: _,
                 } = done;
                 // A run still returns when the log cannot be written.
                 if let Err(error) = self.audit.append(entry) {
@@ -225,6 +230,7 @@ impl Router {
             }),
             then: None,
             run: None,
+            unsettled: None,
         }
     }
 
@@ -248,6 +254,7 @@ impl Router {
                 entry: Value::Object(entry),
                 then: None,
                 run: None,
+                unsettled: None,
             };
         }
         announce();
@@ -262,6 +269,7 @@ impl Router {
         let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
         entry.insert("elapsed_ms".into(), json!(elapsed));
         let returned = ran.then(rule).cloned();
+        let unsettled = log_entry::unsettled(&ran);
         let run = log_entry::ended(&mut entry, ran);
         // Runs that settle at once in one session may all have passed
         // `cooling`; only the first to fire returns its action.
@@ -277,6 +285,7 @@ impl Router {
             entry: Value::Object(entry),
             then,
             run,
+            unsettled,
         }
     }
 }
@@ -330,23 +339,34 @@ where
             }
         }
     }
-    // The runs stop at `deadline` and report just after it, so the finishes
-    // still out are given one grace before the caller stops waiting. Each run
-    // still out sends at most two messages, a start and a finish, so the loop
-    // is bounded by twice their count and no comparison holds it open.
+    // Every job sends exactly one `Finished`, a rule in cooldown and a run
+    // that panicked before announcing included, so `outstanding` reaches zero
+    // once they have all come. The caller's sender goes first, so the channel
+    // closes when the last job's clone does: a job that ends without
+    // reporting ends the wait at once instead of holding the caller. The runs
+    // stop at `deadline` and report just after it, so the finishes still out
+    // are given one grace before the caller stops waiting, and no message at
+    // all inside that bound ends the wait too.
+    drop(send);
     let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
-    let owed = outstanding.saturating_mul(2);
-    for _ in 0..owed {
+    while outstanding > 0 {
         let left = bound.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
-        let Some((index, report)) = finished(&receive, left) else {
-            break;
+        let (index, report) = match receive.recv_timeout(left) {
+            Ok(report) => report,
+            // Nothing holds a sender, so no run can report. A run still out
+            // has its finish on the way, and the bound came first. Either
+            // way, waiting longer would be for a message that cannot come.
+            Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout) => break,
         };
         match report {
             Report::Started => started(index),
-            Report::Finished(done) => arrived(index, done),
+            Report::Finished(done) => {
+                outstanding = outstanding.saturating_sub(1);
+                arrived(index, done);
+            }
         }
     }
     pending.map(|(index, _)| index).collect()
@@ -483,6 +503,87 @@ mod tests {
         assert!(
             arrived.lock().unwrap().is_empty(),
             "the slow job's result comes too late"
+        );
+    }
+
+    /// A job that reports only its finish, as a rule in cooldown does, does
+    /// not hold the caller: the loop ends when the runs do, not when a start
+    /// and a finish have each come. The deadline is two seconds off, so a
+    /// call that waited for a start that never comes fails the 300 ms bound
+    /// instead of hanging the test.
+    #[test]
+    fn a_job_that_reports_only_its_finish_returns_under_the_deadline() {
+        let pool = Pool::new(1, 1);
+        let items = [7_usize];
+        let arrived = Arc::new(Mutex::new(Vec::new()));
+        let began = Instant::now();
+        let deadline = began
+            .checked_add(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+
+        let unstarted = dispatch(
+            &pool,
+            deadline,
+            &items,
+            |index, item: &usize, send| {
+                let item = *item;
+                Box::new(move || {
+                    // No `Started`: a rule in cooldown returns before it
+                    // announces, and reports its finish alone.
+                    let _ = send.send((index, Report::Finished(item)));
+                })
+            },
+            |_| {},
+            |_, value| arrived.lock().unwrap().push(value),
+        );
+        let elapsed = began.elapsed();
+
+        assert!(unstarted.is_empty(), "the job started: {unstarted:?}");
+        assert_eq!(*arrived.lock().unwrap(), [7], "its finish came back");
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "the call returns without a start: {elapsed:?}"
+        );
+    }
+
+    /// Every job's run is over as it starts: the jobs do no work and report
+    /// one finish each, so the loop has only finishes to count and ends when
+    /// the last has come. The deadline is two seconds off, so a call that
+    /// also waited for a start per job fails the 300 ms bound instead of
+    /// hanging the test.
+    #[test]
+    fn a_dispatch_whose_runs_are_all_over_before_collecting_returns_at_once() {
+        let pool = Pool::new(4, 4);
+        let items = [0_usize, 1, 2, 3];
+        let arrived = Arc::new(Mutex::new(Vec::new()));
+        let began = Instant::now();
+        let deadline = began
+            .checked_add(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+
+        let unstarted = dispatch(
+            &pool,
+            deadline,
+            &items,
+            |index, item: &usize, send| {
+                let item = *item;
+                Box::new(move || {
+                    let _ = send.send((index, Report::Finished(item)));
+                })
+            },
+            |_| {},
+            |_, value| arrived.lock().unwrap().push(value),
+        );
+        let elapsed = began.elapsed();
+
+        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
+        let mut returned = arrived.lock().unwrap().clone();
+        assert_eq!(returned.len(), items.len(), "every finish came back once");
+        returned.sort_unstable();
+        assert_eq!(returned, items, "each job's finish came back");
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "the call returns without a start per job: {elapsed:?}"
         );
     }
 

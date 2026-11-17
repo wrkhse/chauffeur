@@ -75,7 +75,8 @@ impl Router {
 
     /// Every hooked rule's intents; a rule that misses the deadline, fails or
     /// meets no `then` entry gives none, and the rest still return. A rule is
-    /// announced as its run starts, not when it is matched.
+    /// announced as its run starts, not when it is matched; a run cut short
+    /// after that settles each of its steps with its failure word.
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
@@ -91,6 +92,11 @@ impl Router {
                 .flat_map(|run| progress::run_events(Some(rule.id()), &run.events))
             {
                 send(event);
+            }
+            if let Some(failed) = done.unsettled {
+                for step in rule.plan().steps() {
+                    send(progress::settled_failed(rule.id(), step.id(), failed));
+                }
             }
         };
         let intents: Vec<Value> = self
@@ -191,8 +197,9 @@ fn available(context: &Context, strategy: &Strategy) -> Result<(), Rejection> {
 }
 
 /// The rejection for an inline run that did not settle: `busy` when the
-/// pool could not start it, `judge_unavailable` when its worker stopped or a
-/// judge could not run. The audit entry keeps the reason either way.
+/// pool could not start it, `judge_unavailable` when its worker stopped, a
+/// judge could not run, or the run ended without a result. The audit entry
+/// keeps the reason either way.
 fn refused(ran: &Ran) -> Option<Rejection> {
     match ran {
         Ran::Busy => Some(Rejection::Busy),
@@ -201,6 +208,11 @@ fn refused(ran: &Ran) -> Option<Rejection> {
         )),
         Ran::Refused(reason) => Some(Rejection::JudgeUnavailable(reason.clone())),
         Ran::Settled(_) | Ran::Deadline | Ran::Cancelled => None,
+        // A variant a newer runtime adds: its run had no result, so it is
+        // unavailable rather than busy.
+        _ => Some(Rejection::JudgeUnavailable(
+            "the run ended without a result".to_owned(),
+        )),
     }
 }
 
