@@ -7,8 +7,8 @@
 )]
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,50 @@ fn send(socket: &Path, line: &str) -> Value {
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).unwrap();
     serde_json::from_str(&reply).unwrap()
+}
+
+/// Reads the reply while writing the oversized line: the daemon may close
+/// before the last write. Both directions time out; shutdown releases the
+/// writer before joining it, including when reading fails.
+fn send_oversized(socket: &Path, line: &str) -> Value {
+    let stream = UnixStream::connect(socket).unwrap();
+    let limit = Some(Duration::from_secs(5));
+    stream.set_read_timeout(limit).unwrap();
+    stream.set_write_timeout(limit).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+
+    thread::scope(|scope| {
+        let writing = scope.spawn(move || writeln!(writer, "{line}"));
+        let mut reply = String::new();
+        let read = BufReader::new(&stream)
+            .take(u64::try_from(chauffeur_daemon::MAX_LINE).unwrap())
+            .read_line(&mut reply);
+        // Do this before examining either result: even a read timeout must
+        // release a writer blocked on a daemon that stopped reading. Its
+        // result is ignored: the daemon may already have closed, and
+        // platforms disagree on the error (macOS often gives EINVAL).
+        let _ = stream.shutdown(Shutdown::Both);
+        let written = writing.join();
+
+        assert!(written.is_ok(), "the oversized writer panicked");
+
+        if let Err(error) = written.unwrap() {
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                ),
+                "cannot write the oversized line: {error}"
+            );
+        }
+
+        assert!(
+            read.is_ok(),
+            "cannot read the oversized-line reply: {read:?}"
+        );
+        assert!(reply.ends_with('\n'), "the reply has no newline: {reply:?}");
+        serde_json::from_str(&reply).unwrap()
+    })
 }
 
 fn call(socket: &Path, method: &str, params: &Value) -> Value {
@@ -327,7 +371,7 @@ fn malformed_and_oversized_requests_fail_safely() {
 
     let oversized = "x".repeat(chauffeur_daemon::MAX_LINE.saturating_add(10));
     assert!(
-        send(&paths.socket, &oversized)["error"]["message"]
+        send_oversized(&paths.socket, &oversized)["error"]["message"]
             .as_str()
             .unwrap()
             .contains("over 1 MiB")
