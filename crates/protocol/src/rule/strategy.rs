@@ -116,6 +116,9 @@ fn check_names(
     for step in strategy {
         Limit::TextBytes.check(count(step.id.len()))?;
         Limit::TextBytes.check(count(step.judge.len()))?;
+        if let AskRef::Named(name) = &step.ask {
+            Limit::TextBytes.check(count(name.len()))?;
+        }
     }
 
     Ok(())

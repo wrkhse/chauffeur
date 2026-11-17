@@ -1,5 +1,5 @@
 {
-  "description": "Twelve synthetic labelled events from v1's event-gate categories. evidence is what sourcefed's evidence builder makes from v1.params, monitor_source and subject (wrkhse/sourcefed#27, sourcefed#29): event as five \"name: value\" lines, thread as \"<label>: <title>\", the label alone when the event has no title, the title alone when there is no label, and empty when neither, monitor as the source's describe(). The GitHub and Jira cases carry a subject title; Slack ones none. v1 replies are in sourcefed-events.v1.json.",
+  "description": "Twelve synthetic labelled events from v1's event-gate categories. evidence is what sourcefed's evidence builder makes from v1.params, monitor_source and subject (wrkhse/sourcefed#27, sourcefed#29): event as five \"name: value\" lines, thread as \"<label>: <title>\", the label alone when the event has no title, the title alone when there is no label, and empty when neither, monitor as the source's describe(). The cases cover two of sourcefed's thread-table rows: label and title (GitHub and Jira) and label alone (Slack); none covers title alone or neither. v1 replies, each with the params it answered, are in sourcefed-events.v1.json.",
   "cases": [
     {
       "id": "bot-coverage",

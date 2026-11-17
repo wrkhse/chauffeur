@@ -279,7 +279,8 @@ pub enum Rejection {
     Busy,
     /// An inline strategy did not finish within the deadline.
     Deadline,
-    /// An inline strategy names a judge with no model to ask.
+    /// An inline strategy names a judge with no model to ask, or asks for
+    /// System Two without a project the user's `projects.json` allows.
     JudgeUnavailable(String),
 }
 

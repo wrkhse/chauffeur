@@ -25,18 +25,23 @@ pub(super) fn judge_spec(rule: &str, name: &str, judge: JudgeFile) -> Result<Jud
         step: name.to_owned(),
         reason: format!("confidence {value} is not a probability from 0 to 1"),
     };
+    let limit = |source| RuleError::Limit {
+        rule: rule.to_owned(),
+        source,
+    };
     let confidence = match judge.confidence {
         None => Confidence::Likeliest,
         Some(ConfidenceFile::Bar(bar)) => {
             Confidence::Bar(Milli::from_f64(bar).ok_or_else(|| invalid(bar))?)
         }
         Some(ConfidenceFile::PerOutcome(bars)) => {
-            Limit::Outcomes
-                .check(count(bars.len()))
-                .map_err(|source| RuleError::Limit {
-                    rule: rule.to_owned(),
-                    source,
-                })?;
+            Limit::Outcomes.check(count(bars.len())).map_err(limit)?;
+            // Each outcome's key is a text the confidence names, so it is
+            // bounded before its bar is read.
+            for outcome in bars.keys() {
+                let bytes = count(outcome.len());
+                Limit::TextBytes.check(bytes).map_err(limit)?;
+            }
             Confidence::PerOutcome(
                 bars.into_iter()
                     .map(|(outcome, bar)| {

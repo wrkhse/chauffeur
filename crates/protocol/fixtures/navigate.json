@@ -3609,6 +3609,171 @@
       ]
     },
     {
+      "name": "a judge's model over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "model": "",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/judges/quick/model",
+          "text": "x",
+          "times": 16385
+        }
+      ]
+    },
+    {
+      "name": "a step's judge over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "system-one",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/judge",
+          "text": "x",
+          "times": 16385
+        }
+      ]
+    },
+    {
+      "name": "an evidence name in an ask over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "system-one",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                ""
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/ask/evidence/0",
+          "text": "x",
+          "times": 16385
+        }
+      ]
+    },
+    {
+      "name": "a step's ask name over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "finished": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "evidence": [
+              "log"
+            ],
+            "instructions": "Is the migration finished?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": "finished"
+          }
+        ],
+        "evidence": {
+          "log": "…"
+        }
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/0/ask",
+          "text": "x",
+          "times": 16385
+        }
+      ],
+      "schema": "accepts"
+    },
+    {
       "name": "one outcome",
       "params": {
         "protocol": 1,

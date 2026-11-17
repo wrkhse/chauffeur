@@ -155,6 +155,7 @@ fn v1_replies_cover_every_case_and_deliver_as_it_expects() {
         let deliver = case["expected"]["deliver"].as_bool().unwrap();
         let reply = &replies[id];
 
+        assert_eq!(reply["params"], case["v1"]["params"], "{id}: its params");
         assert_eq!(reply["deliver"].as_bool(), Some(deliver), "{id}");
         let gated = reply["reply"]["effects"]
             .as_array()

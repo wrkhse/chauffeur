@@ -454,7 +454,8 @@
             "deadline_ms",
             "judges",
             "asks",
-            "text_bytes"
+            "text_bytes",
+            "project_bytes"
           ]
         },
         "max": {
