@@ -429,9 +429,13 @@ const { intents } = await chauffeur.navigate({
 if (!intents.some((intent) => intent.withhold === "event")) queue(target, event)
 ```
 
-The `thread` evidence is the event's subject behind its monitor label, such
-as `PR #42 wrkhse/chauffeur: feat(cli): add navigate`, and empty when absent,
-with no lookup of earlier history.
+The `thread` evidence is `<label>: <title>`, such as `#42: Fix the tick race`:
+the monitor's label, such as `#42`, `ENG-42` or `thread`, and the event's
+subject title, the label alone when the event has no title, the title alone
+when there is no label, and empty when neither, clamped to 16 KiB. `event` is
+five lines, `source:`, `kind:`, `summary:`, `body:` and `actionable: yes` or
+`actionable: no (informational)`, and `monitor` is the source's `describe()`,
+such as `GitHub wrkhse/chauffeur#42`. Nothing looks up earlier history.
 
 Verified by the end-to-end checks below. The sourcefed side is tracked in
 wrkhse/sourcefed#27.
@@ -444,3 +448,8 @@ wrkhse/sourcefed#27.
 - With only v1's daemon running, sourcefed's `chauffeur.status` handshake
   goes unanswered, no event is marked triaged, and the OpenCode bridge's
   `chauffeur.gate` filters as before.
+
+The 12 labelled events and v1's recorded gate replies are in
+`crates/protocol/fixtures/sourcefed-events.json` and
+`sourcefed-events.v1.json`, checked by
+`crates/protocol/tests/sourcefed_events.rs`.

@@ -169,14 +169,14 @@ fn json_files_below(folder: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{MAX_RULE_BYTES, load_rule};
 
-    /// The smallest file over the limit is refused for its size, before it is
-    /// read as a rule: its contents are not JSON.
-    #[test]
-    fn a_rule_file_over_one_mebibyte_is_refused() {
+    /// Writes `bytes` to a uniquely named temporary rule file, returning its
+    /// folder and path.
+    fn temp_rule(bytes: &[u8]) -> (PathBuf, PathBuf) {
         let folder = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -185,13 +185,22 @@ mod tests {
             "chauffeur-rule-{}-{nanos}.json",
             std::process::id()
         ));
-        let over = usize::try_from(MAX_RULE_BYTES.saturating_add(1)).unwrap_or(0);
-        let written = fs::write(&path, vec![b' '; over]);
+        let written = fs::write(&path, bytes);
         assert!(
             written.is_ok(),
             "the temporary rule file should be writable"
         );
+        (folder, path)
+    }
 
+    /// The smallest file over the limit is refused for its size, before it is
+    /// read as a rule: its contents are not JSON.
+    #[test]
+    fn a_rule_file_over_one_mebibyte_is_refused() {
+        let over = usize::try_from(MAX_RULE_BYTES.saturating_add(1)).unwrap_or(0);
+        let bytes = vec![b' '; over];
+
+        let (folder, path) = temp_rule(&bytes);
         let refused = load_rule(&folder, &path);
         let _ = fs::remove_file(&path);
 
@@ -199,5 +208,28 @@ mod tests {
             refused.err(),
             Some("the rule file is over 1 MiB".to_owned())
         );
+    }
+
+    /// A valid rule padded to exactly the limit is read in full: the cap only
+    /// refuses a larger file.
+    #[test]
+    fn a_rule_file_at_one_mebibyte_is_accepted() {
+        let rule = concat!(
+            r#"{"on":"x","strategy":[{"id":"s","judge":"system-one","#,
+            r#""ask":{"outcomes":["yes","no"],"instructions":"?"}}]}"#
+        );
+        let exact = usize::try_from(MAX_RULE_BYTES).unwrap_or(0);
+        let mut bytes = rule.as_bytes().to_vec();
+        assert!(
+            bytes.len() <= exact,
+            "the sample rule fits within the limit"
+        );
+        bytes.resize(exact, b' ');
+
+        let (folder, path) = temp_rule(&bytes);
+        let loaded = load_rule(&folder, &path);
+        let _ = fs::remove_file(&path);
+
+        assert!(loaded.is_ok(), "a rule at the limit should load");
     }
 }
