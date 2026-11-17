@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { formula, parseSums } from "./homebrew.mjs"
-import { TARGETS, sums, tarball, version } from "./package.mjs"
+import { clientTarballName, TARGETS, sums, tarball, version } from "./package.mjs"
 
 /** A checkout with just what packaging reads, at `release`. */
 function checkout(release = "1.0.0-rc.1") {
@@ -38,6 +38,10 @@ test("the version is the workspace's", () => {
   } finally {
     rmSync(root, { recursive: true })
   }
+})
+
+test("the client's tarball is the name npm pack gives it", () => {
+  assert.equal(clientTarballName("1.0.0-rc.5"), "fdcn-chauffeur-1.0.0-rc.5.tgz")
 })
 
 test("a tarball holds the binary, the shipped content and the license, and SHA256SUMS lists it", () => {
@@ -108,7 +112,14 @@ function fixtureSums(release) {
 }
 
 test("the formula names every target's tarball and checksum, and installs chauffeur-next", () => {
-  const ruby = formula("1.0.0-rc.1", parseSums(fixtureSums("1.0.0-rc.1")))
+  const release = "1.0.0-rc.1"
+  const targets = fixtureSums(release)
+  // A release's SHA256SUMS also lists the client's tarball, and the formula
+  // installs the four targets only.
+  const ruby = formula(release, parseSums(`${targets}\n${"f".repeat(64)}  fdcn-chauffeur-${release}.tgz`))
+
+  assert.equal(ruby, formula(release, parseSums(targets)))
+  assert.ok(!ruby.includes("fdcn-chauffeur"), ruby)
 
   for (const [at, target] of TARGETS.entries()) {
     const url = `releases/download/v1.0.0-rc.1/chauffeur-1.0.0-rc.1-${target}.tar.gz"`

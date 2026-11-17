@@ -221,7 +221,7 @@ jobs:
           npm pack --pack-destination "$RUNNER_TEMP/client"
       - name: A consumer installs the client under its release tarball's name
         working-directory: .
-        run: node scripts/client-consumer-smoke.mjs "$RUNNER_TEMP/client/fdcn-chauffeur-$(node scripts/package.mjs version).tgz"
+        run: node scripts/client-consumer-smoke.mjs "$RUNNER_TEMP/client/$(node scripts/package.mjs client-tarball)"
       # No node test packs the client itself, so this path stays exercised here.
       - name: A consumer installs the client packed from source
         working-directory: .
