@@ -92,11 +92,13 @@ every rule a session there would load.
   input contains any listed text, and `result_includes` admits a call only
   whose result contains one; the result text itself never goes into Jev's
   question. `session_kind` limits a rule to `top_level` or `subagent`
-  sessions; without it both are judged. At a turn end, `todos` admits the
-  rule only when the agent's todo list (the last `todowrite` call in the
-  session, from whichever plugin provides that tool) is in one of the listed
-  states: `none` (no list), `open` (any todo pending or in progress), or
-  `done` (all completed or cancelled).
+  sessions; without it both are judged. `agent_has_model` (`true` or
+  `false`, `tool_result` rules only) admits a rule only for a call that
+  does, or does not, launch an agent configured with a model of its own. At
+  a turn end, `todos` admits the rule only when the agent's todo list (the
+  last `todowrite` call in the session, from whichever plugin provides that
+  tool) is in one of the listed states: `none` (no list), `open` (any todo
+  pending or in progress), or `done` (all completed or cancelled).
 - **`steps`**: one or two yes/no questions. A step holds at P(yes) ≥
   `yes_at_or_above` (0.5–1) with at least `minimum_confidence`; the second is
   asked only after the first holds.

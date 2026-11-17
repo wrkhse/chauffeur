@@ -138,6 +138,7 @@ mod tests {
                     .map(|id| AvailableModel {
                         model: model(id),
                         usable: true,
+                        variants: Vec::new(),
                     })
                     .to_vec(),
             },

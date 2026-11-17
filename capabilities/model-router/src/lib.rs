@@ -56,6 +56,14 @@ struct Origin {
     error: String,
 }
 
+/// A model a failover offers, with the recommendation of the row it was
+/// ranked at. A move to the failed model's kept variant swaps only the
+/// model, so the note survives a variant whose row says nothing.
+struct Candidate {
+    model: ModelRef,
+    recommended: bool,
+}
+
 impl ModelRouter {
     #[must_use]
     pub fn new(providers: Vec<Arc<dyn Provider>>, config: ModelRouterConfig) -> Self {
@@ -129,7 +137,8 @@ impl ModelRouter {
     }
 
     /// Each usable host model at every variant its tier table names; a model
-    /// without a table row keeps its default variant.
+    /// without a table row keeps its default variant. A failover later moves
+    /// a candidate to the failed model's kept variant where the host lists it.
     fn expanded(&self, available: &[chauffeur_core::AvailableModel]) -> Vec<ModelRef> {
         available
             .iter()
@@ -156,28 +165,113 @@ impl ModelRouter {
             .insert(model.key());
     }
 
+    /// The failed model's variant when a failover should keep it: one its
+    /// tier tables do not name, such as Opus or Sol at `#max`, is an effort
+    /// level within the tier. A named one, such as Opus `#low`, sets the
+    /// tier, and the target tier's rows name each model's own variant.
+    ///
+    /// Only a rated model keeps its variant: an unrated one has no tier that
+    /// gives the variant meaning, so its unnamed `#max` would otherwise reach
+    /// another tier's `#max` through the any-tier path. Variants match by
+    /// name: the host's variant ID for the candidate is the failed model's.
+    fn kept_variant<'a>(&self, current: &'a ModelRef) -> Option<&'a str> {
+        let variant = current.variant.as_deref()?;
+
+        self.current_tier(current)?;
+
+        let named = self
+            .variants(current)
+            .iter()
+            .any(|named| named.as_deref() == Some(variant));
+
+        (!named).then_some(variant)
+    }
+
+    /// The ranked candidates, each at the failed model's kept variant where
+    /// the host offers it there, it keeps the candidate's tier, and the
+    /// agent has not tried it. A pinned candidate keeps its own variant.
+    /// Only the model moves; the recommendation stays the ranked row's.
+    fn at_kept_variant(
+        &self,
+        agent_id: &str,
+        current: &ModelRef,
+        available: &[chauffeur_core::AvailableModel],
+        candidates: Vec<Candidate>,
+    ) -> Vec<Candidate> {
+        let Some(kept) = self.kept_variant(current) else {
+            return candidates;
+        };
+        let tried = self.attempted.get(agent_id);
+
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let at_kept = ModelRef {
+                    variant: Some(kept.to_string()),
+                    ..candidate.model.clone()
+                };
+                let offered = available.iter().any(|entry| {
+                    entry.usable
+                        && entry.model.provider == at_kept.provider
+                        && entry.model.model == at_kept.model
+                        && entry.variants.iter().any(|variant| variant == kept)
+                });
+
+                if offered
+                    && !self.config.pins.contains(&candidate.model.key())
+                    && self.tier(&at_kept) == self.tier(&candidate.model)
+                    && tried.is_none_or(|tried| !tried.contains(&at_kept.key()))
+                {
+                    Candidate {
+                        model: at_kept,
+                        ..candidate
+                    }
+                } else {
+                    candidate
+                }
+            })
+            .collect()
+    }
+
     /// The models to offer: same-tier models on providers you use directly,
     /// else any rated model there, else the configured last resort, such as
-    /// free gateway models.
+    /// free gateway models. Each is at the failed model's kept variant where
+    /// the host offers it there.
     fn candidates(
         &self,
         agent_id: &str,
         current: &ModelRef,
         available: &[chauffeur_core::AvailableModel],
-    ) -> Vec<ModelRef> {
+    ) -> Vec<Candidate> {
         let same_tier = self.ranked(agent_id, current, available, self.current_tier(current));
 
         if !same_tier.is_empty() {
-            return same_tier;
+            let tiered = self.with_recommendations(same_tier);
+
+            return self.at_kept_variant(agent_id, current, available, tiered);
         }
 
         let any_tier = self.ranked(agent_id, current, available, None);
 
         if !any_tier.is_empty() {
-            return any_tier;
+            let tiered = self.with_recommendations(any_tier);
+
+            return self.at_kept_variant(agent_id, current, available, tiered);
         }
 
-        self.last_resort(agent_id, current, available)
+        self.with_recommendations(self.last_resort(agent_id, current, available))
+    }
+
+    /// Each ranked model with the recommendation of its own row, read before
+    /// a failover moves it to the failed model's kept variant.
+    fn with_recommendations(&self, models: Vec<ModelRef>) -> Vec<Candidate> {
+        models
+            .into_iter()
+            .map(|model| Candidate {
+                recommended: self.recommended(&model),
+                model,
+            })
+            .collect()
     }
 
     /// Usable host models on providers not yet tried. A usage limit belongs
@@ -286,7 +380,8 @@ impl ModelRouter {
                 model.provider == current.provider,
             )
         });
-        // One variant per model: a pinned one, else the first its table names.
+        // One variant per model: a pinned one, else the first its table names,
+        // later moved to the failed model's kept variant where that stands.
         candidates.retain(|model| offered.insert((model.provider.clone(), model.model.clone())));
         candidates.truncate(self.config.max_candidates);
 
@@ -606,7 +701,7 @@ impl ModelRouter {
             && self.waited.get(&signal.agent_id) != Some(&model.key());
 
         if !may_wait && candidates.len() == 1 {
-            let to = candidates.into_iter().next()?;
+            let to = candidates.into_iter().next()?.model;
 
             return Some(Judgment::done(Verdict::Switch { from, to, error }));
         }
@@ -623,14 +718,15 @@ impl ModelRouter {
         &self,
         current: &ModelRef,
         error: &str,
-        candidates: &[ModelRef],
+        candidates: &[Candidate],
         may_wait: bool,
     ) -> Question {
         let texts = &self.config.texts;
         let mut options: Vec<ChoiceOption> = candidates
             .iter()
-            .map(|model| {
-                let note = if self.recommended(model) {
+            .map(|candidate| {
+                let model = &candidate.model;
+                let note = if candidate.recommended {
                     texts.recommended_note.as_str()
                 } else if self.config.is_last_resort(model) {
                     texts.last_resort_note.as_str()
@@ -705,14 +801,20 @@ pub enum Verdict {
 /// back on the posture: stay unblocked on the preferred candidate.
 fn pick(
     chosen: Option<String>,
-    candidates: Vec<ModelRef>,
+    candidates: Vec<Candidate>,
     from: ModelRef,
     error: String,
 ) -> Verdict {
     let to = match chosen.as_deref() {
         Some(STAY) => return Verdict::Wait(from),
-        Some(choice) => candidates.into_iter().find(|model| model.key() == choice),
-        None => candidates.into_iter().next(),
+        Some(choice) => candidates
+            .into_iter()
+            .find(|candidate| candidate.model.key() == choice)
+            .map(|candidate| candidate.model),
+        None => candidates
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.model),
     };
 
     to.map_or(Verdict::Keep, |to| Verdict::Switch { from, to, error })

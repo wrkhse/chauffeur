@@ -45,6 +45,7 @@ fn cat(at: u64) -> Signal {
             user_request: String::new(),
             evidence: String::new(),
             candidates: Vec::new(),
+            agent_has_model: false,
         },
     }
 }

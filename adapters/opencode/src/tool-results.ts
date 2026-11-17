@@ -1,11 +1,12 @@
 import type { Plugin } from "@opencode/plugin/effect"
 import type { ToolHooks } from "@opencode/plugin/effect/tool"
-import { Effect, type Scope } from "effect"
+import { Effect, Option, Schema, type Scope } from "effect"
+import { ownModelAgents, SUBAGENT_TOOL } from "./agents.js"
 import { ASK_TOOL } from "./ask-tool.js"
 import { Daemon } from "./daemon.js"
 import type { ExposureControl } from "./exposure.js"
-import { Host } from "./host.js"
-import { signal, TEXT_CODE_POINTS, type CatalogEntry, type HostEffect } from "./protocol.js"
+import { Host, toSessionID } from "./host.js"
+import { signal, TEXT_CODE_POINTS, type CatalogEntry, type HostEffect, type SignalKind } from "./protocol.js"
 import { deliverContext } from "./skills.js"
 import { clip, clipEnds, userText } from "./text.js"
 import { type HostTexts, Texts } from "./texts.js"
@@ -19,6 +20,11 @@ const RECOVERY_TIMEOUT = "8 seconds"
 const MAX_CANDIDATES = 4
 
 const MISSING_TOOL = /(?:unknown|missing|unavailable|not found|no matching|not registered|cannot call|not available).{0,50}(?:tool|function)|(?:tool|function).{0,50}(?:unknown|missing|unavailable|not found|not registered|not available)/i
+
+/** A subagent call's arguments: the agent it launches, or the child session it continues. */
+const SubagentCall = Schema.Struct({ agent: Schema.optional(Schema.String), sessionID: Schema.optional(Schema.String) })
+
+const decodeSubagentCall = Schema.decodeUnknownOption(SubagentCall)
 
 type ToolResult = ToolHooks["execute.after"]
 
@@ -46,24 +52,41 @@ function report(event: ToolResult, exposure: ExposureControl, texts: HostTexts):
   return Effect.gen(function* () {
     const host = yield* Host
     const daemon = yield* Daemon
+
+    // Read once, first: this session names both its location's agents and the result's workspace.
+    const session = yield* host.session.get({ sessionID: event.sessionID }).pipe(
+      // An unreadable session still reports the result, as a top-level session without a workspace.
+      Effect.map((info) => ({ location: info.location, workspace: clip(String(info.location.directory), TEXT_CODE_POINTS), subagent: info.parentID !== undefined })),
+      Effect.orElseSucceed(() => ({ location: undefined, workspace: "", subagent: false })),
+    )
+
+    const { location, ...reported } = session
     const observed = observe(event)
     const recovery = MISSING_TOOL.test(observed.evidence) ? yield* recover(host, exposure, event, observed) : NO_RECOVERY
 
-    // An unreadable session still reports the result, as a top-level session without a workspace.
-    const session = yield* host.session.get({ sessionID: event.sessionID }).pipe(
-      Effect.map((info) => ({ workspace: clip(String(info.location.directory), TEXT_CODE_POINTS), subagent: info.parentID !== undefined })),
-      Effect.orElseSucceed(() => ({ workspace: "", subagent: false })),
-    )
+    // Only the subagent tool launches an agent, so only it reads the host's agents.
+    const agents = event.tool === SUBAGENT_TOOL ? yield* ownModelAgents(location) : []
+    const launched = event.tool === SUBAGENT_TOOL ? yield* launchedAgent(host, event.input) : undefined
 
-    const effects = yield* daemon.signal(signal(String(event.sessionID), {
+    // Unknown is treated as having its own model, so no rule suggests
+    // overriding it: missing a cheaper-model hint is harmless, overriding a
+    // configured model is not. A hidden agent still counts.
+    const agentHasModel = event.tool === SUBAGENT_TOOL && (agents === undefined || launched === undefined || agents.some((agent) => agent.id === launched))
+
+    const kind: Extract<SignalKind, { type: "tool_result" }> = {
       type: "tool_result",
       tool: clip(event.tool, TEXT_CODE_POINTS),
       ok: event.status === "completed",
-      ...session,
+      ...reported,
       ...observed,
       user_request: recovery.userRequest,
       candidates: recovery.candidates,
-    }), recovery.candidates.length > 0 ? RECOVERY_TIMEOUT : TOOL_RESULT_TIMEOUT)
+    }
+
+    // An older daemon's structs refuse unknown fields, so the false case is no field at all.
+    if (agentHasModel) kind.agent_has_model = true
+
+    const effects = yield* daemon.signal(signal(String(event.sessionID), kind), recovery.candidates.length > 0 ? RECOVERY_TIMEOUT : TOOL_RESULT_TIMEOUT)
 
     yield* applyEffects(event, effects, exposure, texts)
   })
@@ -74,6 +97,26 @@ type Observed = { readonly input: string; readonly error: string; readonly evide
 type Recovery = { readonly userRequest: string; readonly candidates: CatalogEntry[] }
 
 const NO_RECOVERY: Recovery = { userRequest: "", candidates: [] }
+
+/**
+ * The agent a subagent call launches: the one it names, or the agent the child
+ * session it continues runs on. `undefined` when neither resolves, because an
+ * unknown agent counts as having a model of its own.
+ */
+function launchedAgent(host: Plugin.Context, input: ToolResult["input"]): Effect.Effect<string | undefined, never> {
+  return Effect.gen(function* () {
+    const call = Option.getOrUndefined(decodeSubagentCall(input))
+
+    if (call?.agent) return call.agent
+
+    if (!call?.sessionID) return undefined
+
+    return yield* host.session.get({ sessionID: toSessionID(call.sessionID) }).pipe(
+      Effect.map((info) => (info.agent ? String(info.agent) : undefined)),
+      Effect.orElseSucceed(() => undefined),
+    )
+  })
+}
 
 /** The call's input, its error, and the bounded evidence both leave, from each end. */
 function observe(event: ToolResult): Observed {

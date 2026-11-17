@@ -97,6 +97,7 @@ fn recovery(candidates: &[&str]) -> Signal {
             user_request: "open the page".into(),
             evidence: "tool browser unavailable".into(),
             candidates: candidates.iter().copied().map(tool).collect(),
+            agent_has_model: false,
         },
     }
 }

@@ -6,7 +6,8 @@
   "when": {
     "tools": ["subagent"],
     "input_excludes": ["\"model\""],
-    "session_kind": "top_level"
+    "session_kind": "top_level",
+    "agent_has_model": false
   },
   "steps": [
     {
@@ -18,7 +19,7 @@
   ],
   "then": {
     "delivery": "steer",
-    "text": "Chauffeur: the user asks that subagents doing routine work run on a cheaper model from your own provider. Pass model \"anthropic/claude-opus-5-5#low\" when you run on Claude Fable or Opus, or \"openai/gpt-6.1-terra#high\" when you run on GPT-6 Astra or GPT-6.1 Sol, on your next subagent calls."
+    "text": "Chauffeur: the user asks that subagents doing routine work run on a cheaper model from your own provider. Pass model \"anthropic/claude-opus-5-5#low\" when you run on Claude Fable or Opus, or \"openai/gpt-6.1-terra#high\" when you run on GPT-6 Astra or GPT-6.1 Sol, on your next subagent calls to agents without a model of their own; launch agents configured with their own model without one."
   },
   "cooldown_seconds": 900
 }

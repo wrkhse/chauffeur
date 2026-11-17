@@ -527,31 +527,64 @@ fn context(agent: &str, notice: Notice) -> Effect {
     }
 }
 
+/// What a signal says about itself before Jev is asked: its session and, for
+/// a tool call, the call's input, result, and whether it launches an agent
+/// configured with a model of its own.
+#[derive(Default)]
+struct SignalFacts<'a> {
+    subagent: bool,
+    agent_has_model: bool,
+    input: &'a str,
+    result: &'a str,
+}
+
+impl<'a> SignalFacts<'a> {
+    /// The facts `kind` carries; a signal that is not a call carries none.
+    fn of(kind: &'a SignalKind) -> Self {
+        match kind {
+            SignalKind::ToolResult {
+                input,
+                evidence,
+                subagent,
+                agent_has_model,
+                ..
+            } => Self {
+                subagent: *subagent,
+                agent_has_model: *agent_has_model,
+                input,
+                result: evidence,
+            },
+            SignalKind::TurnEnd { subagent, .. } => Self {
+                subagent: *subagent,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
 /// Whether the facts this signal carries itself admit `gate`: the session's
-/// kind, and for a tool call its input and result.
+/// kind and launching agent, and for a tool call its input and result.
 fn admits_signal(gate: &Gate, kind: &SignalKind) -> bool {
-    let (input, result, subagent) = match kind {
-        SignalKind::ToolResult {
-            input,
-            evidence,
-            subagent,
-            ..
-        } => (input.as_str(), evidence.as_str(), *subagent),
-        SignalKind::TurnEnd { subagent, .. } => ("", "", *subagent),
-        _ => ("", "", false),
-    };
+    let facts = SignalFacts::of(kind);
     let contains = |haystack: &str, text: &String| haystack.contains(text.as_str());
 
     (gate.todos.is_empty() || gate.todos.contains(&TodoState::of(todos_of(kind))))
         && gate
             .session_kind
-            .is_none_or(|session| session == SessionKind::of(subagent))
-        && !gate.input_excludes.iter().any(|text| contains(input, text))
+            .is_none_or(|session| session == SessionKind::of(facts.subagent))
+        && gate
+            .agent_has_model
+            .is_none_or(|wanted| wanted == facts.agent_has_model)
+        && !gate
+            .input_excludes
+            .iter()
+            .any(|text| contains(facts.input, text))
         && (gate.result_includes.is_empty()
             || gate
                 .result_includes
                 .iter()
-                .any(|text| contains(result, text)))
+                .any(|text| contains(facts.result, text)))
 }
 
 fn question_id(rule: &Rule, step: &Step) -> String {
