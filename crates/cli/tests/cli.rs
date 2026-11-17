@@ -12,7 +12,7 @@ use std::mem::DropGuard;
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,50 @@ impl Install {
             .write_all(stdin.as_bytes())
             .unwrap();
         child.wait_with_output().unwrap()
+    }
+
+    /// Runs `chauffeur <args>` with `stdin`, its stdout a pipe whose reader
+    /// has already closed, as after `head` exits. Fails the test if it runs
+    /// past 10 seconds; it is killed however the test ends.
+    fn run_into_closed_pipe(&self, args: &[&str], stdin: &str) -> (ExitStatus, String) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut child = DropGuard::new(
+            self.command()
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(writer)
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+            |mut child| {
+                let _ = child.kill();
+                let _ = child.wait();
+            },
+        );
+        // A command that does not read stdin may have exited already.
+        let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "{args:?} still running"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        (status, stderr)
     }
 
     /// The runs `chauffeur audit` prints, one JSON line each.
@@ -421,6 +465,29 @@ fn audit_follow_stops_quietly_when_its_reader_closes_the_pipe() {
     assert_eq!(first.trim_end(), RUN);
     assert!(status.success(), "{status:?}: {stderr}");
     assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn version_stops_quietly_when_its_reader_has_closed_the_pipe() {
+    let install = Install::new("closed-version");
+
+    let (status, stderr) = install.run_into_closed_pipe(&["version"], "");
+
+    assert!(status.success(), "{status:?}: {stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn status_and_emit_stop_quietly_when_their_reader_has_closed_the_pipe() {
+    let mut install = Install::new("closed-calls");
+    install.start();
+
+    for (args, stdin) in [(&["daemon", "status"][..], ""), (&["emit"][..], BAD_COMMIT)] {
+        let (status, stderr) = install.run_into_closed_pipe(args, stdin);
+
+        assert!(status.success(), "{args:?}: {status:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+    }
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 mod audit;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -86,10 +86,10 @@ fn main() -> Result<ExitCode> {
         Command::Daemon {
             command: Daemon::Status,
         } => print(&call(&name, "chauffeur.status", &Value::Null)?),
-        Command::Version => {
-            println!("{name} {}", env!("CARGO_PKG_VERSION"));
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Version => print_line(
+            &mut io::stdout().lock(),
+            &format!("{name} {}", env!("CARGO_PKG_VERSION")),
+        ),
         Command::Emit { deadline_ms } => {
             let mut text = String::new();
             std::io::stdin().read_to_string(&mut text)?;
@@ -113,8 +113,24 @@ fn main() -> Result<ExitCode> {
 }
 
 fn print(result: &Value) -> Result<ExitCode> {
-    println!("{}", serde_json::to_string_pretty(result)?);
-    Ok(ExitCode::SUCCESS)
+    print_line(
+        &mut io::stdout().lock(),
+        &serde_json::to_string_pretty(result)?,
+    )
+}
+
+/// Prints `text` and a newline to `out`. A reader that stops early, as
+/// `head` does, closes the pipe; printing then stops, and succeeds. Any
+/// other failed write is an error.
+fn print_line(out: &mut impl Write, text: &str) -> Result<ExitCode> {
+    let printed = writeln!(out, "{text}").and_then(|()| out.flush());
+
+    match printed {
+        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
+            Err(error).wrap_err("cannot print the output")
+        }
+        _ => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// One JSON-RPC call to the daemon, returning its result.
@@ -138,4 +154,50 @@ fn call(name: &str, method: &str, params: &Value) -> Result<Value> {
         ));
     }
     Ok(reply.get("result").cloned().unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::process::ExitCode;
+
+    use super::print_line;
+
+    /// A writer whose every write fails with `kind`.
+    struct Failing(io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_is_printed_with_its_newline() {
+        let mut out = Vec::new();
+
+        let printed = print_line(&mut out, "chauffeur 1.0.0");
+
+        assert_eq!(printed.ok(), Some(ExitCode::SUCCESS));
+        assert_eq!(out, b"chauffeur 1.0.0\n");
+    }
+
+    #[test]
+    fn a_closed_pipe_stops_printing_with_success() {
+        let printed = print_line(&mut Failing(io::ErrorKind::BrokenPipe), "text");
+
+        assert_eq!(printed.ok(), Some(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn any_other_failed_write_is_an_error() {
+        let printed = print_line(&mut Failing(io::ErrorKind::Other), "text");
+
+        let error = printed.err().map(|error| error.to_string());
+        assert_eq!(error.as_deref(), Some("cannot print the output"));
+    }
 }
