@@ -7,7 +7,7 @@ use chauffeur_protocol::{Intent, Navigate, Rejection, Rule, Strategy, Target, pr
 use chauffeur_runtime::{Cancel, Context, EventLog, MAX_EVENTS, Ran, run_strategy};
 use serde_json::{Map, Value, json};
 
-use super::{Ask, Router, log_entry};
+use super::{Ask, Hook, Router, log_entry};
 use crate::state::Loaded;
 
 /// What an inline strategy's run is logged as.
@@ -46,11 +46,28 @@ impl Router {
         let project = request.project().map(Path::to_path_buf);
         let answered = match (request.event(), request.into_target()) {
             (Some(event), Target::On(on)) => {
-                let hooked: Vec<Arc<Rule>> = loaded
+                let project_rules = project
+                    .as_deref()
+                    .map(|path| self.projects.rules(&loaded, path));
+                let hooked: Vec<Hook> = loaded
                     .rules
                     .iter()
-                    .filter(|rule| rule.hooks(&event))
                     .cloned()
+                    .map(|rule| Hook {
+                        rule,
+                        project: None,
+                    })
+                    .chain(
+                        project_rules
+                            .iter()
+                            .flat_map(|rules| rules.rules.iter())
+                            .cloned()
+                            .map(|rule| Hook {
+                                rule,
+                                project: project.clone(),
+                            }),
+                    )
+                    .filter(|hook| hook.rule.hooks(&event))
                     .collect();
                 let ask = Ask {
                     event: on,
@@ -80,11 +97,11 @@ impl Router {
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
-        hooked: &[Arc<Rule>],
+        hooked: &[Hook],
         ask: &Ask,
         send: &(dyn Fn(Value) + Sync),
     ) -> Value {
-        let announced = |rule: &Rule| send(progress::rule_matched(rule.id()));
+        let announced = |hook: &Hook| send(progress::rule_matched(hook.rule.id()));
         let ran = |rule: &Rule, done: &super::RuleRun| {
             for event in done
                 .run

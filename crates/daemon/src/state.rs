@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chauffeur_judges::Models;
 use chauffeur_protocol::Rule;
@@ -10,8 +11,9 @@ use chauffeur_runtime::{Context, Redactor};
 use crate::DaemonError;
 use crate::paths::Paths;
 
-/// The most rule files loaded from one source.
-const MAX_RULES: usize = 512;
+/// The most rule files loaded from one source, and from one project's
+/// folder. The module is private, so this is no more visible than the crate.
+pub const MAX_RULES: usize = 512;
 
 /// The most folders read for rules in one source.
 const MAX_FOLDERS: usize = 256;
@@ -25,8 +27,13 @@ const MAX_PROJECTS_BYTES: u64 = 64 * 1024;
 /// The most projects `projects.json` may list.
 const MAX_PROJECTS: usize = 256;
 
+/// The epoch the next loaded configuration gets.
+static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
 /// Everything loaded from the distribution and the user's configuration.
 pub struct Loaded {
+    /// Which load this is, so a cache can tell it from a later one.
+    epoch: u64,
     /// Rules by ID; a user rule replaces a shipped one with the same ID.
     pub rules: Vec<Arc<Rule>>,
     /// Each rule file that was refused, with why.
@@ -71,6 +78,7 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
 
     let keys = Box::new(|name: &str| std::env::var(name).ok().filter(|key| !key.is_empty()));
     let mut loaded = Loaded {
+        epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
         rules: Vec::new(),
         refused: Vec::new(),
         projects,
@@ -103,6 +111,12 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
 }
 
 impl Loaded {
+    /// Which load this is; a later load has another epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// The projects whose inline System Two is allowed.
     #[must_use]
     pub const fn projects(&self) -> &BTreeSet<PathBuf> {
@@ -117,7 +131,7 @@ impl Loaded {
     }
 }
 
-fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
+pub fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
     let id = path.trim_prefix(folder).with_extension("");
     let id = id.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
     let mut bytes = Vec::new();
@@ -138,8 +152,9 @@ fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
     Rule::parse(&id, &text).map_err(|error| error.to_string())
 }
 
-/// The projects `path` lists, each an absolute path: at most
-/// [`MAX_PROJECTS`] from a file of at most [`MAX_PROJECTS_BYTES`].
+/// The projects `path` lists, each an absolute path, canonicalized when it
+/// exists: at most [`MAX_PROJECTS`] from a file of at most
+/// [`MAX_PROJECTS_BYTES`].
 ///
 /// A file that is not there lists none, so no project may run inline System
 /// Two until the user writes one. Any other problem refuses the file, so a
@@ -176,9 +191,15 @@ fn load_projects(path: &Path) -> Result<BTreeSet<PathBuf>, String> {
     for entry in listed {
         let project = PathBuf::from(entry);
         if !project.is_absolute() {
-            return Err(format!("`{}` is not an absolute path", project.display()));
+            return Err(format!(
+                "`\"{}\"` is not an absolute path",
+                project.to_string_lossy().escape_debug()
+            ));
         }
-        projects.insert(project);
+        // A canonical entry matches the canonical request, so a symlinked
+        // worktree or `/var` against `/private/var` still counts. An entry
+        // that does not exist yet stays as written.
+        projects.insert(std::fs::canonicalize(&project).unwrap_or(project));
     }
     Ok(projects)
 }
@@ -209,7 +230,7 @@ fn json_files(folder: &Path) -> Vec<PathBuf> {
 /// from at most [`MAX_FOLDERS`] folders. A folder reached again through a
 /// link is read once, by the path that reaches it first, so a link back to
 /// a folder above it neither repeats its rules nor walks forever.
-fn json_files_below(folder: &Path) -> Vec<PathBuf> {
+pub fn json_files_below(folder: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut visited = BTreeSet::new();
     let mut pending = vec![folder.to_owned()];
@@ -436,6 +457,46 @@ mod tests {
             Ok(MAX_PROJECTS),
             "a list at the limit should load"
         );
+    }
+
+    /// An entry that exists is stored as it resolves, so a symlinked
+    /// spelling and its target are one project.
+    #[test]
+    fn a_projects_file_entry_is_canonicalized_when_it_exists() {
+        let folder = std::env::temp_dir().join(format!(
+            "chauffeur-projects-canonical-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).expect("the project folder");
+        let bytes = serde_json::json!([folder.display().to_string()]).to_string();
+        let path = temp_file("projects-canonical", bytes.as_bytes());
+
+        let loaded = load_projects(&path);
+        let _ = fs::remove_file(&path);
+        let canonical = fs::canonicalize(&folder).expect("the canonical path");
+        let _ = fs::remove_dir_all(&folder);
+
+        assert_eq!(loaded, Ok(BTreeSet::from([canonical])));
+    }
+
+    /// An entry that does not exist yet stays as written, so a project can be
+    /// listed before it is cloned.
+    #[test]
+    fn a_projects_file_entry_that_does_not_exist_stays_as_written() {
+        let missing = std::env::temp_dir().join(format!(
+            "chauffeur-projects-missing-entry-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&missing);
+        assert!(!missing.exists(), "the sample entry should not exist");
+        let bytes = serde_json::json!([missing.display().to_string()]).to_string();
+        let path = temp_file("projects-missing-entry", bytes.as_bytes());
+
+        let loaded = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded, Ok(BTreeSet::from([missing])));
     }
 
     /// A file that is not there lists no projects.

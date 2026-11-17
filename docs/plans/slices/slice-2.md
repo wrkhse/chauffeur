@@ -75,7 +75,9 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   path of at most 4096 bytes, the `project_bytes` limit; a relative path, or
   one that is not text, is `invalid`. The daemon then reads that project's
   `.chauffeur/rules/` too, bounded and cached, and applies the project's
-  System Two allowance.
+  System Two allowance. The project and the entries of `projects.json` are
+  canonicalized for that allowance, so a symlinked worktree, or `/var` and
+  `/private/var` spellings, still match.
 - **Inline trust:** an inline strategy carries its caller's user-level trust,
   so a judge that names a `model`, and a `person` judge, are allowed. Inline
   System Two, a judge whose tier is `system-two` or a step naming
@@ -525,11 +527,13 @@ which keeps the integration share free for other connections.
 `--models FILE` for tests. The integration and project rule sources: a
 request's `project` adds that project's `.chauffeur/rules/`, read bounded
 and cached, and the project may run System Two only when the user-level
-`projects.json` lists it. A project rule may not name a `model` or a
-placeholder, and such a rule is refused. Matching rules run concurrently.
+`projects.json` lists it. A project rule may not name a `model` or use the
+`person` tier, and such a rule is refused; it cannot name a placeholder at
+all, since a judge entry holds only a tier, a model and a confidence, and
+refuses unknown fields. Matching rules run concurrently.
 
 Files: `crates/daemon/src/socket.rs`, `rpc.rs`, `route/navigate.rs`,
-`rules.rs`
+`project.rs`, `state.rs`
 
 ```json
 { "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 1 } }
@@ -596,6 +600,40 @@ pub struct Paths {
 }
 ```
 
+A project's rules come from `<project>/.chauffeur/rules/`. The project and
+that folder are canonicalized, so a folder that resolves outside the project
+is not read, and the walk skips every symlink: a clone cannot add a rule or
+a folder from outside it. The walk examines at most 4,096 entries in at most
+256 folders and takes at most 512 rule files and 8 MiB of them in all, each
+at most 1 MiB, with IDs relative to that folder. A bound stops the walk with
+a refusal, "the project's rules folder is over …", and the rules found
+before it still load. A rule whose ID a shipped, user or integration rule
+already has is skipped, with a line saying so, so a cloned repository cannot
+replace the user's own rules. A project rule naming a `model` is refused,
+since models load only from shipped and user configuration, as is one using
+the `person` tier, since only shipped and user configuration may ask a
+person, or System Two for a project `projects.json` does not list. A rule
+cannot name a placeholder at all: a judge entry holds only a tier, an
+optional model and a confidence, and refuses unknown fields.
+Each refusal is printed to stderr once for each load of a changed folder,
+with its path and reason escaped, so a rule file cannot forge a line; the
+folder is never read for models, so a project's `.chauffeur/models.json` has
+no effect. The daemon caches at most 32 projects' rules, least recently used
+evicted, each with a signature of its rule files' paths, lengths,
+modification times, inodes and change times and the epoch of the load it was
+built from. Every request re-walks that metadata and reuses an entry only
+for that load and signature, so a reload never serves rules built under
+another `projects.json`, and an edit that keeps a file's length and
+modification time is still seen when its inode or change time moves. A
+navigation matches the loaded rules in their order, then the project's in ID
+order, all under the request's admission.
+
+A project rule's ID is relative to its own folder, so its intents read like
+a shipped, integration or user rule's with the same ID; an intent carries no
+source, and a later slice may add an optional `source` field. The daemon
+keys a project rule's cooldown by its project, so two projects' rules with
+the same ID do not suppress each other.
+
 Verified by:
 
 - `crates/daemon/tests/navigate.rs`, through the real socket:
@@ -625,14 +663,33 @@ Verified by:
 - A fifth open navigation on one connection is `busy` while another
   connection is still served.
 - A project rule naming System Two in a project that `projects.json` does
-  not list, and a `model` or placeholder entry in a project's
-  `.chauffeur/`, are refused.
+  not list, one naming a `model`, and one using the `person` tier, are
+  refused.
 - An inline strategy naming `system-two` is `judge_unavailable` without a
   `project` at parse, and from the daemon when the list does not name the
   project.
 - Two matching rules both return their intents; a rule that misses the
   deadline drops only its own intents, and settles each of its steps with
   `failed` for the deadline.
+- A project rule returns its intents alongside the integration rule's, with
+  its ID relative to its folder; one naming a model is refused, as is one
+  using System Two for a project `projects.json` does not list, while the
+  listed project's rule loads; one whose ID a loaded rule has is skipped
+  with a line saying so; adding, deleting or renaming a project rule file
+  changes the next navigation's rules; and a project's `models.json` is
+  never read, even when it maps `system-two` to a placeholder that would
+  answer.
+- The project cache keeps at most 32 projects and forgets the least recently
+  used; an entry is reused only for the load and signature that built it, so
+  emptying `projects.json` stops a listed project's System Two rule on the
+  next navigation.
+- A rule file or folder that is a symlink elsewhere, and a
+  `.chauffeur/rules/` that resolves outside the project, load nothing; a
+  project folder over 4,096 entries, 256 folders, 512 rule files or 8 MiB of
+  rule files is refused, in `crates/daemon/src/project.rs`'s tests.
+- Two projects' rules with the same ID do not share a cooldown: one project's
+  rule fires while the other's is cooling down, and each cools down on its
+  own.
 
 ### The bindings
 

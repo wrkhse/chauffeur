@@ -37,6 +37,9 @@ chauffeur daemon run --models fixtures/placeholders.json
   projects whose inline System Two strategies may run, as a JSON array of
   absolute paths, such as `["/Users/me/src/app"]`. A project it does not list
   is refused with `judge_unavailable`; with no file, no project may run one.
+  Each entry is canonicalized when the file loads, and a request's `project`
+  when it arrives, so a symlinked worktree, or `/var` and `/private/var`
+  spellings, still match; an entry that does not exist yet stays as written.
   The file may be at most 64 KiB and list at most 256 projects, and one that
   is larger or names a relative path is refused: the daemon does not start
   with it, and a reload keeps the list loaded before.
@@ -103,6 +106,22 @@ A rule's ID is its path under `rules/` without `.json`, such as
 `team/release`. Folders below `rules/` may be links; a folder reached twice is
 read once, by the first path in name order, and at most 256 folders and 512
 rule files are read from each of the shipped and your own `rules/`.
+
+A navigation naming a `project` also reads that project's
+`.chauffeur/rules/`, with IDs relative to that folder, after the rules above.
+The project and its rules folder are canonicalized, so a folder that resolves
+outside the project is not read, and the walk skips every symlink. It
+examines at most 4,096 entries in at most 256 folders and takes at most 512
+rule files and 8 MiB of them in all, each at most 1 MiB; a folder over a
+bound is refused with a line saying so. The daemon caches at most 32 projects
+by each file's path, length, modification time, inode and change time, and
+the configuration load that built the entry, so an edit applies to the next
+navigation. A project rule that names a `model`, uses the `person` tier, or
+uses System Two for a project `projects.json` does not list, is refused: only
+shipped and user configuration may name a model or ask a person. A rule whose
+ID a loaded rule already has is skipped, with a line saying so, so a clone
+cannot replace the user's own rules. The daemon says why on stderr once for
+each load of the changed folder.
 
 From slice 5, `chauffeur daemon status --project WORKTREE` lists the rules a
 session in that worktree would load, its project rules included, and the
