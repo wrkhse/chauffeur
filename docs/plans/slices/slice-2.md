@@ -94,9 +94,10 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   blocks, 64 candidates, and 64 blocks named by one ask; 256 KiB of evidence
   and candidates together, names included; 16 KiB in each text a strategy
   names: instructions, descriptions, outcome values, step IDs, judge and ask
-  names, evidence names, and a judge's `model`; a 30 s deadline. Each
-  rejection names its limit. The `after` and `for_each` limits are checked
-  with those fields, in slices 3 and 4.
+  names, evidence names, a judge's `model`, and an outcome key in a
+  per-outcome confidence; a 30 s deadline. Each rejection names its limit.
+  The `after` and `for_each` limits are checked with those fields, in slices
+  3 and 4.
 
 ## What it builds
 
@@ -412,7 +413,8 @@ Verified by:
 ### sourcefed
 
 Its daemon asks v2 only when a v2 daemon answers its `chauffeur.status`
-handshake, looking for `$CHAUFFEUR_SOCKET`, then `chauffeur`'s socket, then
+handshake. It looks for `$CHAUFFEUR_SOCKET` alone when it is set: an explicit
+override does not fall back. Otherwise it tries `chauffeur`'s socket, then
 `chauffeur-next`'s. Events that v2 triaged are marked triaged; the OpenCode
 bridge keeps calling v1's `chauffeur.gate` for events that are not marked,
 and that call is removed at slice 13 (cutover). Its installer puts `sourcefed/triage`

@@ -101,7 +101,7 @@ fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 76);
+    assert_eq!(cases.len(), 77);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -214,7 +214,8 @@ fn a_judge_name_over_16_kib_is_refused() {
     assert_text_bytes(&params);
 }
 
-/// An ask's name in `asks` is a key too, even when a step names it.
+/// A step's named ask is checked before `asks` is consulted: a name over
+/// 16 KiB is refused even when no ask holds it.
 #[test]
 fn an_ask_name_over_16_kib_is_refused() {
     let long = "x".repeat(16_385);
@@ -227,10 +228,6 @@ fn an_ask_name_over_16_kib_is_refused() {
         "strategy": [{ "id": "done", "judge": "quick", "ask": "finished" }],
         "evidence": { "log": "…" }
     });
-    params["asks"].as_object_mut().unwrap().insert(
-        long.clone(),
-        json!({ "outcomes": ["yes", "no"], "instructions": "?" }),
-    );
     params["strategy"][0]["ask"] = json!(long);
 
     assert_text_bytes(&params);
