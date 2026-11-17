@@ -3,7 +3,7 @@
 
 mod audit;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -235,6 +235,7 @@ fn answer(stream: &UnixStream, wait: Duration) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
+    use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::ExitCode;
@@ -337,12 +338,20 @@ mod tests {
 
     /// `answer` over a pair whose peer writes `line` and closes. The pair's
     /// buffer is small, so the peer needs its own thread to write a long one.
+    /// The peer's write is bounded and its failure ignored: when the read
+    /// stops early, the peer cannot finish writing, so the read end is shut
+    /// down and closed before the join, and the test fails on its assertion
+    /// instead of on a join that never returns.
     fn answered(line: Vec<u8>, wait: Duration) -> Result<Value> {
         let (ours, mut peer) = UnixStream::pair().unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let writer = thread::spawn(move || {
             let _ = peer.write_all(&line);
         });
         let answer = answer(&ours, wait);
+        let _ = ours.shutdown(Shutdown::Both);
+        drop(ours);
         writer.join().unwrap();
 
         answer
@@ -367,6 +376,8 @@ mod tests {
     #[test]
     fn a_trickled_answer_ends_at_the_wait() {
         let (ours, mut peer) = UnixStream::pair().unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let writer = thread::spawn(move || {
             for _ in 0..100 {
                 if peer.write_all(b" ").is_err() {
@@ -379,6 +390,7 @@ mod tests {
 
         let error = answer(&ours, Duration::from_millis(100)).unwrap_err();
         let waited = started.elapsed();
+        let _ = ours.shutdown(Shutdown::Both);
         drop(ours);
         writer.join().unwrap();
 
