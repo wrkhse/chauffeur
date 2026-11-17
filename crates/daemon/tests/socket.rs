@@ -54,6 +54,9 @@ fn start(paths: &Paths) {
 
 fn send(socket: &Path, line: &str) -> Value {
     let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     // Past the connection limit the daemon replies and closes at once, so the write may fail while the reply is readable.
     if let Err(error) = writeln!(stream, "{line}") {
         assert!(
@@ -110,6 +113,39 @@ fn send_oversized(socket: &Path, line: &str) -> Value {
         );
         assert!(reply.ends_with('\n'), "the reply has no newline: {reply:?}");
         serde_json::from_str(&reply).unwrap()
+    })
+}
+
+/// The reply to an oversized line read while it is still being written,
+/// with what the writer did once the daemon answered and how long after the
+/// reply the writer took to finish. The writer's own thread keeps a slow
+/// daemon from blocking the read for longer than its timeout.
+fn send_and_finish_writing(socket: &Path, line: &str) -> (Value, io::Result<()>, Duration) {
+    let stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+
+    thread::scope(|scope| {
+        let writing = scope.spawn(move || writeln!(writer, "{line}"));
+        let mut reply = String::new();
+        let read = BufReader::new(&stream)
+            .take(u64::try_from(chauffeur_daemon::MAX_LINE).unwrap())
+            .read_line(&mut reply);
+        let answered = Instant::now();
+        let written = writing.join().unwrap();
+        let lingered = answered.elapsed();
+
+        assert!(
+            read.is_ok(),
+            "cannot read the oversized-line reply: {read:?}"
+        );
+        assert!(reply.ends_with('\n'), "the reply has no newline: {reply:?}");
+        (serde_json::from_str(&reply).unwrap(), written, lingered)
     })
 }
 
@@ -394,6 +430,124 @@ fn malformed_and_oversized_requests_fail_safely() {
 }
 
 #[test]
+fn a_line_over_the_limit_that_ends_with_a_newline_is_drained_so_the_writer_finishes() {
+    let paths = paths("drained", NUDGING);
+    start(&paths);
+    let line = "x".repeat(chauffeur_daemon::MAX_LINE.saturating_add(512 * 1024));
+
+    let (reply, written, _) = send_and_finish_writing(&paths.socket, &line);
+
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("over 1 MiB"),
+        "{reply}"
+    );
+    assert!(
+        written.is_ok(),
+        "the drain reads through the newline: {written:?}"
+    );
+}
+
+#[test]
+fn a_line_past_the_drain_limit_is_cut_off_and_the_writer_fails() {
+    let paths = paths("cut-off", NUDGING);
+    start(&paths);
+    let line = "x".repeat(
+        chauffeur_daemon::MAX_LINE
+            .saturating_add(1)
+            .saturating_add(2 * 1024 * 1024),
+    );
+
+    let (reply, written, lingered) = send_and_finish_writing(&paths.socket, &line);
+
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("over 1 MiB"),
+        "{reply}"
+    );
+    assert!(
+        written.is_err(),
+        "the drain stops before the line's end: {written:?}"
+    );
+    // The drain stops at one more MiB and closes at once. A drain that keeps
+    // the connection open instead holds the writer until its 500 ms budget
+    // ends, so the writer must be released well before that.
+    assert!(
+        lingered < Duration::from_millis(300),
+        "the daemon stopped draining at its limit: {written:?} after {lingered:?}"
+    );
+    if let Err(error) = written {
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+            ),
+            "the writer reaches the closed daemon: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_line_that_ends_at_the_limit_is_answered_without_draining() {
+    let paths = paths("line-end", NUDGING);
+    start(&paths);
+    let stream = UnixStream::connect(&paths.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let line = "x".repeat(chauffeur_daemon::MAX_LINE);
+
+    thread::scope(|scope| {
+        let writing = scope.spawn(move || writeln!(writer, "{line}"));
+        let mut reply = String::new();
+        let read = BufReader::new(&stream)
+            .take(u64::try_from(chauffeur_daemon::MAX_LINE).unwrap())
+            .read_line(&mut reply);
+        assert!(read.is_ok(), "cannot read the line's reply: {read:?}");
+        assert!(reply.ends_with('\n'), "the reply has no newline: {reply:?}");
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["error"]["code"], -32_600, "{reply}");
+        assert!(writing.join().unwrap().is_ok(), "the line is written");
+
+        // The line ended with its newline, so the daemon answers and closes
+        // rather than draining on. Writes with no newline then reach the
+        // closed daemon instead of being read away.
+        let mut stream = &stream;
+        let started = Instant::now();
+        let mut failed = None;
+        while started.elapsed() < Duration::from_millis(400) {
+            if let Err(error) = write!(stream, "{}", "x".repeat(4096)) {
+                failed = Some(error);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            failed.is_some(),
+            "the daemon kept reading after the line ended"
+        );
+        if let Some(error) = failed {
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                ),
+                "the write reaches the closed daemon: {error}"
+            );
+        }
+    });
+}
+
+#[test]
 fn a_second_daemon_finds_the_first_and_an_open_folder_is_refused() {
     let paths = paths("second", NUDGING);
     start(&paths);
@@ -451,6 +605,9 @@ fn past_the_connection_limit_a_caller_is_told_so_and_served_once_one_closes() {
         .collect();
     // Each is answered once it is served, so all are counted before the next.
     for mut stream in &open {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         writeln!(
             stream,
             r#"{{ "jsonrpc": "2.0", "id": 1, "method": "chauffeur.status" }}"#

@@ -60,7 +60,10 @@ pub fn serve(listener: &UnixListener, router: &Arc<Router>) -> ! {
     let open = Arc::new(AtomicUsize::new(0));
 
     loop {
-        let stream = accept_next(|| listener.accept().map(|(stream, _)| stream));
+        let stream = accept_next(
+            || listener.accept().map(|(stream, _)| stream),
+            |error| eprintln!("chauffeur: cannot accept a connection: {error}; retrying"),
+        );
         let taken = open.fetch_add(1, Ordering::SeqCst);
         let slot = DropGuard::new(Arc::clone(&open), |open| {
             open.fetch_sub(1, Ordering::SeqCst);
@@ -83,14 +86,14 @@ pub fn serve(listener: &UnixListener, router: &Arc<Router>) -> ! {
 }
 
 /// Logs the first failed accept in a row and retries with backoff.
-fn accept_next<S>(mut accept: impl FnMut() -> io::Result<S>) -> S {
+fn accept_next<S>(mut accept: impl FnMut() -> io::Result<S>, mut log: impl FnMut(&io::Error)) -> S {
     let mut failed = false;
 
     loop {
         match accept() {
             Ok(stream) => return stream,
             Err(error) if !failed => {
-                eprintln!("chauffeur: cannot accept a connection: {error}; retrying");
+                log(&error);
                 failed = true;
             }
             Err(_) => {}
@@ -120,6 +123,12 @@ fn busy(mut stream: UnixStream) {
 /// Reads and admits on this thread; each admitted call gets a fallible
 /// scoped thread. A notification runs only for emit, without a reply.
 fn connection(router: &Router, stream: UnixStream) {
+    serve_connection(router, stream, IDLE);
+}
+
+/// Serves one connection, ending it after `idle` with no request and no call
+/// open.
+fn serve_connection(router: &Router, stream: UnixStream, idle: Duration) {
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -137,7 +146,7 @@ fn connection(router: &Router, stream: UnixStream) {
         loop {
             let _ = reader
                 .get_ref()
-                .set_read_timeout(calls.is_empty().then_some(IDLE));
+                .set_read_timeout(calls.is_empty().then_some(idle));
             let Some(request) = next(&mut reader, &mut line, &wire) else {
                 break;
             };
@@ -183,8 +192,11 @@ fn connection(router: &Router, stream: UnixStream) {
             if let Err(error) = started {
                 calls.close(&id);
                 if reply {
-                    let error =
-                        rpc::error(&id, -32_000, &format!("cannot start call thread: {error}"));
+                    let error = rpc::error(
+                        &id,
+                        rpc::SERVER_ERROR,
+                        &format!("cannot start call thread: {error}"),
+                    );
                     let _ = wire.send(&error);
                 }
             }
@@ -402,10 +414,20 @@ impl Calls {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::time::Instant;
+    use std::io::{self, BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use super::{ACCEPT_RETRY, accept_next};
+    use serde_json::{Value, json};
+
+    use super::{ACCEPT_RETRY, accept_next, serve_connection};
+    use crate::Paths;
+    use crate::route::Router;
 
     /// An error that lasts, such as `EMFILE`, fails every accept at once;
     /// waiting between them keeps the loop from spinning a core.
@@ -414,14 +436,17 @@ mod tests {
         let mut calls = 0_u32;
         let started = Instant::now();
 
-        let accepted = accept_next(|| {
-            calls = calls.saturating_add(1);
-            if calls <= 3 {
-                Err(io::Error::other("too many open files"))
-            } else {
-                Ok(calls)
-            }
-        });
+        let accepted = accept_next(
+            || {
+                calls = calls.saturating_add(1);
+                if calls <= 3 {
+                    Err(io::Error::other("too many open files"))
+                } else {
+                    Ok(calls)
+                }
+            },
+            |_| {},
+        );
 
         assert_eq!(accepted, 4, "accepted on the fourth try");
         assert!(
@@ -431,16 +456,152 @@ mod tests {
         );
     }
 
+    /// The first failure of a spell is logged once, however long the spell
+    /// lasts: a lasting fault must not flood the log.
+    #[test]
+    fn a_spell_of_failed_accepts_is_logged_once() {
+        let mut calls = 0_u32;
+        let mut logged = Vec::new();
+
+        let accepted = accept_next(
+            || {
+                calls = calls.saturating_add(1);
+                if calls <= 3 {
+                    Err(io::Error::other("too many open files"))
+                } else {
+                    Ok(calls)
+                }
+            },
+            |error| logged.push(error.to_string()),
+        );
+
+        assert_eq!(accepted, 4);
+        assert_eq!(logged, ["too many open files"]);
+    }
+
     #[test]
     fn an_accept_that_succeeds_is_not_tried_again() {
         let mut calls = 0_u32;
 
-        let accepted = accept_next(|| {
-            calls = calls.saturating_add(1);
-            io::Result::Ok("connection")
-        });
+        let accepted = accept_next(
+            || {
+                calls = calls.saturating_add(1);
+                io::Result::Ok("connection")
+            },
+            |_| {},
+        );
 
         assert_eq!(accepted, "connection");
         assert_eq!(calls, 1);
+    }
+
+    /// A router over `models`, the user's models file, and the repository's
+    /// shipped rules and safety patterns.
+    fn fixture(name: &str, models: &str) -> Router {
+        let root =
+            std::env::temp_dir().join(format!("chauffeur-socket-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/models.json"), models).unwrap();
+        let paths = Paths {
+            name: "chauffeur-test".into(),
+            socket: root.join("run/daemon.sock"),
+            config: root.join("config"),
+            distribution: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../distribution"),
+            state: root.join("state"),
+            models: Some(root.join("config/models.json")),
+        };
+        let loaded = crate::state::load(&paths, None).unwrap();
+
+        Router::new(
+            loaded,
+            crate::audit::Audit::new(&paths.state, crate::audit::MAX_BYTES),
+        )
+    }
+
+    /// The endpoint of a model that accepts requests and never answers, so a
+    /// call must give up at its deadline rather than wait for its model.
+    fn silent_model() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming().filter_map(Result::ok) {
+                // Held open: the judge reads no answer from it.
+                thread::sleep(Duration::from_secs(60));
+                drop(stream);
+            }
+        });
+        endpoint
+    }
+
+    /// With nothing sent, the connection ends at the idle timeout, so a
+    /// silent client cannot hold a thread forever.
+    #[test]
+    fn an_idle_connection_ends_after_its_idle_timeout() {
+        let router = Arc::new(fixture("idle", r#"{ "models": {}, "tiers": {} }"#));
+        let (server, _client) = UnixStream::pair().unwrap();
+        let (ended, closed) = mpsc::channel();
+
+        thread::spawn(move || {
+            serve_connection(&router, server, Duration::from_millis(200));
+            let _ = ended.send(());
+        });
+
+        let waited = closed.recv_timeout(Duration::from_secs(2));
+
+        assert!(
+            waited.is_ok(),
+            "an idle connection ends at its idle timeout"
+        );
+    }
+
+    /// A call that outlives the idle timeout keeps its connection: only an
+    /// empty connection is timed out.
+    #[test]
+    fn an_open_call_keeps_the_connection_past_the_idle_timeout() {
+        let endpoint = silent_model();
+        let models = json!({
+            "models": {
+                "slow": { "format": "systemone", "endpoint": endpoint, "model": "jev-latest",
+                          "key": { "env": "HOME" }, "timeout_ms": 5000 }
+            },
+            "tiers": { "system-one": ["slow"] }
+        })
+        .to_string();
+        let router = Arc::new(fixture("open-call", &models));
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let reading = client.try_clone().unwrap();
+        let limit = Some(Duration::from_secs(10));
+        client.set_write_timeout(limit).unwrap();
+        reading.set_read_timeout(limit).unwrap();
+        thread::spawn(move || serve_connection(&router, server, Duration::from_millis(200)));
+
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "chauffeur.navigate",
+            "params": {
+                "protocol": 1, "deadline_ms": 1500,
+                "judges": { "slow": { "tier": "system-one", "model": "slow" } },
+                "strategy": [{ "id": "done", "judge": "slow",
+                               "ask": { "outcomes": ["yes", "no"], "evidence": ["log"],
+                                        "instructions": "Is it finished?" } }],
+                "evidence": { "log": "x" }
+            }
+        });
+        writeln!(client, "{request}").unwrap();
+
+        let mut line = String::new();
+        BufReader::new(reading).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        let reason = reply
+            .get("error")
+            .and_then(|error| error.get("data"))
+            .and_then(|data| data.get("reason"))
+            .and_then(Value::as_str);
+
+        assert!(
+            reply.get("result").is_some() || reason == Some("deadline"),
+            "the call outlives the idle timeout: {reply}"
+        );
+        assert_ne!(reason, Some("cancelled"), "{reply}");
     }
 }

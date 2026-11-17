@@ -81,10 +81,7 @@ fn main() -> Result<ExitCode> {
                     distribution,
                     models,
                 },
-        } => match chauffeur_daemon::run(&Paths {
-            models,
-            ..Paths::from_env(&name, distribution)
-        }) {
+        } => match chauffeur_daemon::run(&daemon_paths(&name, distribution, models)) {
             Err(DaemonError::Running(socket)) => {
                 eprintln!(
                     "{name}: a daemon is already running on {}",
@@ -120,6 +117,15 @@ fn main() -> Result<ExitCode> {
             audit::print(&Paths::from_env(&name, None).state, count, follow, brief)?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// The daemon's paths for `name`, with `models` used in place of the
+/// shipped and the user's models files.
+fn daemon_paths(name: &str, distribution: Option<PathBuf>, models: Option<PathBuf>) -> Paths {
+    Paths {
+        models,
+        ..Paths::from_env(name, distribution)
     }
 }
 
@@ -170,9 +176,10 @@ fn call(name: &str, method: &str, params: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
+    use std::path::PathBuf;
     use std::process::ExitCode;
 
-    use super::print_line;
+    use super::{daemon_paths, print_line};
 
     /// A writer whose every write fails with `kind`.
     struct Failing(io::ErrorKind);
@@ -210,5 +217,14 @@ mod tests {
 
         let error = printed.err().map(|error| error.to_string());
         assert_eq!(error.as_deref(), Some("cannot print the output"));
+    }
+
+    #[test]
+    fn a_models_file_is_used_in_place_of_the_shipped_and_the_users() {
+        let models = PathBuf::from("/tmp/chauffeur-models.json");
+
+        let paths = daemon_paths("chauffeur", None, Some(models.clone()));
+
+        assert_eq!(paths.models, Some(models));
     }
 }

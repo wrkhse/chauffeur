@@ -14,6 +14,8 @@ const PARSE_ERROR: i64 = -32_700;
 const INVALID_REQUEST: i64 = -32_600;
 const METHOD_NOT_FOUND: i64 = -32_601;
 const INVALID_PARAMS: i64 = -32_602;
+/// The code for a daemon failure, such as a call thread that cannot start.
+pub const SERVER_ERROR: i64 = -32_000;
 
 /// The notification that cancels a request on the same connection.
 pub const CANCEL: &str = "$/cancelRequest";
