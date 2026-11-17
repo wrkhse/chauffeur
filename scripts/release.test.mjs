@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -73,6 +74,32 @@ test("a tarball holds the binary, the shipped content and the license, and SHA25
     assert.equal(readFileSync(join(out, "SHA256SUMS"), "utf8"), text)
   } finally {
     rmSync(root, { recursive: true })
+  }
+})
+
+test("SHA256SUMS lists each tarball and the client's, sorted, and no stray tgz", () => {
+  const folder = mkdtempSync(join(tmpdir(), "chauffeur-sums-"))
+  const client = "fdcn-chauffeur-1.0.0-rc.1.tgz"
+  const target = "chauffeur-1.0.0-rc.1-linux-x64.tar.gz"
+
+  try {
+    // Written out of order, so the listing proves it sorts by name.
+    writeFileSync(join(folder, "foo.tgz"), "stray\n")
+    writeFileSync(join(folder, client), "")
+    writeFileSync(join(folder, target), "target bytes\n")
+
+    const digest = (name) =>
+      createHash("sha256").update(readFileSync(join(folder, name))).digest("hex")
+    const text = sums(folder)
+
+    assert.equal(text, `${digest(target)}  ${target}\n${digest(client)}  ${client}\n`)
+    assert.ok(!text.includes("foo.tgz"), text)
+    for (const line of text.trimEnd().split("\n")) {
+      assert.match(line, /^[0-9a-f]{64} {2}\S+$/)
+    }
+    assert.equal(readFileSync(join(folder, "SHA256SUMS"), "utf8"), text)
+  } finally {
+    rmSync(folder, { recursive: true })
   }
 })
 

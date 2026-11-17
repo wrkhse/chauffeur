@@ -80,12 +80,15 @@ jobs:
           bun run check
           mkdir -p ../../dist
           npm pack --pack-destination ../../dist
+          # The release tarball's name, which the tag decides; the upload
+          # uses the same path rather than a glob.
+          echo "CLIENT_TARBALL=dist/fdcn-chauffeur-${GITHUB_REF_NAME#v}.tgz" >> "$GITHUB_ENV"
       - name: A consumer installs the packed client
-        run: node scripts/client-consumer-smoke.mjs dist/fdcn-chauffeur-*.tgz
+        run: node scripts/client-consumer-smoke.mjs "dist/fdcn-chauffeur-${GITHUB_REF_NAME#v}.tgz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: client
-          path: dist/*.tgz
+          path: ${{ env.CLIENT_TARBALL }}
           if-no-files-found: error
 
   publish:
