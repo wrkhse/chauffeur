@@ -31,17 +31,17 @@ why.
 
 In order of impact. Each links the machine it breaks.
 
-| #   | Severity | Machine                                   | What could happen                                                      | Issue                                                | Fixed in                                           |
-| --- | -------- | ----------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------- |
-| S1  | High     | [A request](#a-request-from-the-adapter)  | OpenCode waits forever on a tool call when the daemon hangs up         | [#1](https://github.com/wrkhse/chauffeur/issues/1)   | `4a005a0`                                          |
-| S2  | High     | [A rule file](#a-rule-file)               | A rule saved halfway through an edit stops running                     | [#2](https://github.com/wrkhse/chauffeur/issues/2)   | `102d5ae`                                          |
-| S3  | High     | [A rule file](#a-rule-file)               | A folder linked back to `rules/` loads one rule 512 times              | [#2](https://github.com/wrkhse/chauffeur/issues/2)   | `c5991be`                                          |
-| S4  | Medium   | [Cooldowns](#a-cooldown)                  | Events at once in one session each return the action                   | [#3](https://github.com/wrkhse/chauffeur/issues/3)   | `83e697e`                                          |
-| S5  | Low      | [Following the log](#following-the-log)   | `audit --follow` skips runs written while it starts                    | [#4](https://github.com/wrkhse/chauffeur/issues/4)   | `4c8eebb`                                          |
-| S6  | Low      | [The audit log](#the-audit-log)           | Times change width, so they do not sort, and a test fails 1 run in 8   | [#4](https://github.com/wrkhse/chauffeur/issues/4)   | `527b26d`                                          |
-| S7  | Low      | [Following the log](#following-the-log)   | `chauffeur audit \| head` crashes with exit 101                        | [#12](https://github.com/wrkhse/chauffeur/issues/12) | [#18](https://github.com/wrkhse/chauffeur/pull/18) |
-| O4  | Low      | [The daemon process](#the-daemon-process) | A failed accept is tried again at once, so one that lasts spins a core | [#10](https://github.com/wrkhse/chauffeur/issues/10) | [#18](https://github.com/wrkhse/chauffeur/pull/18) |
-| O10 | Low      | [The daemon process](#the-daemon-process) | A reload thread that cannot start is reported as a socket error        | [#11](https://github.com/wrkhse/chauffeur/issues/11) | [#18](https://github.com/wrkhse/chauffeur/pull/18) |
+| #   | Severity | Machine                                   | What could happen                                                      | Issue                                                | Fixed in                                                                                               |
+| --- | -------- | ----------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| S1  | High     | [A request](#a-request-from-the-adapter)  | OpenCode waits forever on a tool call when the daemon hangs up         | [#1](https://github.com/wrkhse/chauffeur/issues/1)   | `4a005a0`                                                                                              |
+| S2  | High     | [A rule file](#a-rule-file)               | A rule saved halfway through an edit stops running                     | [#2](https://github.com/wrkhse/chauffeur/issues/2)   | `102d5ae`                                                                                              |
+| S3  | High     | [A rule file](#a-rule-file)               | A folder linked back to `rules/` loads one rule 512 times              | [#2](https://github.com/wrkhse/chauffeur/issues/2)   | `c5991be`                                                                                              |
+| S4  | Medium   | [Cooldowns](#a-cooldown)                  | Events at once in one session each return the action                   | [#3](https://github.com/wrkhse/chauffeur/issues/3)   | `83e697e`                                                                                              |
+| S5  | Low      | [Following the log](#following-the-log)   | `audit --follow` skips runs written while it starts                    | [#4](https://github.com/wrkhse/chauffeur/issues/4)   | `4c8eebb`                                                                                              |
+| S6  | Low      | [The audit log](#the-audit-log)           | Times change width, so they do not sort, and a test fails 1 run in 8   | [#4](https://github.com/wrkhse/chauffeur/issues/4)   | `527b26d`                                                                                              |
+| S7  | Low      | [Following the log](#following-the-log)   | `chauffeur audit \| head` crashes with exit 101                        | [#12](https://github.com/wrkhse/chauffeur/issues/12) | [#18](https://github.com/wrkhse/chauffeur/pull/18), [#28](https://github.com/wrkhse/chauffeur/pull/28) |
+| O4  | Low      | [The daemon process](#the-daemon-process) | A failed accept is tried again at once, so one that lasts spins a core | [#10](https://github.com/wrkhse/chauffeur/issues/10) | [#18](https://github.com/wrkhse/chauffeur/pull/18)                                                     |
+| O10 | Low      | [The daemon process](#the-daemon-process) | A reload thread that cannot start is reported as a socket error        | [#11](https://github.com/wrkhse/chauffeur/issues/11) | [#18](https://github.com/wrkhse/chauffeur/pull/18)                                                     |
 
 `e2b169d` adds the tests mutation testing asked for after the fixes.
 
@@ -153,8 +153,14 @@ Now `audit` writes to a locked stdout and, when the pipe closes, stops with
 success. `follow` stops when its callback breaks, and returns what it broke
 with.
 
+`version`, `daemon status` and `emit` printed with `println!` too, and crashed
+the same way. They now print through `print_line`, which stops with success on
+a closed pipe.
+
 Tests: `audit_stops_quietly_when_its_reader_closes_the_pipe`,
 `audit_follow_stops_quietly_when_its_reader_closes_the_pipe`,
+`version_stops_quietly_when_its_reader_has_closed_the_pipe`,
+`status_and_emit_stop_quietly_when_their_reader_has_closed_the_pipe`,
 `following_stops_with_what_each_breaks_with_among_the_recent_runs` and
 `following_stops_with_what_each_breaks_with_on_a_new_run`.
 
