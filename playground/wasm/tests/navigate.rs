@@ -38,7 +38,9 @@ fn browser_examples_match_the_schema_and_expected_results() {
         );
     }
 
-    assert!(count > 0);
+    // The seven examples the page's picker offers, so one added or dropped
+    // shows up here as well as on the page.
+    assert_eq!(count, 7);
 }
 
 fn triage() -> Value {
@@ -211,4 +213,27 @@ fn a_request_over_a_limit_is_rejected_as_a_caller_sees_it() {
     assert_eq!(reply["rejected"]["data"]["reason"], "limit_exceeded");
     assert_eq!(reply["rejected"]["data"]["max"], 30_000);
     assert!(navigated(&json!({ "nope": 1 }))["error"].is_string());
+}
+
+#[test]
+fn a_misspelled_key_names_the_field_the_input_does_not_have() {
+    let reply = navigated(&json!({
+        "request": { "protocol": 1, "on": "sourcefed.event", "evidence": { "event": "x" } },
+        "answer": { "screen": { "yes": 0.9, "no": 0.1 } }
+    }));
+
+    let error = reply["error"].as_str().unwrap();
+    assert!(error.contains("unknown field `answer`"), "{error}");
+}
+
+/// The daemon rejects the request before it reads any answer, so a caller
+/// sees `unsupported_protocol`, not a malformed answer it would never use.
+#[test]
+fn a_rejection_wins_over_a_malformed_answer() {
+    let reply = navigated(&json!({
+        "request": { "protocol": 2 },
+        "answers": { "x": 42 }
+    }));
+
+    assert_eq!(reply["rejected"]["data"]["reason"], "unsupported_protocol");
 }

@@ -22,6 +22,7 @@ enum Reply {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     request: Value,
     /// Rule files by ID, as the daemon would load them.
@@ -51,11 +52,13 @@ pub fn navigate(input: &str) -> String {
 
 fn navigate_json(input: &str) -> Result<Value, String> {
     let input: Input = serde_json::from_str(input).map_err(|error| error.to_string())?;
-    let answers = parse_answers(input.answers)?;
     let request = match Navigate::parse(&input.request) {
         Ok(request) => request,
         Err(rejection) => return Ok(json!({ "rejected": rejection.to_error() })),
     };
+    // The daemon never reads an answer for a request it rejects, so a
+    // rejection is the caller's error even when the answers are malformed.
+    let answers = parse_answers(input.answers)?;
     let mut events = Vec::new();
     let mut refused = Vec::new();
     let mut steps = BTreeSet::new();

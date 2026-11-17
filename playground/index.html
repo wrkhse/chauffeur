@@ -52,7 +52,7 @@
           <wa-select label="Example" @change="load($event.target.value)">
             <wa-option v-for="name in names" :key="name" :value="name" :selected="name === example">{{ name }}</wa-option>
           </wa-select>
-          <wa-textarea label="Request, rules and stand-in replies" hint="request: chauffeur.navigate params; rules: by ID; answers: by step ID across rules, p or { failed }" :value="source" @input="update($event.target.value)" rows="24" spellcheck="false"></wa-textarea>
+          <wa-textarea label="Request, rules and stand-in replies" hint="request: chauffeur.navigate params; rules: by ID; answers: by step ID across rules, p or { failed }; an answer for a rule that does not hook the event is ignored" :value="source" @input="update($event.target.value)" rows="24" spellcheck="false"></wa-textarea>
         </div>
         <div class="wa-stack" aria-live="polite" aria-atomic="true">
           <wa-callout v-if="result && 'error' in result" variant="danger">{{ result.error }}</wa-callout>
