@@ -27,11 +27,11 @@ EOF
 {"id":1,"jsonrpc":"2.0","result":{"intents":[{"rule":"sourcefed/triage","withhold":"event"}]}}
 ```
 
-| Exit | Means                                                                      |
-| ---- | -------------------------------------------------------------------------- |
-| 0    | Intents or a verdict came back, or the stdout pipe closed                  |
-| 1    | The request was rejected or stdin failed                                   |
-| 2    | The daemon is unavailable, speaks another protocol, or stdout write failed |
+| Exit | Means                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------- |
+| 0    | Intents or a verdict came back, or the stdout pipe closed                                           |
+| 1    | The request was rejected or stdin failed                                                            |
+| 2    | The daemon is unavailable, does not answer in time, speaks another protocol, or stdout write failed |
 
 Rejections such as `busy` and `judge_unavailable` retain their reason in
 the JSON reply's `error.data.reason` and exit 1.
@@ -39,21 +39,30 @@ the JSON reply's `error.data.reason` and exit 1.
 A script tests the reply with `jq`:
 
 ```sh
-if chauffeur navigate < request.json | tail -1 \
-  | jq -e '.result.intents | any(.withhold == "event")' > /dev/null; then
-  echo "withheld"
+chauffeur navigate < request.json > reply.jsonl
+status=$?
+if [ "$status" -eq 0 ]; then
+  tail -1 reply.jsonl \
+    | jq -e '.result.intents | any(.withhold == "event")' > /dev/null \
+    && echo "withheld"
 fi
 ```
 
-It reads at most 1 MiB from stdin, including any newline. It waits for the
+A rejection or an unavailable daemon exits 1 or 2 and prints nothing, so it
+must not be read as "not withheld", which is why `jq` runs only after
+`chauffeur navigate` exits 0.
+
+The request line it writes to the daemon is limited to 1 MiB, including its
+trailing newline, so the JSON read from stdin may be a little smaller: the
+JSON-RPC envelope counts toward the limit too. It waits for the
 request's `deadline_ms`, 3 seconds by default and capped at 30 seconds, and 2
 seconds more, in all, however many events arrive. A daemon message is limited
 to 4 MiB. The socket is `$CHAUFFEUR_SOCKET`, or the installation's own.
 The wire contract is in [Slice 2](../plans/slices/slice-2.md#wire-contract).
 
-The CLI integration tests start daemons, including on test threads. On a host
-with a live daemon, use the build-only checks; run tests in CI or a disposable
-container:
+The tests in `crates/cli/tests/navigate.rs` that run by default start their
+daemons in-process, on private sockets under the temp folder, so they do not
+touch a live daemon. These checks need no daemon at all:
 
 ```sh
 cargo fmt --all -- --check
@@ -61,9 +70,10 @@ cargo clippy -p chauffeur-cli --all-targets --locked -- -D warnings
 cargo build -p chauffeur-cli --locked
 ```
 
-Two of them start processes, so they are `#[ignore]`d: one starts and kills a
-daemon, the other reads one line and closes the pipe. CI runs these two, and
-only these, with:
+Three tests spawn and kill subprocesses, so they are `#[ignore]`d; run them in
+CI or a disposable container: one starts and kills a daemon, one reads one line
+and closes the pipe, and one kills a live `chauffeur navigate` that waits on a
+slow daemon. CI runs these three, and only these, with:
 
 ```sh
 cargo nextest run -p chauffeur-cli --test navigate --run-ignored only --locked

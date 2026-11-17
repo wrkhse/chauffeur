@@ -8,10 +8,13 @@
 )]
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::mem::DropGuard;
+use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,16 @@ const PROJECTS: &str = r#"["/Users/me/src/app"]"#;
 const TRIAGE: &str = r#"{
   "on": "sourcefed.event",
   "strategy": [{ "id": "screen", "judge": "system-one",
+                 "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                          "instructions": "Should the agent be shown this event now?" } }],
+  "then": [{ "if": { "screen": "no" }, "withhold": "event" }]
+}"#;
+
+/// The triage rule with its one judge on `slow`, the stand-in.
+const SLOW_TRIAGE: &str = r#"{
+  "on": "sourcefed.event",
+  "judges": { "careful": { "tier": "system-one", "model": "slow" } },
+  "strategy": [{ "id": "screen", "judge": "careful",
                  "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
                           "instructions": "Should the agent be shown this event now?" } }],
   "then": [{ "if": { "screen": "no" }, "withhold": "event" }]
@@ -320,4 +333,168 @@ fn the_daemon_answers_from_the_models_file_it_is_given() {
         (settled["model"].as_str(), settled["placeholder"].as_bool()),
         (Some("stand-in"), Some(true))
     );
+}
+
+/// A stand-in for Jev on loopback that answers every question `delay` after
+/// it is asked. Each request is announced on the returned channel as it
+/// arrives, so a test knows the judge is being asked before it answers.
+fn slow_judge(delay: Duration) -> (String, mpsc::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (called, judge_called) = mpsc::channel();
+    thread::spawn(move || {
+        for stream in listener.incoming().filter_map(Result::ok) {
+            let called = called.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let _ = reader.read_exact(&mut vec![0; length]);
+                let _ = called.send(());
+                thread::sleep(delay);
+                let body = r#"{"answers":{"q0":{"type":"noul","noul":0.97}}}"#;
+                let _ = write!(
+                    reader.get_mut(),
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    (endpoint, judge_called)
+}
+
+/// A models file whose `slow` model is the stand-in at `endpoint`, in the
+/// `system-one` tier.
+fn slow_models(endpoint: &str) -> String {
+    json!({
+        "models": {
+            "slow": { "format": "systemone", "endpoint": endpoint, "model": "jev-latest",
+                      "key": { "env": "HOME" }, "timeout_ms": 5000 }
+        },
+        "tiers": { "system-one": ["slow"] }
+    })
+    .to_string()
+}
+
+/// The audit log's runs, oldest first, from the folder the daemon keeps its
+/// state in: `$XDG_STATE_HOME` followed by the executable's name.
+fn runs(state: &Path) -> Vec<Value> {
+    chauffeur_daemon::audit::recent(state, 256)
+        .unwrap()
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// A daemon under `root` reading `models`, waited for until it answers its
+/// socket. It is killed when its guard drops.
+fn serve(root: &Path, models: &Path) -> (Paths, Daemon) {
+    let paths = Paths {
+        socket: root.join("run/daemon.sock"),
+        ..Paths::from_env("chauffeur-test", None)
+    };
+    let daemon = Daemon(
+        Command::new(CHAUFFEUR)
+            .args(["daemon", "run", "--models"])
+            .arg(models)
+            .env("CHAUFFEUR_SOCKET", &paths.socket)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("CHAUFFEUR_DISTRIBUTION", repo("distribution"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let started = Instant::now();
+    while UnixStream::connect(&paths.socket).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the daemon did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    (paths, daemon)
+}
+
+/// Kills `chauffeur navigate` while the daemon is waiting on a slow judge:
+/// the run is recorded as cancelled, and the next call is answered rather
+/// than refused busy.
+#[test]
+#[ignore = "starts and kills a daemon and a client; run only in CI or a disposable container"]
+fn killing_chauffeur_navigate_cancels_its_run_and_frees_its_place() {
+    let root = std::env::temp_dir().join(format!("chauffeur-cli-kill-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("config/chauffeur/rules/sourcefed")).unwrap();
+    let (endpoint, judge_called) = slow_judge(Duration::from_millis(1500));
+    fs::write(root.join("slow.json"), slow_models(&endpoint)).unwrap();
+    fs::write(
+        root.join("config/chauffeur/rules/sourcefed/triage.json"),
+        SLOW_TRIAGE,
+    )
+    .unwrap();
+    let (paths, daemon) = serve(&root, &root.join("slow.json"));
+
+    let request = r#"{ "protocol": 1, "deadline_ms": 10000, "on": "sourcefed.event",
+                       "evidence": { "event": "CI failed" } }"#;
+    let mut client = DropGuard::new(
+        Command::new(CHAUFFEUR)
+            .arg("navigate")
+            .env("CHAUFFEUR_SOCKET", &paths.socket)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+        |mut client| {
+            let _ = client.kill();
+            let _ = client.wait();
+        },
+    );
+    client
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(request.as_bytes())
+        .unwrap();
+    assert!(
+        judge_called.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the judge was never asked"
+    );
+    let _ = client.kill();
+    let _ = client.wait();
+
+    // The daemon keeps its state under the executable's name, `chauffeur`.
+    let state = root.join("state/chauffeur");
+    let started = Instant::now();
+    while !runs(&state)
+        .iter()
+        .any(|run| run["rule"] == "sourcefed/triage" && run["cancelled"] == true)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            runs(&state)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // The stand-in answers yes, so this rule's `then` returns nothing; what
+    // matters is that the call was admitted and answered instead of refused.
+    let output = navigate(&paths, request);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let reply = lines(&output).pop().unwrap();
+    assert!(reply["result"]["intents"].is_array(), "{reply}");
+
+    drop(daemon);
+    let _ = fs::remove_dir_all(root);
 }

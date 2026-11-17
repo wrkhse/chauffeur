@@ -63,22 +63,27 @@ pub fn navigate(socket: &Path, input: &mut impl Read, output: &mut impl Write) -
         }
         Err(error) => return complain(&format!("cannot read stdin: {error}"), Ended::Rejected),
     };
+    let deadline = params
+        .get("deadline_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_DEADLINE_MS)
+        .min(MAX_DEADLINE_MS);
+    let request =
+        json!({ "jsonrpc": "2.0", "id": ID, "method": "chauffeur.navigate", "params": params });
+    let line = request.to_string();
+    // The daemon's limit counts the newline `writeln!` adds.
+    if line.len().saturating_add(1) > chauffeur_daemon::MAX_LINE {
+        return complain("request over 1 MiB", Ended::Rejected);
+    }
     let Ok(mut stream) = UnixStream::connect(socket) else {
         return complain(
             &format!("no daemon answers on {}", socket.display()),
             Ended::Unavailable,
         );
     };
-    let deadline = params
-        .get("deadline_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_DEADLINE_MS)
-        .min(MAX_DEADLINE_MS);
     let wait = Duration::from_millis(deadline).saturating_add(MARGIN);
     let until = Instant::now().checked_add(wait);
-    let request =
-        json!({ "jsonrpc": "2.0", "id": ID, "method": "chauffeur.navigate", "params": params });
-    if writeln!(stream, "{request}").is_err() {
+    if writeln!(stream, "{line}").is_err() {
         return complain("the daemon closed the connection", Ended::Unavailable);
     }
     let Ok(reader) = stream.try_clone() else {
@@ -152,8 +157,13 @@ fn read_lines(mut reader: impl BufRead, sender: &SyncSender<Incoming>) {
     }
 }
 
-/// Writes each line the reader sends until the reply to the request, the
+/// Writes each line the reader sends until the request's answer, the
 /// deadline, or the end of the daemon's output.
+///
+/// One request goes over each connection, so any message carrying an `error`
+/// is its answer, even the `id: null` refusal the daemon writes when it is at
+/// its connection limit. A `result` answers only when it carries the
+/// request's id.
 fn forward(
     receiver: &Receiver<Incoming>,
     until: Option<Instant>,
@@ -193,16 +203,24 @@ fn forward(
         let Ok(message) = serde_json::from_str::<Value>(text) else {
             continue;
         };
+        // One request goes over each connection, so any error is its answer,
+        // even one the daemon writes without an id at its connection limit.
+        if message.get("error").is_some() {
+            let reason = message
+                .pointer("/error/data/reason")
+                .and_then(Value::as_str);
+            return if reason == Some("unsupported_protocol") {
+                Ended::Unavailable
+            } else {
+                Ended::Rejected
+            };
+        }
         if message.get("id") != Some(&json!(ID)) {
             continue;
         }
-        let reason = message
-            .pointer("/error/data/reason")
-            .and_then(Value::as_str);
-        return match (message.get("result"), reason) {
-            (Some(_), _) => Ended::Answered,
-            (None, Some("unsupported_protocol")) => Ended::Unavailable,
-            (None, _) => Ended::Rejected,
+        return match message.get("result") {
+            Some(_) => Ended::Answered,
+            None => Ended::Rejected,
         };
     }
     complain(
@@ -230,6 +248,10 @@ fn complain(message: &str, ended: Ended) -> Ended {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
     use super::*;
 
     struct FailedWriter(io::ErrorKind);
@@ -341,6 +363,29 @@ mod tests {
         assert_eq!(output.as_slice(), format!("{rejection}\n").as_bytes());
     }
 
+    /// The daemon's connection-limit refusal carries `id: null`: it is the
+    /// request's answer all the same, so the command exits 1.
+    #[test]
+    fn a_busy_refusal_without_an_id_is_rejected() {
+        let refusal = json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "error": {
+                "code": -32_000,
+                "message": "the daemon is busy: it serves 64 connections already",
+                "data": { "reason": "busy" },
+            },
+        });
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(format!("{refusal}\n").as_bytes()).unwrap();
+        drop(peer);
+        let mut output = Vec::new();
+
+        assert_eq!(relayed(&ours, None, &mut output), Ended::Rejected);
+
+        assert_eq!(output.as_slice(), format!("{refusal}\n").as_bytes());
+    }
+
     /// A daemon that never answers must not hold the command: the deadline
     /// ends it. The peer keeps its end open past the assertion and then
     /// drops it, so a wait that never returns fails on the message instead
@@ -405,38 +450,106 @@ mod tests {
         );
     }
 
-    /// `{}` followed by spaces, so it is `size` bytes and still JSON.
-    fn padded_request(size: usize) -> Vec<u8> {
-        let mut bytes = b"{}".to_vec();
-        bytes.resize(size, b' ');
-        bytes
+    /// A socket path in a fresh folder of this test's own, short enough for
+    /// a Unix socket's path limit.
+    fn socket_path(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("chvn-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root.join("daemon.sock")
     }
 
-    #[test]
-    fn a_request_exactly_at_the_limit_reaches_the_socket() {
-        let bytes = padded_request(chauffeur_daemon::MAX_LINE);
-        let mut input = bytes.as_slice();
+    /// The request on stdin whose serialized line, the newline included, is
+    /// `size` bytes. The padding sits inside a JSON string, where spaces
+    /// survive serialization, and is counted from the real envelope rather
+    /// than assumed.
+    fn request_of_line_bytes(size: usize) -> Vec<u8> {
+        let envelope = |params: Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": ID,
+                "method": "chauffeur.navigate",
+                "params": params,
+            })
+        };
+        let empty = envelope(json!({ "pad": "" })).to_string().len();
+        let padding = size.saturating_sub(1).saturating_sub(empty);
+        assert!(padding > 0, "the line is {padding} bytes short of padding");
+        let params = json!({ "pad": " ".repeat(padding) });
+        let line = envelope(params.clone()).to_string();
         assert_eq!(
-            navigate(
-                Path::new("/nonexistent/chauffeur.sock"),
-                &mut input,
-                &mut Vec::new()
-            ),
-            Ended::Unavailable
+            line.len().saturating_add(1),
+            size,
+            "the request line is the size asked for"
         );
+        serde_json::to_vec(&params).unwrap()
     }
 
+    /// The listener's next connection, waited for at most five seconds, so a
+    /// request that never arrives fails the test instead of hanging it.
+    fn accepted(listener: &UnixListener) -> UnixStream {
+        listener.set_nonblocking(true).unwrap();
+        for _ in 0..500 {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // This platform's accepted streams inherit the listener's
+                    // nonblocking mode; the peer reads its line in full.
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("cannot accept a connection: {error}"),
+            }
+        }
+        panic!("no connection reached the listener");
+    }
+
+    /// A request whose line, its newline included, is exactly the daemon's
+    /// limit is sent and answered: the limit counts the newline `writeln!`
+    /// adds.
     #[test]
-    fn a_request_one_byte_over_the_limit_is_rejected() {
-        let bytes = padded_request(chauffeur_daemon::MAX_LINE.saturating_add(1));
-        let mut input = bytes.as_slice();
-        assert_eq!(
-            navigate(
-                Path::new("/nonexistent/chauffeur.sock"),
-                &mut input,
-                &mut Vec::new()
-            ),
-            Ended::Rejected
-        );
+    fn a_request_at_the_line_limit_is_answered() {
+        const REPLY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let path = socket_path("limit");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = thread::spawn(move || {
+            let mut stream = accepted(&listener);
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.len(), chauffeur_daemon::MAX_LINE);
+            writeln!(stream, "{REPLY}").unwrap();
+        });
+        let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE);
+        let mut input = request.as_slice();
+        let mut output = Vec::new();
+
+        assert_eq!(navigate(&path, &mut input, &mut output), Ended::Answered);
+
+        peer.join().unwrap();
+        assert_eq!(output.as_slice(), format!("{REPLY}\n").as_bytes());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A request one byte over the line limit is refused before connecting,
+    /// so the listener never sees it.
+    #[test]
+    fn a_request_one_byte_over_the_line_limit_never_connects() {
+        let path = socket_path("over");
+        let listener = UnixListener::bind(&path).unwrap();
+        let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE.saturating_add(1));
+        let mut input = request.as_slice();
+        let mut output = Vec::new();
+
+        assert_eq!(navigate(&path, &mut input, &mut output), Ended::Rejected);
+
+        listener.set_nonblocking(true).unwrap();
+        let error = listener.accept().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(output, Vec::<u8>::new());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
