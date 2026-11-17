@@ -27,17 +27,42 @@ import { eventually } from "./stand-in.ts"
 const ROOT = resolve(import.meta.dir, "../../..")
 const BIN = process.env.CHAUFFEUR_BIN
 
+type Fill = {
+  readonly at: string
+  readonly text: string
+  readonly times: number
+}
+
 type Case = {
   readonly name: string
   readonly params: Record<string, unknown>
   readonly expect?: "on" | "strategy"
   readonly reject?: { readonly reason: string; readonly limit?: string }
-  readonly fill?: readonly {
-    in: string
-    name: string
-    text: string
-    times: number
-  }[]
+  readonly fill?: readonly Fill[]
+}
+
+/**
+ * Puts `fill`'s text in `params` at its JSON pointer: `text` repeated
+ * `times`, at the last key of the pointer, which names an array index when
+ * its parent is an array.
+ */
+function apply(params: Record<string, unknown>, fill: Fill): void {
+  const cut = fill.at.lastIndexOf("/")
+  const parent = fill.at.slice(0, cut)
+  const key = fill.at.slice(cut + 1)
+  const text = fill.text.repeat(fill.times)
+  let into: Record<string, unknown> = params
+
+  for (const step of parent.split("/").filter((name) => name !== "")) {
+    const name = step.replaceAll("~1", "/").replaceAll("~0", "~")
+    into = into[name] as Record<string, unknown>
+  }
+
+  if (Array.isArray(into)) {
+    into[Number(key)] = text
+  } else {
+    into[key] = text
+  }
 }
 
 /** The fixtures, each with its `fill` applied. */
@@ -49,16 +74,10 @@ function cases(): Case[] {
   const { cases } = JSON.parse(text) as { cases: Case[] }
 
   return cases.map((each) => {
-    const params = structuredClone(each.params) as Record<
-      string,
-      Record<string, string>
-    >
+    const params = structuredClone(each.params) as Record<string, unknown>
 
     for (const fill of each.fill ?? []) {
-      params[fill.in] = {
-        ...params[fill.in],
-        [fill.name]: fill.text.repeat(fill.times)
-      }
+      apply(params, fill)
     }
 
     return { ...each, params }
@@ -117,10 +136,15 @@ describe.skipIf(!BIN)("against the real daemon", () => {
           timeout_ms: 5000
         }
       },
-      tiers: { "system-one": ["stand-in"] }
+      tiers: { "system-one": ["stand-in"], "system-two": ["stand-in"] }
     }
     mkdirSync(join(root, "config/chauffeur/rules/sourcefed"), { recursive: true })
     writeFileSync(join(root, "models.json"), JSON.stringify(models))
+    // The project the inline System Two fixture names, so the daemon runs it.
+    writeFileSync(
+      join(root, "config/chauffeur/projects.json"),
+      JSON.stringify(["/Users/me/src/app"])
+    )
     writeFileSync(
       join(root, "config/chauffeur/rules/sourcefed/triage.json"),
       JSON.stringify({
