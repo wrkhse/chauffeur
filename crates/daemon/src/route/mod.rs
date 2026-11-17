@@ -157,9 +157,12 @@ impl Router {
                 let ask = ask.clone();
                 let job: Job = Box::new(move || {
                     let announce = send.clone();
+                    // The caller's notify belongs to its own thread, so the
+                    // job reports the start here and the dispatcher sends it
+                    // on.
                     let started = move || {
-                        // A caller that stopped waiting drops this, and the run
-                        // goes on.
+                        // A caller that stopped waiting drops this, and the
+                        // run goes on.
                         let _ = announce.send((index, Report::Started));
                     };
                     // A rule that panics yields nothing, and its worker runs on.
@@ -329,11 +332,11 @@ where
     }
     // The runs stop at `deadline` and report just after it, so the finishes
     // still out are given one grace before the caller stops waiting. Each run
-    // still out is owed exactly one finish, so the count is taken here and
-    // the loop waits for that many at most.
+    // still out sends at most two messages, a start and a finish, so the loop
+    // is bounded by twice their count and no comparison holds it open.
     let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
-    let mut results = outstanding;
-    while results > 0 {
+    let owed = outstanding.saturating_mul(2);
+    for _ in 0..owed {
         let left = bound.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -343,10 +346,7 @@ where
         };
         match report {
             Report::Started => started(index),
-            Report::Finished(done) => {
-                results = results.saturating_sub(1);
-                arrived(index, done);
-            }
+            Report::Finished(done) => arrived(index, done),
         }
     }
     pending.map(|(index, _)| index).collect()
@@ -434,7 +434,9 @@ mod tests {
 
     /// A job still running when the deadline passes holds its worker, so the
     /// item after it never starts: the dispatcher reports that index and
-    /// returns without waiting for the job still out.
+    /// returns without waiting for the job still out. Each job sleeps for
+    /// 500 ms, so a call that waited for one fails the bound instead of
+    /// hanging the test.
     #[test]
     fn a_job_past_the_deadline_leaves_the_items_after_it_unstarted() {
         let pool = Pool::new(1, 1);
@@ -443,7 +445,7 @@ mod tests {
         let arrived = Arc::new(Mutex::new(Vec::new()));
         let began = Instant::now();
         let deadline = began
-            .checked_add(Duration::from_millis(30))
+            .checked_add(Duration::from_millis(50))
             .unwrap_or_else(Instant::now);
 
         let unstarted = dispatch(
@@ -455,7 +457,7 @@ mod tests {
                 Box::new(move || {
                     let _ = send.send((index, Report::Started));
                     // Longer than the deadline and its grace together.
-                    thread::sleep(Duration::from_millis(300));
+                    thread::sleep(Duration::from_millis(500));
                     let _ = send.send((index, Report::Finished(item)));
                 })
             },
@@ -467,16 +469,16 @@ mod tests {
         assert_eq!(
             unstarted,
             [1],
-            "the item after the running job never starts"
+            "only the item no worker could start comes back"
         );
         assert_eq!(
             *announced.lock().unwrap(),
             [0],
-            "the item that started is announced"
+            "the item that started is announced exactly once"
         );
         assert!(
-            elapsed < Duration::from_millis(300),
-            "the call returns without the slow job: {elapsed:?}"
+            elapsed < Duration::from_millis(250),
+            "the call returns well inside the slow jobs: {elapsed:?}"
         );
         assert!(
             arrived.lock().unwrap().is_empty(),

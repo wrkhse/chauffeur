@@ -261,7 +261,9 @@ impl Intent {
 ```
 
 `progress` turns a run into what the caller sees: the `chauffeur.event`
-params, without the request's `id`, and the verdict by step.
+params, which the progress helpers build, and the verdict by step. A helper
+leaves the id out; the socket adds the id of the call that produced each
+event to its params, so every `chauffeur.event` carries the caller's id.
 
 ```rust
 pub mod progress {
@@ -408,6 +410,8 @@ pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
 pub enum Ran {
     Settled(Run<Answer>),
     Refused(String),
+    Busy,
+    Stopped,
     Deadline,
     Cancelled,
 }
@@ -449,7 +453,8 @@ pub enum Waited<T> {
     Done(T),
     Deadline,
     Cancelled,
-    Refused(String),
+    Busy,
+    Stopped,
 }
 
 impl Pool {
@@ -541,11 +546,14 @@ pub const MAX_LINE: usize;
 
 The router admits each call for its source; the call releases its permit before
 its reply is written, and a job still running keeps a copy until its worker is
-free. `navigate` sends `rule_matched` for every hooked rule first, then each
-rule's `round_ready` and `step_settled` as it settles, at most 4,096 events,
-and returns the intents in the order the rules load. An inline strategy whose
-judge has no model is `judge_unavailable` before it runs, and one past its
-deadline is `deadline`.
+free. `navigate` sends a rule's `rule_matched` as its run starts, not when it
+matches, then its `round_ready` and `step_settled` as they settle, at most
+4,096 events, and returns the intents in the order the rules load. A rule that
+finds no worker before the deadline runs nothing and sends no event; it earns
+an audit line of its own,
+`{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. An inline
+strategy whose judge has no model is `judge_unavailable` before it runs, and
+one past its deadline is `deadline`.
 
 ```rust
 impl Router {

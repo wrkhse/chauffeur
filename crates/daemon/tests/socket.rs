@@ -167,10 +167,9 @@ fn runs(paths: &Paths) -> Vec<Value> {
         .collect()
 }
 
-/// A stand-in for Jev on loopback that answers every question yes, each
-/// request after `delay`, as many requests as come. Its models file names the
-/// key `HOME`, which every test process has.
-fn slow_jev(delay: Duration) -> String {
+/// The endpoint of a stand-in for Jev on loopback that answers every
+/// question yes, each request after `delay`, as many requests as come.
+fn jev_answers_after(delay: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     thread::spawn(move || {
@@ -199,10 +198,34 @@ fn slow_jev(delay: Duration) -> String {
             });
         }
     });
+    endpoint
+}
+
+/// A stand-in for Jev on loopback that answers every question yes, each
+/// request after `delay`, as many requests as come. Its models file names the
+/// key `HOME`, which every test process has.
+fn slow_jev(delay: Duration) -> String {
     json!({
-        "models": { "slow": { "format": "systemone", "endpoint": endpoint, "model": "jev-latest",
-                              "key": { "env": "HOME" }, "timeout_ms": 5000 } },
+        "models": { "slow": { "format": "systemone", "endpoint": jev_answers_after(delay),
+                              "model": "jev-latest", "key": { "env": "HOME" },
+                              "timeout_ms": 5000 } },
         "tiers": { "system-one": ["slow"] }
+    })
+    .to_string()
+}
+
+/// The tier's placeholder, which answers at once, beside a `slow` model that
+/// answers after `delay` and gives up only after `timeout_ms`, so its run is
+/// still going when the daemon's write of one message reaches its own timeout.
+fn slow_jev_beside_placeholder(delay: Duration, timeout_ms: u64) -> String {
+    json!({
+        "models": {
+            "stand-in": { "format": "placeholder", "otherwise": { "yes": 0.94, "no": 0.06 } },
+            "slow": { "format": "systemone", "endpoint": jev_answers_after(delay),
+                      "model": "jev-latest", "key": { "env": "HOME" },
+                      "timeout_ms": timeout_ms }
+        },
+        "tiers": { "system-one": ["stand-in"] }
     })
     .to_string()
 }
@@ -727,6 +750,86 @@ fn events_at_once_in_one_session_return_the_action_once_per_cooldown() {
         .count();
     let cooling = runs.iter().filter(|run| run["cooldown"] == true).count();
     assert_eq!((returned, cooling), (1, 3), "{runs:?}");
+}
+
+/// A client that stops reading lets the socket's buffers fill, so the write
+/// of one progress message runs out the 5 seconds a message gets: the wire is
+/// marked dead and the connection's still-running call is cancelled, which
+/// the audit log records.
+#[test]
+fn a_client_that_stops_reading_is_cancelled_at_a_messages_write_timeout() {
+    let paths = paths(
+        "stalled",
+        &slow_jev_beside_placeholder(Duration::from_secs(10), 20_000),
+    );
+    // One round of 32 steps with long IDs: its `round_ready` is far larger
+    // than a socket's buffers, so its write blocks once they are full.
+    let long_id = "s".repeat(15 * 1024);
+    let steps: Vec<Value> = (0..32)
+        .map(|index| {
+            json!({ "id": format!("{index:02}-{long_id}"), "judge": "quick",
+                    "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                             "instructions": "Is it noise?" } })
+        })
+        .collect();
+    fs::write(
+        paths.config.join("rules/big.json"),
+        json!({ "on": "sourcefed.event",
+                "judges": { "quick": { "tier": "system-one" } },
+                "strategy": steps })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        paths.config.join("rules/slow.json"),
+        json!({ "on": "sourcefed.event",
+                "judges": { "careful": { "tier": "system-one", "model": "slow" } },
+                "strategy": [{ "id": "wait", "judge": "careful",
+                               "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                                        "instructions": "Should this be shown?" } }] })
+        .to_string(),
+    )
+    .unwrap();
+    start(&paths);
+
+    // The client never reads. The deadline is past the write timeout, so
+    // only the dead wire ends the slow run.
+    let mut client = UnixStream::connect(&paths.socket).unwrap();
+    let started = Instant::now();
+    writeln!(
+        client,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "chauffeur.navigate",
+                "params": { "protocol": 1, "on": "sourcefed.event",
+                            "deadline_ms": 30_000, "evidence": { "event": "CI failed" } } })
+    )
+    .unwrap();
+
+    let cancelled = loop {
+        if let Some(run) = runs(&paths)
+            .into_iter()
+            .find(|run| run["rule"] == "slow" && run["cancelled"] == true)
+        {
+            break run;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the run was not cancelled at the write timeout: {:?}",
+            runs(&paths)
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "the write gave up without waiting its budget: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(cancelled["event"], "sourcefed.event", "{cancelled}");
+    assert_eq!(
+        call(&paths.socket, "chauffeur.status", &Value::Null)["protocol"],
+        1,
+        "the daemon still serves other connections"
+    );
 }
 
 /// A notification runs nothing, whatever its method: the emit it names

@@ -5,6 +5,10 @@ a caller does, and prints each JSON-RPC message that comes back: the run's
 events as they happen, then the intents or, for an inline strategy, the
 verdict. For hook scripts, Git hooks and CI on the same machine.
 
+A `chauffeur.event` carries, in `params`, the `id` of the call that produced
+it, added by the daemon, so events from two calls on one connection stay
+apart.
+
 ```sh
 chauffeur navigate <<'EOF'
 { "protocol": 1, "deadline_ms": 3000, "on": "sourcefed.event",

@@ -46,15 +46,24 @@ chauffeur daemon run --models fixtures/placeholders.json
   most 16 calls open on one connection, and at most 4 of them may be
   `chauffeur.navigate`; a fifth is refused as `busy` until one finishes. An
   ID already open is refused too. `$/cancelRequest` cancels a call by its ID,
-  and a connection that closes, or stops reading for 5 seconds, cancels
-  everything it carried. A connection with no call open that sends nothing
-  for 30 seconds is closed.
+  and a connection that closes cancels everything it carried. A write of one
+  message that takes over 5 seconds does the same: nothing more is written
+  and the connection is shut. A connection with no call open that sends
+  nothing for 30 seconds is closed.
 - **Notifications run nothing.** A request with no `id` is ignored, except
   `$/cancelRequest`: no method runs and no reply is written.
-- **Admission.** At most 16 calls run at once, 8 from harnesses
-  (`chauffeur.emit`) and 8 from callers (`chauffeur.navigate`); past that a
-  call is refused as `busy` at once, never queued.
-- **Every run** goes to the audit log; see [`audit`](audit.md).
+- **Admission.** Two limits count calls, not connections: the daemon's
+  capacity of 16 calls, and each source's share of 8: 8 for harnesses
+  (`chauffeur.emit`), 8 for callers (`chauffeur.navigate`). Past either, a
+  call is refused as `busy` at once, never queued, with a message naming the
+  limit reached:
+  `the daemon is busy: this caller's share of 8 calls is in use` or
+  `the daemon is busy: the daemon's capacity of 16 calls is in use`.
+  A connection's own caps are separate: 16 open calls, 4 of them navigations.
+- **Every run** goes to the audit log, with a line of its own for a rule no
+  worker started before the deadline,
+  `{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. See
+  [`audit`](audit.md).
 
 As a service:
 

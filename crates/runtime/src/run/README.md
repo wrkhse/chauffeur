@@ -24,7 +24,7 @@ sequenceDiagram
     else fewer than 32 alive for this source
         P->>W: start a new worker
     else 32 alive for this source
-        P-->>C: Refused
+        P-->>C: Busy
     end
     W->>W: cancelled or past the deadline? stop before the round
     W-->>C: Settled or Refused, unless the deadline or a cancel came first
@@ -49,7 +49,9 @@ let ran = run_strategy(&context, &rule, &evidence, deadline, &cancel);
 
 match ran {
     Ran::Settled(run) => { /* the verdict; ran.then(&rule) is what it returns */ }
-    Ran::Refused(reason) => { /* the strategy could not run */ }
+    Ran::Refused(reason) => { /* a judge or model failed; reason says why */ }
+    Ran::Busy => { /* the pool could not start a worker */ }
+    Ran::Stopped => { /* the worker stopped without a result */ }
     Ran::Deadline | Ran::Cancelled => { /* a late result is dropped */ }
 }
 ```
@@ -62,5 +64,12 @@ use chauffeur_runtime::{Cancel, Pool, Source, Waited, within};
 let pool = Pool::new(2, 4);
 
 let waited = within(&pool, deadline, &Cancel::new(Source::Harness), |_, _| 42);
-assert_eq!(waited, Waited::Done(42));
+
+match waited {
+    Waited::Done(value) => { /* the job's value; here, 42 */ }
+    Waited::Deadline => { /* the job did not finish in time */ }
+    Waited::Cancelled => { /* the caller cancelled it */ }
+    Waited::Busy => { /* no worker could start the job */ }
+    Waited::Stopped => { /* the worker stopped without a result */ }
+}
 ```

@@ -52,7 +52,8 @@ The same run with `--brief`, in local time:
 | Answered                                                          | `steps`: each step's `answer`, or `failed` with the reason |
 | Was cooling down                                                  | `"cooldown": true`, and no steps                           |
 | Could not run, such as a placeholder whose answers would not load | `refused` with the reason                                  |
-| Missed its deadline                                               | `"deadline": true`                                         |
+| Started, and its deadline came first                              | `"deadline": true`                                         |
+| Never started, as the deadline came first                         | `"skipped": "deadline"`, and no `elapsed_ms` or `returned` |
 | Returned something                                                | `returned`: the action or intent                           |
 
 The log is `audit.jsonl` in `~/.local/state/<name>/`, a folder only you can
