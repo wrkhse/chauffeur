@@ -1,0 +1,323 @@
+{
+  "sourcefed: noise is withheld": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "thanks, looks good 👍",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {
+        "sourcefed/triage": {
+          "on": "sourcefed.event",
+          "judges": {
+            "quick": {
+              "tier": "system-one",
+              "confidence": 0.7
+            }
+          },
+          "strategy": [
+            {
+              "id": "screen",
+              "judge": "quick",
+              "ask": {
+                "outcomes": [
+                  "yes",
+                  "no"
+                ],
+                "evidence": [
+                  "event",
+                  "thread",
+                  "monitor"
+                ],
+                "instructions": "Should the agent be shown this event now?"
+              }
+            }
+          ],
+          "then": [
+            {
+              "if": {
+                "screen": "no"
+              },
+              "withhold": "event"
+            }
+          ]
+        }
+      },
+      "answers": {
+        "screen": {
+          "yes": 0.06,
+          "no": 0.94
+        }
+      }
+    },
+    "valid": true,
+    "pointer": "/result/intents",
+    "expected": [
+      {
+        "rule": "sourcefed/triage",
+        "withhold": "event"
+      }
+    ]
+  },
+  "sourcefed: a CI failure is delivered": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "CI failed on main: 3 tests",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {
+        "sourcefed/triage": {
+          "on": "sourcefed.event",
+          "judges": {
+            "quick": {
+              "tier": "system-one",
+              "confidence": 0.7
+            }
+          },
+          "strategy": [
+            {
+              "id": "screen",
+              "judge": "quick",
+              "ask": {
+                "outcomes": [
+                  "yes",
+                  "no"
+                ],
+                "evidence": [
+                  "event",
+                  "thread",
+                  "monitor"
+                ],
+                "instructions": "Should the agent be shown this event now?"
+              }
+            }
+          ],
+          "then": [
+            {
+              "if": {
+                "screen": "no"
+              },
+              "withhold": "event"
+            }
+          ]
+        }
+      },
+      "answers": {
+        "screen": {
+          "yes": 0.95,
+          "no": 0.05
+        }
+      }
+    },
+    "valid": true,
+    "pointer": "/result/intents",
+    "expected": []
+  },
+  "sourcefed: unsure is delivered": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "which doc?",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {
+        "sourcefed/triage": {
+          "on": "sourcefed.event",
+          "judges": {
+            "quick": {
+              "tier": "system-one",
+              "confidence": 0.7
+            }
+          },
+          "strategy": [
+            {
+              "id": "screen",
+              "judge": "quick",
+              "ask": {
+                "outcomes": [
+                  "yes",
+                  "no"
+                ],
+                "evidence": [
+                  "event",
+                  "thread",
+                  "monitor"
+                ],
+                "instructions": "Should the agent be shown this event now?"
+              }
+            }
+          ],
+          "then": [
+            {
+              "if": {
+                "screen": "no"
+              },
+              "withhold": "event"
+            }
+          ]
+        }
+      },
+      "answers": {
+        "screen": {
+          "yes": 0.48,
+          "no": 0.52
+        }
+      }
+    },
+    "valid": true,
+    "pointer": "/result/intents",
+    "expected": []
+  },
+  "sourcefed: a timed-out judge is delivered": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "deploy is on fire",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {
+        "sourcefed/triage": {
+          "on": "sourcefed.event",
+          "judges": {
+            "quick": {
+              "tier": "system-one",
+              "confidence": 0.7
+            }
+          },
+          "strategy": [
+            {
+              "id": "screen",
+              "judge": "quick",
+              "ask": {
+                "outcomes": [
+                  "yes",
+                  "no"
+                ],
+                "evidence": [
+                  "event",
+                  "thread",
+                  "monitor"
+                ],
+                "instructions": "Should the agent be shown this event now?"
+              }
+            }
+          ],
+          "then": [
+            {
+              "if": {
+                "screen": "no"
+              },
+              "withhold": "event"
+            }
+          ]
+        }
+      },
+      "answers": {
+        "screen": {
+          "failed": "timeout"
+        }
+      }
+    },
+    "valid": true,
+    "pointer": "/result/intents",
+    "expected": []
+  },
+  "An inline strategy's verdict": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "done",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "answers": {
+        "done": {
+          "yes": 0.91,
+          "no": 0.09
+        }
+      }
+    },
+    "valid": true,
+    "pointer": "/result/verdict/done/answer/outcome",
+    "expected": "yes"
+  },
+  "Over the deadline limit": {
+    "input": {
+      "request": {
+        "protocol": 1,
+        "deadline_ms": 60000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "x",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {}
+    },
+    "valid": false,
+    "pointer": "/rejected/data/reason",
+    "expected": "limit_exceeded"
+  },
+  "Another protocol": {
+    "input": {
+      "request": {
+        "protocol": 2,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "evidence": {
+          "event": "x",
+          "thread": "PR #42: feat(cli): add navigate",
+          "monitor": "PR #42 in wrkhse/chauffeur"
+        }
+      },
+      "rules": {}
+    },
+    "valid": false,
+    "pointer": "/rejected/data/reason",
+    "expected": "unsupported_protocol"
+  }
+}

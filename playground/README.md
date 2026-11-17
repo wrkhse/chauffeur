@@ -11,9 +11,18 @@ its own tab.
 - **Tabs:** each slice adds the tab for its feature. _Question_ settles a
   question's probabilities under a confidence with `chauffeur-judges`, as the
   daemon does: an outcome, `unsure`, or `failed` for a reply that is not an
-  answer.
+  answer. _Navigate_ checks a `chauffeur.navigate` request with
+  `chauffeur-protocol` and runs it against rule files, each step answered by
+  a stand-in reply: the events a caller receives, then the intents or the
+  verdict, or the rejection.
 - **Check:** `bun run check` builds the release module and the page, and
   type-checks.
+
+Navigate keys stand-in answers by step ID across all rules. Matching rules run
+one after another in rule ID order; the daemon runs them concurrently, so the
+order of their run events can differ. It does not model cooldowns, deadlines
+during a run, `judge_unavailable` for an inline strategy without a model, busy
+or cancelled requests, redaction, or the 4,096-event cap.
 
 ## Adding a feature tab
 

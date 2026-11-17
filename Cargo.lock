@@ -241,7 +241,10 @@ dependencies = [
 name = "chauffeur-playground"
 version = "1.0.0-rc.4"
 dependencies = [
+ "chauffeur-core",
  "chauffeur-judges",
+ "chauffeur-protocol",
+ "jsonschema",
  "serde",
  "serde_json",
  "wasm-bindgen",

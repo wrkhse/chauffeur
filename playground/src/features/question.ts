@@ -54,7 +54,6 @@ export const question: Feature = {
       update(source) {
         this.source = source
         try {
-          JSON.parse(source)
           this.result = JSON.parse(settle(source)) as Settled
         } catch (error) {
           this.result = { error: error instanceof Error ? error.message : String(error) }
