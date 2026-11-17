@@ -76,14 +76,11 @@ fn send_oversized(socket: &Path, line: &str) -> Value {
             .take(u64::try_from(chauffeur_daemon::MAX_LINE).unwrap())
             .read_line(&mut reply);
         // Do this before examining either result: even a read timeout must
-        // release a writer blocked by a daemon that no longer reads.
-        let closed = stream.shutdown(Shutdown::Both);
+        // release a writer blocked on a daemon that stopped reading. Its
+        // result is ignored: the daemon may already have closed, and
+        // platforms disagree on the error (macOS often gives EINVAL).
+        let _ = stream.shutdown(Shutdown::Both);
         let written = writing.join();
-
-        assert!(
-            closed.is_ok() || closed.is_err_and(|error| error.kind() == ErrorKind::NotConnected),
-            "cannot shut down the test connection"
-        );
 
         assert!(written.is_ok(), "the oversized writer panicked");
 
