@@ -420,7 +420,7 @@ cancellation every 10 ms. The job is handed the deadline and the
 cancellation to check before each round. Plans have one round until slice 3
 adds `after`; that slice moves the check into `Plan::run` as a closure.
 Whatever arrives after the deadline or a cancel is dropped. Each source has
-its own pool, with 8 workers waiting and 16 alive at most, so integration
+its own pool, with 8 workers waiting and 32 alive at most, so integration
 work cannot occupy harness workers; past that a job is refused.
 
 ```rust

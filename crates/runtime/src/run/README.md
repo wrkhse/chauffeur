@@ -21,9 +21,9 @@ sequenceDiagram
     C->>P: execute the strategy's run
     alt a worker waits
         P->>W: hand it the run
-    else fewer than 16 alive for this source
+    else fewer than 32 alive for this source
         P->>W: start a new worker
-    else 16 alive for this source
+    else 32 alive for this source
         P-->>C: Refused
     end
     W->>W: cancelled or past the deadline? stop before the round
@@ -35,7 +35,7 @@ Starting a thread for every run took about a tenth of a rule's run, so
 workers are kept. A run that outlives its deadline keeps its worker busy
 until its models time out; the next run takes another worker, or starts one,
 so it is never held up. At most 8 workers wait between runs, enough for
-every rule one event hooks to start at once, and at most 16 per source are alive. A job retains the navigation's permit
+every rule one event hooks to start at once, and at most 32 per source are alive. A job retains the navigation's permit
 until it really finishes; cancelling its wait cannot refill its share.
 Separate source pools keep integration work off harness workers.
 

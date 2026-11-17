@@ -20,9 +20,11 @@ pub use wait::{Cancel, Waited, within};
 /// by one event to start at once.
 const KEEP: usize = 8;
 
-/// The most workers alive per source class. Separate pools ensure slow
-/// integration calls never occupy the harness's workers.
-const MAX_WORKERS: usize = 16;
+/// The most workers alive in each source's pool. Each pool is twice the daemon's
+/// whole capacity, so runs that outlive their deadline, still waiting on their
+/// models, leave room for new ones, and integration work never occupies harness
+/// workers.
+const MAX_WORKERS: usize = 32;
 
 /// The workers every run in this process shares.
 static HARNESS_WORKERS: LazyLock<Pool> = LazyLock::new(|| Pool::new(KEEP, MAX_WORKERS));
