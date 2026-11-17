@@ -163,7 +163,28 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
       - run: bun install --frozen-lockfile
-      - run: bun run check
+      # wasm-pack optimises with a wasm-opt found on PATH before downloading
+      # one of its own, and the binary it downloads rejects the toolchain's
+      # --enable-bulk-memory-opt; binaryen 133 is the release that knows it.
+      - name: binaryen version_133, so wasm-pack's wasm-opt knows the toolchain's flags
+        env:
+          # Pinned from the release's .sha256 file, so the download is checked
+          # without fetching that file at run time.
+          BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/binaryen-version_133-x86_64-linux.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz"
+          echo "$BINARYEN_SHA256  $tarball" | sha256sum --check
+          tar -xzf "$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      # wasm-pack takes the wasm-opt first on PATH, which is the binaryen above.
+      - name: bun run check
+        run: |
+          set -euo pipefail
+          wasm-opt --version 2>&1 | grep -F 'version 133'
+          bun run check
 
   package:
     strategy:
