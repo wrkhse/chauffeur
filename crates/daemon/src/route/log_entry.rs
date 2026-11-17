@@ -83,3 +83,54 @@ fn answer_json(answer: &Answer) -> Value {
         "placeholder": answer.by().placeholder,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use chauffeur_runtime::Ran;
+    use serde_json::{Map, Value, json};
+
+    use super::{ended, unsettled};
+
+    /// Each way a run can end without settling writes its own word into its
+    /// log entry, and gives no run back: a refusal's reason, the pool's own
+    /// words for a busy pool and a stopped worker, and a flag for the
+    /// deadline and the caller's cancellation. A settled run writes its steps
+    /// and gives its run back, which needs a verdict only core builds; the
+    /// socket's nudge test covers that line.
+    #[test]
+    fn each_unsettled_end_writes_its_own_word_and_gives_no_run_back() {
+        let cases: [(Ran, Value, Option<&'static str>); 5] = [
+            (
+                Ran::Refused("no system-one model is registered".to_owned()),
+                json!({ "refused": "no system-one model is registered" }),
+                Some("refused"),
+            ),
+            (
+                Ran::Busy,
+                json!({ "refused": "the pool could not start the run" }),
+                Some("busy"),
+            ),
+            (
+                Ran::Stopped,
+                json!({ "refused": "the run's worker stopped" }),
+                Some("stopped"),
+            ),
+            (Ran::Deadline, json!({ "deadline": true }), Some("deadline")),
+            (
+                Ran::Cancelled,
+                json!({ "cancelled": true }),
+                Some("cancelled"),
+            ),
+        ];
+
+        for (ran, logged, word) in cases {
+            assert_eq!(unsettled(&ran), word, "the word for {logged}");
+
+            let mut entry = Map::new();
+            let run = ended(&mut entry, ran);
+
+            assert!(run.is_none(), "no run comes back for {logged}");
+            assert_eq!(Value::Object(entry), logged);
+        }
+    }
+}

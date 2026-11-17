@@ -349,7 +349,10 @@ where
     // all inside that bound ends the wait too.
     drop(send);
     let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
-    while outstanding > 0 {
+    loop {
+        if outstanding == 0 {
+            break;
+        }
         let left = bound.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -380,7 +383,7 @@ fn finished<T>(receive: &Receiver<(usize, T)>, wait: Duration) -> Option<(usize,
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -584,6 +587,86 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(300),
             "the call returns without a start per job: {elapsed:?}"
+        );
+    }
+
+    /// A start reaches the caller while the dispatcher is still starting
+    /// jobs, not after the last one has started. One worker runs two jobs:
+    /// the first holds its worker until its start is announced, so the
+    /// second can only find a worker free once the announcement has come,
+    /// and the two finishes follow in the order the jobs began.
+    #[test]
+    fn a_start_is_announced_before_the_job_that_waits_for_a_worker_begins() {
+        let pool = Pool::new(1, 1);
+        let items = [0_usize, 1];
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let next = Arc::new(AtomicUsize::new(0));
+        let announced = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+
+        let unstarted = dispatch(
+            &pool,
+            deadline,
+            &items,
+            |index, item: &usize, send| {
+                let (item, order, announced) = (*item, Arc::clone(&order), Arc::clone(&announced));
+                Box::new(move || {
+                    order.lock().unwrap().push(format!("job {item} began"));
+                    let _ = send.send((index, Report::Started));
+                    // The first job gives up its worker only once its start
+                    // has been announced, so the second has to wait for it.
+                    if item == 0 {
+                        let began = Instant::now();
+                        while !announced.load(Ordering::SeqCst)
+                            && began.elapsed() < Duration::from_secs(1)
+                        {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                    let _ = send.send((index, Report::Finished(item)));
+                })
+            },
+            |index| {
+                order
+                    .lock()
+                    .unwrap()
+                    .push(format!("job {index} was announced"));
+                if index == 0 {
+                    announced.store(true, Ordering::SeqCst);
+                }
+            },
+            |index, value| {
+                assert_eq!(
+                    next.fetch_add(1, Ordering::SeqCst),
+                    index,
+                    "each finish comes in the order its job began"
+                );
+                assert_eq!(value, index, "a finish is the job's own");
+                order.lock().unwrap().push(format!("finish {index} came"));
+            },
+        );
+
+        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
+        let order = order.lock().unwrap().clone();
+        let at = |step: &str| {
+            order
+                .iter()
+                .position(|entry| entry == step)
+                .unwrap_or_else(|| panic!("{step} never came: {order:?}"))
+        };
+        assert!(
+            at("job 0 was announced") < at("job 1 began"),
+            "the run that waits is announced before it begins: {order:?}"
+        );
+        assert_eq!(
+            order
+                .iter()
+                .filter(|step| step.starts_with("finish"))
+                .count(),
+            items.len(),
+            "every finish came once: {order:?}"
         );
     }
 
