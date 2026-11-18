@@ -48,7 +48,9 @@ chauffeur daemon run --models fixtures/placeholders.json
   ID already open is refused too. `$/cancelRequest` cancels a call by its ID,
   and a connection that closes cancels everything it carried. A write of one
   message that takes over 5 seconds does the same: nothing more is written
-  and the connection is shut. A connection with no call open that sends
+  and the connection is shut. A cancelled call answers `-32800` with
+  `data.reason` `cancelled`, even if it panicked; any other panic answers
+  `-32603` `internal error`. A connection with no call open that sends
   nothing for 30 seconds is closed.
 - **Notifications run nothing.** A request with no `id` is ignored, except
   `$/cancelRequest`: no method runs and no reply is written.
@@ -59,9 +61,9 @@ chauffeur daemon run --models fixtures/placeholders.json
   limit reached:
   `the daemon is busy: this caller's share of 8 calls is in use` or
   `the daemon is busy: the daemon's capacity of 16 calls is in use`.
-  Because 16 is exactly 8 + 8, both shares cannot be full at once, so a
-  refused call always names its share; the capacity message is for a
-  capacity smaller than the two shares together.
+  The capacity fills only when both shares are full, and the share is
+  checked first, so with 16 = 8 + 8 a refusal names its share; the capacity
+  message appears only for a capacity below the shares' sum.
   A connection's own caps are separate: 16 open calls, 4 of them navigations.
 - **Every run** goes to the audit log, with a line of its own for a rule no
   worker started before the deadline,

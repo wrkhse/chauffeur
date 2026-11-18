@@ -196,7 +196,8 @@ fn error_object(code: i64, message: &str) -> Value {
 
 /// `Rejection::Busy`'s error, with a message naming the limit that was
 /// reached and the number the refusal carries: the caller's share of calls,
-/// or the daemon's capacity.
+/// or the daemon's capacity. A limit a newer runtime adds gets a plain
+/// message.
 fn busy_error(busy: Busy) -> Value {
     let message = match busy.limit {
         Limit::Share(calls) => {
@@ -205,6 +206,9 @@ fn busy_error(busy: Busy) -> Value {
         Limit::Global(calls) => {
             format!("the daemon is busy: the daemon's capacity of {calls} calls is in use")
         }
+        // A limit a newer runtime adds is still a busy refusal; this build
+        // has no name or number for it.
+        _ => "the daemon is busy".to_owned(),
     };
 
     let mut error = Rejection::Busy.to_error();

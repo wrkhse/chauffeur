@@ -646,11 +646,8 @@ fn past_the_connection_limit_a_caller_is_told_so_and_served_once_one_closes() {
         r#"{ "jsonrpc": "2.0", "id": 7, "method": "chauffeur.status" }"#,
     );
     assert_eq!(refused["error"]["code"], -32_000, "{refused}");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("busy"),
+    assert_eq!(
+        refused["error"]["message"], "the daemon is busy: it serves 64 connections already",
         "{refused}"
     );
 

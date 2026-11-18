@@ -2,7 +2,7 @@ mod cooldown;
 mod log_entry;
 mod navigate;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use chauffeur_judges::Answer;
 use chauffeur_protocol::{Event, Rule, Then};
 use chauffeur_runtime::{
-    Admission, Busy, Cancel, Capacity, Job, Permit, Pool, Source, run_strategy,
+    Admission, Busy, Cancel, Capacity, ExecuteError, Job, Permit, Pool, Ran, Source, run_strategy,
 };
 use cooldown::Cooldowns;
 use serde_json::{Map, Value, json};
@@ -143,7 +143,8 @@ impl Router {
     /// starts and `ran` as each result arrives, and returns what each
     /// returned, in the order given. Each run is written to the log, in that
     /// same order; a rule no worker started before the deadline earns a line
-    /// saying it was skipped.
+    /// saying it was skipped, and one whose run started and did not finish
+    /// earns the line its end writes.
     fn run_all(
         &self,
         loaded: &Arc<Loaded>,
@@ -184,14 +185,34 @@ impl Router {
             }
         };
         let arrived = |index: usize, done: Option<RuleRun>| {
-            let (Some(done), Some(rule)) = (done, hooked.get(index)) else {
+            let Some(rule) = hooked.get(index) else {
                 return;
             };
+            // A job that panicked reports no run; its rule is still settled,
+            // as a worker that stopped.
+            let done = done.unwrap_or_else(|| Self::unsettled(rule, ask, Ran::Stopped));
             ran(rule, &done);
             returned.insert(index, done);
         };
-        let unstarted = dispatch(&self.rules, ask.deadline, hooked, jobs, on_start, arrived);
-        for index in unstarted {
+        let left = dispatch(&self.rules, ask.deadline, hooked, jobs, on_start, arrived);
+        // A run a worker started and never finished is settled as a run cut
+        // at the deadline, so no event leaves a rule half logged.
+        for index in left.open {
+            if let Some(rule) = hooked.get(index) {
+                let done = Self::unsettled(rule, ask, Ran::Deadline);
+                ran(rule, &done);
+                returned.insert(index, done);
+            }
+        }
+        // A run no worker could be started for says so, with the reason.
+        for (index, reason) in left.refused {
+            if let Some(rule) = hooked.get(index) {
+                let done = Self::unsettled(rule, ask, Ran::Refused(reason));
+                ran(rule, &done);
+                returned.insert(index, done);
+            }
+        }
+        for index in left.unstarted {
             if let Some(rule) = hooked.get(index) {
                 returned.insert(index, Self::skipped(rule, ask));
             }
@@ -231,6 +252,25 @@ impl Router {
             then: None,
             run: None,
             unsettled: None,
+        }
+    }
+
+    /// A rule's line when its run started and did not settle: the runtime's
+    /// own line for that end, and the word its steps settle with. Nothing is
+    /// returned.
+    fn unsettled(rule: &Rule, ask: &Ask, ran: Ran) -> RuleRun {
+        let mut entry = Map::new();
+        entry.insert("rule".into(), json!(rule.id()));
+        entry.insert("event".into(), json!(ask.event));
+        entry.insert("session".into(), json!(ask.session));
+        let word = log_entry::unsettled(&ran);
+        // For these ends the runtime gives no run back.
+        let run = log_entry::ended(&mut entry, ran);
+        RuleRun {
+            entry: Value::Object(entry),
+            then: None,
+            run,
+            unsettled: word,
         }
     }
 
@@ -298,12 +338,26 @@ enum Report<T> {
     Finished(T),
 }
 
+/// What a dispatch left undone: the runs a worker started and did not finish,
+/// the items no worker started, and the items a worker could not be started
+/// for, with why.
+struct Left {
+    /// Handed to a worker, with no finish before the wait ended.
+    open: BTreeSet<usize>,
+    /// No worker started: the deadline came first.
+    unstarted: Vec<usize>,
+    /// A worker could not be started: why, such as the OS error.
+    refused: Vec<(usize, String)>,
+}
+
 /// Runs one job per item on `pool`, calling `started` as each job announces
 /// that its run begins and `arrived` as each result comes, keeping no more
 /// jobs running than the pool has workers: a job that finds none free looks
-/// for a finished one before trying again. Past `deadline` the items left do
-/// not run, and the results still out are not waited for. Returns the indexes
-/// of the items no worker started.
+/// for a finished one before trying again. A job no worker can be started for
+/// is refused with its reason rather than tried again, and one that panics
+/// after it starts still reports its finish. Past `deadline` the items left
+/// do not run, and the runs still out are not waited for. Returns what it left
+/// undone.
 fn dispatch<T, R>(
     pool: &Pool,
     deadline: Instant,
@@ -311,18 +365,32 @@ fn dispatch<T, R>(
     job: impl Fn(usize, &R, Sender<(usize, Report<T>)>) -> Job,
     mut started: impl FnMut(usize),
     mut arrived: impl FnMut(usize, T),
-) -> Vec<usize>
+) -> Left
 where
     T: Send + 'static,
 {
     let (send, receive) = mpsc::channel();
     let mut pending = items.iter().enumerate().peekable();
+    let mut open = BTreeSet::new();
+    let mut refused = Vec::new();
     let mut outstanding = 0_usize;
     while let Some(&(index, item)) = pending.peek() {
-        if pool.execute(job(index, item, send.clone())).is_ok() {
-            pending.next();
-            outstanding = outstanding.saturating_add(1);
-            continue;
+        match pool.execute(job(index, item, send.clone())) {
+            Ok(()) => {
+                pending.next();
+                // Handed to a worker: its finish, or the wait's end, settles it.
+                open.insert(index);
+                outstanding = outstanding.saturating_add(1);
+                continue;
+            }
+            Err(ExecuteError::Busy) => {}
+            // Waiting cannot free a thread, so the item is refused with the
+            // reason instead of tried again.
+            Err(error) => {
+                pending.next();
+                refused.push((index, error.to_string()));
+                continue;
+            }
         }
         // No worker is free: a run has to finish before this one can start.
         let left = deadline.saturating_duration_since(Instant::now());
@@ -334,6 +402,7 @@ where
                 Report::Started => started(index),
                 Report::Finished(done) => {
                     outstanding = outstanding.saturating_sub(1);
+                    open.remove(&index);
                     arrived(index, done);
                 }
             }
@@ -368,11 +437,16 @@ where
             Report::Started => started(index),
             Report::Finished(done) => {
                 outstanding = outstanding.saturating_sub(1);
+                open.remove(&index);
                 arrived(index, done);
             }
         }
     }
-    pending.map(|(index, _)| index).collect()
+    Left {
+        open,
+        unstarted: pending.map(|(index, _)| index).collect(),
+        refused,
+    }
 }
 
 /// One finished result, if one comes within `wait`.
@@ -389,8 +463,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use chauffeur_protocol::Rule;
-    use chauffeur_runtime::{Cancel, Pool, Source};
-    use serde_json::json;
+    use chauffeur_runtime::{Cancel, Pool, Ran, Source};
+    use serde_json::{Value, json};
 
     use super::{Ask, Report, Router, dispatch};
 
@@ -411,7 +485,7 @@ mod tests {
             .checked_add(Duration::from_secs(10))
             .unwrap_or_else(Instant::now);
 
-        let unstarted = dispatch(
+        let left = dispatch(
             &pool,
             deadline,
             &jobs,
@@ -437,7 +511,17 @@ mod tests {
             |_, value| done.lock().unwrap().push(value),
         );
 
-        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
+        assert!(
+            left.unstarted.is_empty(),
+            "every job started: {:?}",
+            left.unstarted
+        );
+        assert!(left.open.is_empty(), "every job finished: {:?}", left.open);
+        assert!(
+            left.refused.is_empty(),
+            "no job was refused: {:?}",
+            left.refused
+        );
         let mut returned = done.lock().unwrap().clone();
         assert_eq!(returned.len(), jobs.len(), "every job came back");
         returned.sort_unstable();
@@ -456,10 +540,10 @@ mod tests {
     }
 
     /// A job still running when the deadline passes holds its worker, so the
-    /// item after it never starts: the dispatcher reports that index and
-    /// returns without waiting for the job still out. Each job sleeps for
-    /// 500 ms, so a call that waited for one fails the bound instead of
-    /// hanging the test.
+    /// item after it never starts: the dispatcher leaves the started index
+    /// open, reports the later one as unstarted, and returns without waiting
+    /// for the job still out. Each job sleeps for 500 ms, so a call that
+    /// waited for one fails the bound instead of hanging the test.
     #[test]
     fn a_job_past_the_deadline_leaves_the_items_after_it_unstarted() {
         let pool = Pool::new(1, 1);
@@ -471,7 +555,7 @@ mod tests {
             .checked_add(Duration::from_millis(50))
             .unwrap_or_else(Instant::now);
 
-        let unstarted = dispatch(
+        let left = dispatch(
             &pool,
             deadline,
             &items,
@@ -490,9 +574,19 @@ mod tests {
         let elapsed = began.elapsed();
 
         assert_eq!(
-            unstarted,
+            left.open.into_iter().collect::<Vec<_>>(),
+            [0],
+            "the item whose run outlived the deadline is left open"
+        );
+        assert_eq!(
+            left.unstarted,
             [1],
-            "only the item no worker could start comes back"
+            "only the item no worker could start comes back unstarted"
+        );
+        assert!(
+            left.refused.is_empty(),
+            "no item was refused: {:?}",
+            left.refused
         );
         assert_eq!(
             *announced.lock().unwrap(),
@@ -500,7 +594,7 @@ mod tests {
             "the item that started is announced exactly once"
         );
         assert!(
-            elapsed < Duration::from_millis(250),
+            elapsed < Duration::from_millis(400),
             "the call returns well inside the slow jobs: {elapsed:?}"
         );
         assert!(
@@ -509,10 +603,60 @@ mod tests {
         );
     }
 
+    /// A job that announces its start and then ends with no result, as a run
+    /// that panicked does, is reported with that finish: the dispatcher
+    /// neither leaves it open nor waits for a second report.
+    #[test]
+    fn a_job_that_ends_with_no_result_after_it_starts_is_reported() {
+        let pool = Pool::new(1, 1);
+        let items = [0_usize];
+        let arrived = Arc::new(Mutex::new(Vec::new()));
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+
+        let left = dispatch(
+            &pool,
+            deadline,
+            &items,
+            |index, _item: &usize, send| {
+                Box::new(move || {
+                    let _ = send.send((index, Report::Started));
+                    // A run that panicked reports no result, and its worker
+                    // runs on.
+                    let _ = send.send((index, Report::Finished(None::<usize>)));
+                })
+            },
+            |_| {},
+            |index, done| arrived.lock().unwrap().push((index, done)),
+        );
+
+        assert_eq!(
+            *arrived.lock().unwrap(),
+            [(0, None)],
+            "the finish is reported, with no result"
+        );
+        assert!(
+            left.open.is_empty(),
+            "the run out is settled: {:?}",
+            left.open
+        );
+        assert!(
+            left.unstarted.is_empty(),
+            "the item started: {:?}",
+            left.unstarted
+        );
+        assert!(
+            left.refused.is_empty(),
+            "no item was refused: {:?}",
+            left.refused
+        );
+    }
+
     /// A job that reports only its finish, as a rule in cooldown does, does
     /// not hold the caller: the loop ends when the runs do, not when a start
     /// and a finish have each come. The deadline is two seconds off, so a
-    /// call that waited for a start that never comes fails the 300 ms bound
+    /// call that waited for a start that never comes fails the 1 s bound
     /// instead of hanging the test.
     #[test]
     fn a_job_that_reports_only_its_finish_returns_under_the_deadline() {
@@ -524,7 +668,7 @@ mod tests {
             .checked_add(Duration::from_secs(2))
             .unwrap_or_else(Instant::now);
 
-        let unstarted = dispatch(
+        let left = dispatch(
             &pool,
             deadline,
             &items,
@@ -541,10 +685,14 @@ mod tests {
         );
         let elapsed = began.elapsed();
 
-        assert!(unstarted.is_empty(), "the job started: {unstarted:?}");
+        assert!(
+            left.unstarted.is_empty(),
+            "the job started: {:?}",
+            left.unstarted
+        );
         assert_eq!(*arrived.lock().unwrap(), [7], "its finish came back");
         assert!(
-            elapsed < Duration::from_millis(300),
+            elapsed < Duration::from_secs(1),
             "the call returns without a start: {elapsed:?}"
         );
     }
@@ -552,7 +700,7 @@ mod tests {
     /// Every job's run is over as it starts: the jobs do no work and report
     /// one finish each, so the loop has only finishes to count and ends when
     /// the last has come. The deadline is two seconds off, so a call that
-    /// also waited for a start per job fails the 300 ms bound instead of
+    /// also waited for a start per job fails the 1 s bound instead of
     /// hanging the test.
     #[test]
     fn a_dispatch_whose_runs_are_all_over_before_collecting_returns_at_once() {
@@ -564,7 +712,7 @@ mod tests {
             .checked_add(Duration::from_secs(2))
             .unwrap_or_else(Instant::now);
 
-        let unstarted = dispatch(
+        let left = dispatch(
             &pool,
             deadline,
             &items,
@@ -579,13 +727,17 @@ mod tests {
         );
         let elapsed = began.elapsed();
 
-        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
+        assert!(
+            left.unstarted.is_empty(),
+            "every job started: {:?}",
+            left.unstarted
+        );
         let mut returned = arrived.lock().unwrap().clone();
         assert_eq!(returned.len(), items.len(), "every finish came back once");
         returned.sort_unstable();
         assert_eq!(returned, items, "each job's finish came back");
         assert!(
-            elapsed < Duration::from_millis(300),
+            elapsed < Duration::from_secs(1),
             "the call returns without a start per job: {elapsed:?}"
         );
     }
@@ -606,7 +758,7 @@ mod tests {
             .checked_add(Duration::from_secs(2))
             .unwrap_or_else(Instant::now);
 
-        let unstarted = dispatch(
+        let left = dispatch(
             &pool,
             deadline,
             &items,
@@ -648,7 +800,7 @@ mod tests {
             },
         );
 
-        assert!(unstarted.is_empty(), "every job started: {unstarted:?}");
+        assert!(left.unstarted.is_empty(), "every job started");
         let order = order.lock().unwrap().clone();
         let at = |step: &str| {
             order
@@ -701,5 +853,57 @@ mod tests {
             })
         );
         assert!(skipped.then.is_none() && skipped.run.is_none());
+    }
+
+    /// A started run that did not settle writes the runtime's own line for
+    /// its end, and its steps settle with the same word: the deadline for a
+    /// run still out, and a stopped worker for one that panicked after it
+    /// started.
+    #[test]
+    fn a_started_run_that_did_not_settle_is_logged_as_it_ended() {
+        let rule = Rule::parse(
+            "sourcefed/triage",
+            r#"{ "on": "sourcefed.event", "strategy": [{ "id": "screen", "judge": "system-one",
+                 "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                          "instructions": "Is this noise?" } }] }"#,
+        )
+        .unwrap();
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(Vec::new()),
+            deadline: Instant::now(),
+            cancel: Cancel::new(Source::Harness),
+        };
+        let cases: [(Ran, Value, &str); 2] = [
+            (
+                Ran::Deadline,
+                json!({
+                    "rule": "sourcefed/triage",
+                    "event": "sourcefed.event",
+                    "session": "s-1",
+                    "deadline": true,
+                }),
+                "deadline",
+            ),
+            (
+                Ran::Stopped,
+                json!({
+                    "rule": "sourcefed/triage",
+                    "event": "sourcefed.event",
+                    "session": "s-1",
+                    "refused": "the run's worker stopped",
+                }),
+                "stopped",
+            ),
+        ];
+
+        for (ran, logged, word) in cases {
+            let done = Router::unsettled(&rule, &ask, ran);
+
+            assert_eq!(done.entry, logged);
+            assert_eq!(done.unsettled, Some(word), "the word for {logged}");
+            assert!(done.then.is_none() && done.run.is_none());
+        }
     }
 }

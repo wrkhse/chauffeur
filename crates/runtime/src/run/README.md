@@ -36,10 +36,11 @@ workers are kept. A run that outlives its deadline keeps its worker busy
 until its models time out; the next run takes another worker, or starts one,
 so it is never held up. At most 8 workers wait between runs, enough for
 every rule one event hooks to start at once, and at most 32 per source are
-alive. A job retains the navigation's permit until it really finishes;
-cancelling its wait cannot refill its share. Separate source pools keep
-integration work off harness workers, and a `Cancel` names its source, which
-picks one.
+alive. `Busy` means every worker was busy, and a thread that cannot start is
+`Failed` with its error in `Waited`, `Refused` in `Ran`. A job retains the
+navigation's permit until it really finishes; cancelling its wait cannot
+refill its share. Separate source pools keep integration work off harness
+workers, and a `Cancel` names its source, which picks one.
 
 ```rust
 use chauffeur_runtime::{Cancel, Ran, Source, run_strategy};
@@ -50,11 +51,15 @@ let ran = run_strategy(&context, &rule, &evidence, deadline, &cancel);
 match ran {
     Ran::Settled(run) => { /* the verdict; ran.then(&rule) is what it returns */ }
     Ran::Refused(reason) => { /* a judge or model failed; reason says why */ }
-    Ran::Busy => { /* the pool could not start a worker */ }
+    Ran::Busy => { /* every worker was busy */ }
     Ran::Stopped => { /* the worker stopped without a result */ }
     Ran::Deadline | Ran::Cancelled => { /* a late result is dropped */ }
+    _ => { /* a variant a newer runtime adds */ }
 }
 ```
+
+Both enums are `#[non_exhaustive]`, so a match outside the crate ends in
+`_`.
 
 `Pool` and `within` work for any job:
 
@@ -69,7 +74,9 @@ match waited {
     Waited::Done(value) => { /* the job's value; here, 42 */ }
     Waited::Deadline => { /* the job did not finish in time */ }
     Waited::Cancelled => { /* the caller cancelled it */ }
-    Waited::Busy => { /* no worker could start the job */ }
+    Waited::Busy => { /* every worker was busy */ }
+    Waited::Failed(error) => { /* a thread could not start; error says why */ }
     Waited::Stopped => { /* the worker stopped without a result */ }
+    _ => { /* a variant a newer runtime adds */ }
 }
 ```

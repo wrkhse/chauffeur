@@ -27,7 +27,7 @@ sequenceDiagram
     W-->>R: verdict, refused, busy, stopped, deadline or cancelled
     R-->>S: round_ready and step_settled, for a navigation
     R->>C: fire when a rule returned something
-    R->>A: one line per run or skip, in hook order
+    R->>A: one line per rule, in hook order
     R-->>S: actions, or intents
 ```
 
@@ -61,8 +61,13 @@ let intents = router.navigate(request, &cancel, &|event| send(event))?;
   `{"rule": ..., "event": ..., "session": ..., "skipped": "deadline"}`, in
   hook order among the runs, and returns nothing; the wire has no event for
   it.
-- The audit log keeps hook order, one line per run or skipped rule, while a
-  navigation's `chauffeur.event` progress streams as each run settles.
+- A run a worker started and did not finish by the deadline is logged as
+  `{"rule": ..., "deadline": true}`, with each of its steps settling as
+  failed `deadline` in a navigation. A run that reports no result after it
+  starts is logged as the worker stopping, and an item whose worker could
+  not start is logged as refused, with that error.
+- The audit log keeps hook order, one line per rule, while a navigation's
+  `chauffeur.event` progress streams as each run settles.
 - A run whose line cannot be written still returns its action, and the
   daemon says so on stderr.
 - A rule that misses the deadline, or fails, returns nothing; the other

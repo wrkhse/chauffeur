@@ -337,12 +337,10 @@ fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
         reply["error"]["data"]["reason"], "judge_unavailable",
         "{reply}"
     );
-    assert!(
-        reply["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("projects.json"),
-        "the refusal names the file that allows a project: {reply}"
+    assert_eq!(
+        reply["error"]["message"],
+        "System Two runs only for a project listed in projects.json, and /nowhere/listed is not",
+        "the refusal names the project and the file that allows one: {reply}"
     );
 }
 
@@ -359,11 +357,8 @@ fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
         reply["error"]["data"]["reason"], "judge_unavailable",
         "{reply}"
     );
-    assert!(
-        !reply["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("projects.json"),
+    assert_eq!(
+        reply["error"]["message"], "judge `system-two` has no system-two model to ask",
         "it passed the allowance and failed for having no model: {reply}"
     );
 }
@@ -380,8 +375,11 @@ fn a_projects_file_naming_a_relative_path_is_refused() {
     // Loaded before the socket is bound, so the daemon does not start.
     let refused = chauffeur_daemon::run(&paths).unwrap_err().to_string();
 
-    assert!(refused.contains("projects.json"), "{refused}");
-    assert!(refused.contains("work/app"), "{refused}");
+    let expected = format!(
+        "{}: `work/app` is not an absolute path",
+        paths.config.join("projects.json").display()
+    );
+    assert_eq!(refused, expected);
 }
 
 fn slow_inline(deadline_ms: u64) -> Value {
@@ -444,6 +442,38 @@ fn a_cancelled_request_is_answered_as_cancelled_at_once() {
     assert_eq!(reply["error"]["code"], -32_800, "{reply}");
     assert_eq!(reply["error"]["data"]["reason"], "cancelled");
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// A navigation by its `on` event is cancelled like any other call: the
+/// rule's step settles as cancelled on the wire, before the reply that
+/// answers the call as cancelled.
+#[test]
+fn a_cancelled_navigation_settles_its_step_as_cancelled_before_the_reply() {
+    let paths = paths("cancel-step", &models(Duration::from_secs(3)));
+    fs::write(
+        paths.config.join("rules/sourcefed/triage.json"),
+        TRIAGE.replace("\"confidence\": 0.7", "\"model\": \"slow\""),
+    )
+    .unwrap();
+    let mut caller = Caller::new(start(&paths));
+
+    caller.navigate(1, &event("CI failed"));
+    thread::sleep(Duration::from_millis(100));
+    caller.cancel(1);
+    let mut messages = caller.until_reply(1);
+
+    let reply = messages.pop().unwrap();
+    assert_eq!(reply["error"]["code"], -32_800, "{reply}");
+    assert_eq!(
+        messages.pop(),
+        Some(json!({
+            "jsonrpc": "2.0",
+            "method": "chauffeur.event",
+            "params": { "event": "step_settled", "rule": "sourcefed/triage",
+                        "step": "screen", "failed": "cancelled", "id": 1 }
+        })),
+        "the step settles as cancelled before the reply"
+    );
 }
 
 /// An emit is a call like any other: cancelling it stops its rule and

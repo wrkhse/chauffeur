@@ -13,6 +13,7 @@ pub type Job = Box<dyn FnOnce() + Send>;
 
 /// Why a job did not start.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExecuteError {
     /// Every worker is busy.
     #[error("every worker is busy")]

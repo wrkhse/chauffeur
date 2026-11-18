@@ -63,6 +63,7 @@ pub struct Busy {
 
 /// The limit admission holds a call to, and how many calls it allows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Limit {
     /// One source's share of the calls, such as 8.
     Share(usize),
