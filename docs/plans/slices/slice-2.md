@@ -286,7 +286,8 @@ The fixtures are one file of cases, each with `params` and either
 `limit`. A case with `fill` has `text` repeated `times` put at the JSON
 pointer `at` in its params before it is sent, so the file stays small. A
 rejected case the schema cannot see as rejected, such as one over a byte
-limit, carries `"schema": "accepts"`.
+limit, carries `"schema": "accepts"`. A rejected case `Navigate::parse`
+accepts, because the daemon refuses it later, carries `"parsed": "accepts"`.
 
 ```json
 {

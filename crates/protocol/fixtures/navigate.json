@@ -78,7 +78,7 @@
       "params": {
         "protocol": 1,
         "deadline_ms": 3000,
-        "project": "/Users/me/src/app",
+        "project": "<project>",
         "judges": {
           "deep": {
             "tier": "system-two"
@@ -1499,7 +1499,7 @@
         "protocol": 1,
         "deadline_ms": 3000,
         "on": "sourcefed.event",
-        "project": "/Users/me/src/app",
+        "project": "<project>",
         "evidence": {
           "event": "codecov[bot] commented on #42: Coverage 81.2% (+0.3%)",
           "monitor": "PR #42 in wrkhse/chauffeur",
@@ -1763,6 +1763,23 @@
       "reject": {
         "reason": "invalid"
       }
+    },
+    {
+      "name": "a project that cannot be resolved is refused",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "on": "sourcefed.event",
+        "project": "/nowhere/at/all",
+        "evidence": {
+          "event": "CI failed"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts",
+      "parsed": "accepts"
     },
     {
       "name": "a deadline of 0",

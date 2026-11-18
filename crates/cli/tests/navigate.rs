@@ -27,9 +27,10 @@ const PLACEHOLDERS: &str = r#"{ "models": { "stand-in": { "format": "placeholder
                                                           "otherwise": { "yes": 0.1, "no": 0.9 } } },
                                "tiers": { "system-one": ["stand-in"], "system-two": ["stand-in"] } }"#;
 
-/// The project the inline System Two fixture names, listed so the daemon runs
-/// it rather than refusing it, as a user who listed the project would.
-const PROJECTS: &str = r#"["/Users/me/src/app"]"#;
+/// The placeholder a fixture's `project` holds for the harness's own listed
+/// project, created and listed so the daemon runs it rather than refusing it,
+/// as a user who listed their project would.
+const PROJECT: &str = "<project>";
 
 const TRIAGE: &str = r#"{
   "on": "sourcefed.event",
@@ -55,17 +56,25 @@ fn repo(path: &str) -> PathBuf {
         .join(path)
 }
 
-/// A daemon on a thread, with the triage rule, the fixtures' project and
-/// `--models` placeholders.
-fn daemon(name: &str) -> Paths {
+/// A daemon on a thread, with the triage rule, a project the fixtures may
+/// name and `--models` placeholders. The project's canonical path, the one
+/// listed in `projects.json` and substituted for `<project>`, is returned
+/// beside the daemon's paths.
+fn daemon(name: &str) -> (Paths, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "chauffeur-cli-navigate-{name}-{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("config/rules/sourcefed")).unwrap();
+    fs::create_dir_all(root.join("project")).unwrap();
+    let project = fs::canonicalize(root.join("project")).unwrap();
     fs::write(root.join("placeholders.json"), PLACEHOLDERS).unwrap();
-    fs::write(root.join("config/projects.json"), PROJECTS).unwrap();
+    fs::write(
+        root.join("config/projects.json"),
+        json!([project.display().to_string()]).to_string(),
+    )
+    .unwrap();
     fs::write(root.join("config/rules/sourcefed/triage.json"), TRIAGE).unwrap();
     let paths = Paths {
         name: "chauffeur-test".into(),
@@ -85,7 +94,7 @@ fn daemon(name: &str) -> Paths {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    paths
+    (paths, project)
 }
 
 /// Runs `chauffeur navigate` against `paths`' socket with `request` on stdin.
@@ -117,7 +126,7 @@ fn lines(output: &Output) -> Vec<Value> {
 
 #[test]
 fn an_event_prints_its_events_then_the_intents_and_exits_0() {
-    let paths = daemon("withheld");
+    let (paths, _) = daemon("withheld");
     let request = r#"{ "protocol": 1, "deadline_ms": 3000, "on": "sourcefed.event",
                        "evidence": { "event": "thanks, looks good" } }"#;
 
@@ -144,13 +153,17 @@ fn an_event_prints_its_events_then_the_intents_and_exits_0() {
     );
 }
 
-/// The fixtures every binding replays, each with its `fill` applied: `text`
-/// repeated `times`, put at the JSON pointer `at` in its params.
-fn fixtures() -> Vec<Value> {
+/// The fixtures every binding replays, each with its `fill` applied (`text`
+/// repeated `times`, put at the JSON pointer `at` in its params) and
+/// `<project>` replaced by the harness's listed project.
+fn fixtures(project: &Path) -> Vec<Value> {
     let text = fs::read_to_string(repo("crates/protocol/fixtures/navigate.json")).unwrap();
     let fixtures: Value = serde_json::from_str(&text).unwrap();
     let mut cases = fixtures["cases"].as_array().unwrap().clone();
     for case in &mut cases {
+        if case["params"]["project"] == PROJECT {
+            case["params"]["project"] = json!(project.display().to_string());
+        }
         for fill in case["fill"].as_array().cloned().unwrap_or_default() {
             let at = fill["at"].as_str().unwrap();
             let (parent, key) = at.rsplit_once('/').unwrap();
@@ -171,9 +184,9 @@ fn fixtures() -> Vec<Value> {
 
 #[test]
 fn every_fixture_is_answered_or_rejected_as_it_expects() {
-    let paths = daemon("fixtures");
+    let (paths, project) = daemon("fixtures");
 
-    let cases = fixtures();
+    let cases = fixtures(&project);
     let source: Value = serde_json::from_str(
         &fs::read_to_string(repo("crates/protocol/fixtures/navigate.json")).unwrap(),
     )
@@ -266,7 +279,7 @@ fn with_no_daemon_it_exits_2_and_says_so() {
 
 #[test]
 fn a_request_that_is_not_json_exits_1() {
-    let paths = daemon("not-json");
+    let (paths, _) = daemon("not-json");
 
     let output = navigate(&paths, "{ protocol: 1");
 

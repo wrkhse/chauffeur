@@ -20,14 +20,18 @@ fn crate_file(path: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// The fixture cases, each with its `fill` applied: `text` repeated
-/// `times`, put at the JSON pointer `at` in its params.
+/// The fixture cases, each with `<project>` resolved to an absolute path
+/// (a daemon harness gives a real folder) and its `fill` applied: `text`
+/// repeated `times`, put at the JSON pointer `at` in its params.
 fn cases() -> Vec<Value> {
     let mut cases = crate_file("fixtures/navigate.json")["cases"]
         .as_array()
         .unwrap()
         .clone();
     for case in &mut cases {
+        if case["params"]["project"] == "<project>" {
+            case["params"]["project"] = json!("/project");
+        }
         for fill in case["fill"].as_array().cloned().unwrap_or_default() {
             let at = fill["at"].as_str().unwrap();
             let (parent, key) = at.rsplit_once('/').unwrap();
@@ -101,11 +105,19 @@ fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 77);
+    assert_eq!(cases.len(), 78);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let parsed = Navigate::parse(&case["params"]);
+        // `Navigate::parse` accepts this request; the daemon refuses it, as
+        // `crates/daemon/tests/navigate.rs`'s
+        // `a_navigation_naming_a_project_that_cannot_be_resolved_is_refused`
+        // proves.
+        if case["parsed"] == "accepts" {
+            assert!(parsed.is_ok(), "{name}: {parsed:?}");
+            continue;
+        }
         match (&case["expect"], &case["reject"], parsed) {
             (Value::String(expect), Value::Null, Ok(navigate)) => {
                 let kind = match navigate.target() {
