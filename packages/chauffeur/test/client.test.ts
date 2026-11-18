@@ -1,0 +1,453 @@
+import { expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  connect,
+  navigate,
+  NavigateError,
+  socketPath,
+  type NavigateRequest
+} from "../src/client/index.ts"
+import { eventually, standIn } from "./stand-in.ts"
+
+const EVENT = { on: "sourcefed.event", evidence: { event: "thanks, looks good" } }
+const WITHHOLD = { rule: "sourcefed/triage", withhold: "event" }
+
+test("the socket is the option's, a name's, then $CHAUFFEUR_SOCKET, then the runtime folder's", () => {
+  const env = { CHAUFFEUR_SOCKET: "/env/s", XDG_RUNTIME_DIR: "/run/user/1" }
+
+  expect(socketPath({ socket: "/option/s" }, env)).toBe("/option/s")
+  expect(socketPath({ name: "chauffeur-next" }, env)).toBe(
+    "/run/user/1/chauffeur-next/daemon.sock"
+  )
+  expect(socketPath({}, env)).toBe("/env/s")
+  expect(socketPath({}, { CHAUFFEUR_SOCKET: "" })).toBe(
+    join(tmpdir(), "chauffeur/daemon.sock")
+  )
+})
+
+test("navigate sends protocol 1 and the request, streams events, and closes once answered", async () => {
+  const daemon = await standIn(() => ({
+    events: [
+      { event: "rule_matched", rule: "sourcefed/triage" },
+      { event: "round_ready", rule: "sourcefed/triage", round: 1, steps: ["screen"] }
+    ],
+    result: { intents: [WITHHOLD] }
+  }))
+  const events: unknown[] = []
+
+  try {
+    const { intents } = await navigate(EVENT, {
+      socket: daemon.socket,
+      onEvent: (event) => events.push(event)
+    })
+
+    expect(intents).toEqual([WITHHOLD])
+    expect(events).toEqual([
+      { event: "rule_matched", rule: "sourcefed/triage" },
+      { event: "round_ready", rule: "sourcefed/triage", round: 1, steps: ["screen"] }
+    ])
+    expect(daemon.messages[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "chauffeur.navigate",
+      params: { protocol: 1, ...EVENT }
+    } as never)
+    await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a request naming another protocol is sent as the client's", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+
+  try {
+    await navigate({ ...EVENT, protocol: 2 } as NavigateRequest, {
+      socket: daemon.socket
+    })
+
+    expect(daemon.messages[0]?.params.protocol).toBe(1)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a rejection keeps its reason and limit; another protocol is unavailable", async () => {
+  const daemon = await standIn((message) =>
+    message.params.on === "old"
+      ? {
+          error: {
+            code: -32602,
+            message: "the daemon accepts protocol 2",
+            data: { reason: "unsupported_protocol", accepted: [2] }
+          }
+        }
+      : {
+          error: {
+            code: -32602,
+            message: "evidence is over 256 KiB",
+            data: { reason: "limit_exceeded", limit: "evidence_bytes", max: 262144 }
+          }
+        }
+  )
+
+  try {
+    const over = navigate(EVENT, { socket: daemon.socket })
+    await expect(over).rejects.toBeInstanceOf(NavigateError)
+    await expect(over).rejects.toMatchObject({
+      reason: "limit_exceeded",
+      limit: "evidence_bytes",
+      max: 262144
+    })
+    await expect(
+      navigate({ on: "old" }, { socket: daemon.socket })
+    ).rejects.toMatchObject({ reason: "unavailable" })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a request's project is sent, and an absent one is left out", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+
+  try {
+    await navigate(
+      { on: "sourcefed.event", project: "/Users/me/src/app" },
+      { socket: daemon.socket }
+    )
+    await navigate(EVENT, { socket: daemon.socket })
+
+    expect(daemon.messages[0]?.params).toEqual({
+      protocol: 1,
+      on: "sourcefed.event",
+      project: "/Users/me/src/app"
+    })
+    expect(daemon.messages[1]?.params).not.toHaveProperty("project")
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("no daemon, one that hangs up, and one that never answers are all unavailable", async () => {
+  const missing = join(tmpdir(), "chauffeur-missing", "daemon.sock")
+  const hanging = await standIn(() => "hang-up")
+  const silent = await standIn(() => "silent")
+
+  try {
+    await expect(navigate(EVENT, { socket: missing })).rejects.toMatchObject({
+      reason: "unavailable"
+    })
+    await expect(navigate(EVENT, { socket: hanging.socket })).rejects.toMatchObject({
+      reason: "unavailable"
+    })
+
+    const started = Date.now()
+    await expect(
+      navigate({ ...EVENT, deadline_ms: 10 }, { socket: silent.socket })
+    ).rejects.toThrow("no answer within 2010 ms")
+    expect(Date.now() - started).toBeLessThan(2_500)
+  } finally {
+    await hanging.close()
+    await silent.close()
+  }
+})
+
+test("aborting a one-shot navigate closes its connection, which cancels it", async () => {
+  const daemon = await standIn(() => "silent")
+  const abort = new AbortController()
+
+  try {
+    const pending = navigate(EVENT, { socket: daemon.socket, signal: abort.signal })
+    await eventually(() => daemon.messages.length === 1)
+    abort.abort(new Error("the caller gave up"))
+
+    await expect(pending).rejects.toThrow("the caller gave up")
+    await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a kept connection carries calls at once, cancels an aborted one by ID, and closes", async () => {
+  const daemon = await standIn((message) =>
+    message.params.on === "slow" ? "silent" : { result: { intents: [] } }
+  )
+  const chauffeur = connect({ socket: daemon.socket })
+  const abort = new AbortController()
+
+  try {
+    const slow = chauffeur.navigate({ on: "slow" }, { signal: abort.signal })
+    const fast = await chauffeur.navigate(EVENT)
+    abort.abort(new Error("timed out"))
+
+    expect(fast).toEqual({ intents: [] })
+    await expect(slow).rejects.toThrow("timed out")
+    await eventually(() =>
+      daemon.messages.some((message) => message.method === "$/cancelRequest")
+    )
+    const cancel = daemon.messages.find(
+      (message) => message.method === "$/cancelRequest"
+    )
+    expect(cancel?.params).toEqual({ id: 1 })
+    expect(daemon.closes).toBe(0)
+
+    chauffeur.close()
+    await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a connection carries four navigations at once; a fifth is busy", async () => {
+  const daemon = await standIn(() => "silent")
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const calls = Array.from({ length: 4 }, () =>
+      chauffeur.navigate({ on: "slow" }).then(
+        () => "resolved",
+        (error: unknown) => error
+      )
+    )
+
+    await eventually(() => daemon.messages.length === 4)
+
+    const fifth = chauffeur.navigate({ on: "slow" })
+    await expect(fifth).rejects.toBeInstanceOf(NavigateError)
+    await expect(fifth).rejects.toMatchObject({ reason: "busy" })
+    await expect(fifth).rejects.toThrow("4 navigations")
+    expect(daemon.messages).toHaveLength(4)
+
+    chauffeur.close()
+
+    for (const call of calls) {
+      const error = await call
+      expect(error).toBeInstanceOf(NavigateError)
+      expect((error as NavigateError).reason).toBe("unavailable")
+    }
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
+
+test("a kept connection opens again after the daemon restarts", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "chauffeur-restart-"))
+  const socket = join(folder, "daemon.sock")
+  const first = await standIn(() => ({ result: { intents: [] } }), socket)
+  const chauffeur = connect({ socket })
+
+  try {
+    expect(await chauffeur.navigate(EVENT)).toEqual({ intents: [] })
+    await first.close()
+    const second = await standIn(() => ({ result: { intents: [WITHHOLD] } }), socket)
+
+    try {
+      // A call racing the hang-up may still find the old connection closing.
+      const raced = await chauffeur.navigate(EVENT).catch((error: unknown) => error)
+      const answered =
+        raced instanceof NavigateError ? await chauffeur.navigate(EVENT) : raced
+
+      expect(answered).toEqual({ intents: [WITHHOLD] })
+    } finally {
+      await second.close()
+    }
+  } finally {
+    chauffeur.close()
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
+
+test("a listener that throws ends its own call, and the others on the connection go on", async () => {
+  const daemon = await standIn((message) => ({
+    events: [{ event: "rule_matched", rule: String(message.params.on) }],
+    result: { intents: [] }
+  }))
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const failing = chauffeur.navigate(
+      { on: "a" },
+      {
+        onEvent: () => {
+          throw new Error("the listener broke")
+        }
+      }
+    )
+    const fine = chauffeur.navigate({ on: "b" })
+
+    await expect(failing).rejects.toThrow("the listener broke")
+    expect(await fine).toEqual({ intents: [] })
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
+
+test("a reason this client does not know reads as invalid", async () => {
+  const daemon = await standIn(() => ({
+    error: { code: -32000, message: "new", data: { reason: "something_new" } }
+  }))
+
+  try {
+    await expect(navigate(EVENT, { socket: daemon.socket })).rejects.toMatchObject({
+      reason: "invalid"
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a call on a closed client is unavailable, and opens nothing", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const racing = chauffeur.navigate(EVENT)
+    chauffeur.close()
+
+    await expect(racing).rejects.toMatchObject({ reason: "unavailable" })
+    await expect(chauffeur.navigate(EVENT)).rejects.toMatchObject({
+      reason: "unavailable"
+    })
+    await eventually(() => daemon.open === 0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("an already aborted signal never opens a socket", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+  const client = connect({ socket: daemon.socket })
+  const signal = AbortSignal.abort(new Error("already aborted"))
+
+  try {
+    await expect(navigate(EVENT, { socket: daemon.socket, signal })).rejects.toThrow(
+      "already aborted"
+    )
+    await expect(client.navigate(EVENT, { signal })).rejects.toThrow("already aborted")
+    expect(daemon.open).toBe(0)
+    expect(daemon.messages).toHaveLength(0)
+  } finally {
+    client.close()
+    await daemon.close()
+  }
+})
+
+test("reads lines split across chunks and across a UTF-8 character", async () => {
+  const line = Buffer.from(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { intents: [{ rule: "café", withhold: "event" }] }
+  }) + "\n")
+  const split = line.indexOf(Buffer.from("é")) + 1
+  const daemon = await standIn(() => ({
+    chunks: [line.subarray(0, 8), line.subarray(8, split), line.subarray(split)]
+  }))
+
+  try {
+    expect(await navigate(EVENT, { socket: daemon.socket })).toEqual({
+      intents: [{ rule: "café", withhold: "event" }]
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("a request over the daemon's 1 MiB line is refused before it is written", async () => {
+  const daemon = await standIn(() => ({ result: { intents: [] } }))
+  const huge = { ...EVENT, evidence: { event: "x".repeat(1_100_000) } }
+
+  try {
+    const refused = navigate(huge, { socket: daemon.socket })
+    await expect(refused).rejects.toBeInstanceOf(NavigateError)
+    await expect(refused).rejects.toMatchObject({ reason: "limit_exceeded" })
+    await expect(refused).rejects.toThrow("the request is over 1 MiB")
+    expect(daemon.messages).toHaveLength(0)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("an error with no id rejects every call on the connection", async () => {
+  let seen = 0
+  const daemon = await standIn(() => {
+    seen += 1
+
+    return seen === 2
+      ? {
+          chunks: [
+            Buffer.from(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: null,
+                error: { code: -32600, message: "the request line is over 1 MiB" }
+              }) + "\n"
+            )
+          ]
+        }
+      : "silent"
+  })
+  const chauffeur = connect({ socket: daemon.socket })
+
+  try {
+    const calls = ["a", "b"].map((on) =>
+      chauffeur.navigate({ on }).then(
+        () => "resolved",
+        (error: unknown) => error
+      )
+    )
+
+    for (const error of await Promise.all(calls)) {
+      expect(error).toBeInstanceOf(NavigateError)
+      expect((error as NavigateError).reason).toBe("invalid")
+      expect((error as NavigateError).message).toBe("the request line is over 1 MiB")
+    }
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
+
+test("a complete line over the receive limit closes the connection", async () => {
+  const line = Buffer.from("x".repeat(4 * 1024 * 1024 + 1) + "\n")
+  const daemon = await standIn(() => ({ chunks: [line] }))
+
+  try {
+    await expect(navigate(EVENT, { socket: daemon.socket })).rejects.toMatchObject({
+      reason: "unavailable"
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("an event this client does not know fails its call and cancels it", async () => {
+  const daemon = await standIn(() => ({
+    events: [{ event: "future_event" }],
+    result: { intents: [] }
+  }))
+  const chauffeur = connect({ socket: daemon.socket })
+  const events: unknown[] = []
+
+  try {
+    const failed = chauffeur.navigate(EVENT, {
+      onEvent: (event) => events.push(event)
+    })
+
+    await expect(failed).rejects.toBeInstanceOf(NavigateError)
+    await expect(failed).rejects.toThrow("future_event")
+    expect(events).toEqual([])
+    await eventually(() =>
+      daemon.messages.some((message) => message.method === "$/cancelRequest")
+    )
+    expect(
+      daemon.messages.find((message) => message.method === "$/cancelRequest")?.params
+    ).toEqual({ id: 1 })
+  } finally {
+    chauffeur.close()
+    await daemon.close()
+  }
+})
