@@ -21,15 +21,17 @@ const FIXTURE = join(
 const AT = "2026-11-17T00:00:00.000Z"
 const RUN_TIMEOUT = 2 * 60_000
 
-// The fixture's twelve cases, by id: a missing or different case fails the
-// proof before a daemon starts.
-const CASE_IDS = [
+// The fixture's twelve cases, by id and verdict: a missing, extra or
+// relabelled case fails the proof before a daemon starts.
+const WITHHOLD_IDS = [
   "bot-coverage",
   "approval",
   "status-churn",
   "assignee-churn",
   "thanks",
-  "empty-message",
+  "empty-message"
+]
+const DELIVER_IDS = [
   "ci-failure",
   "requested-changes",
   "direct-question",
@@ -37,6 +39,7 @@ const CASE_IDS = [
   "merged-followup",
   "new-fact"
 ]
+const CASE_IDS = [...WITHHOLD_IDS, ...DELIVER_IDS]
 
 /** The most recent daemon output, for a failure message. */
 let lastOutput = ""
@@ -77,6 +80,11 @@ function readCases() {
       typeof each.expected?.deliver,
       "boolean",
       `${each.id} has no expected.deliver`
+    )
+    assert.equal(
+      each.expected.deliver,
+      DELIVER_IDS.includes(each.id),
+      `${each.id} is not labelled ${DELIVER_IDS.includes(each.id) ? "deliver" : "withhold"}`
     )
   }
 
@@ -200,6 +208,7 @@ async function askAll(cases) {
   const seen = new Set()
   let withheld = 0
   let delivered = 0
+  let untriagedCount = 0
   let failed = 0
 
   console.log("case              expected  actual    intents")
@@ -219,8 +228,11 @@ async function askAll(cases) {
       const note = mismatch ? "  MISMATCH" : untriaged ? "  UNTRIAGED" : ""
 
       seen.add(each.id)
-      if (decision.deliver) delivered += 1
-      else withheld += 1
+
+      if (!decision.deliver) withheld += 1
+      else if (untriaged) untriagedCount += 1
+      else delivered += 1
+
       if (mismatch || untriaged) failed += 1
 
       console.log(
@@ -241,9 +253,11 @@ async function askAll(cases) {
 
   const verdict =
     failed === 0 ? "every verdict matches the fixture" : `${failed} failed`
+  const untriagedNote = untriagedCount > 0 ? `, ${untriagedCount} UNTRIAGED` : ""
 
   console.log(
-    `${cases.length} cases: ${withheld} withheld, ${delivered} delivered; ${verdict}`
+    `${cases.length} cases: ${withheld} withheld, ${delivered} delivered` +
+      `${untriagedNote}; ${verdict}`
   )
 
   return failed

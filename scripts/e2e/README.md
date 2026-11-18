@@ -45,7 +45,7 @@ It is meant for an arm64 Linux container with Node 22. On an Apple silicon
 Mac:
 
 ```sh
-mkdir -p dist .rc5-work
+mkdir -p dist
 curl -fL -o dist/chauffeur-1.0.0-rc.5-linux-arm64.tar.gz \
   https://github.com/wrkhse/chauffeur/releases/download/v1.0.0-rc.5/chauffeur-1.0.0-rc.5-linux-arm64.tar.gz
 curl -fL -o dist/fdcn-chauffeur-1.0.0-rc.5.tgz \
@@ -53,15 +53,17 @@ curl -fL -o dist/fdcn-chauffeur-1.0.0-rc.5.tgz \
 
 docker run --rm --platform linux/arm64 \
   -v "$PWD:/src:ro" \
-  -v "$PWD/.rc5-work:/work" \
+  -v rc5-work:/work \
   -v "$PWD/dist:/art:ro" \
   node:22-bookworm \
   bash /src/scripts/e2e/rc5.sh
 ```
 
 The repository is read-only at `/src`; the run keeps everything it writes
-under `/work` and reads the two tarballs from `/art`. It clones sourcefed
-from GitHub into `/work`, so the container needs network access.
+in the `rc5-work` volume at `/work` and reads the two tarballs from `/art`.
+The volume holds the daemon's Unix socket, which a host bind mount may not
+support. It clones sourcefed from GitHub into `/work`, so the container needs
+network access.
 
 **Never run `rc5.sh` on the developer's machine.** It installs a Linux
 binary, runs `npm ci` and starts a daemon. The script refuses anything but
@@ -108,8 +110,8 @@ also logs one connection line to stderr when the first case starts.
 another head, a failed build, or a rule that is not written. The driver exits
 non-zero if the installed binary is not `chauffeur-next 1.0.0-rc.5`, the
 daemon does not create its socket, `daemon status` does not list
-`sourcefed/triage`, the fixture does not hold the twelve cases, or any
-`deliver` differs from the fixture. A deliver case the daemon answered
+`sourcefed/triage`, the fixture does not hold the twelve cases as
+labelled, or any `deliver` differs from the fixture. A deliver case the daemon answered
 without triaging is marked `UNTRIAGED` and fails too, so a missing answer
 cannot pass as a correct delivery. A failure prints the case's line and a
 summary, and the last 8 KiB of daemon output follows an error.

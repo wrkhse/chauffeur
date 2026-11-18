@@ -7,7 +7,7 @@
 # runs on the developer's machine:
 #
 #   docker run --rm --platform linux/arm64 \
-#     -v "$PWD:/src:ro" -v "$PWD/.rc5-work:/work" -v "$PWD/dist:/art:ro" \
+#     -v "$PWD:/src:ro" -v rc5-work:/work -v "$PWD/dist:/art:ro" \
 #     node:22-bookworm bash /src/scripts/e2e/rc5.sh
 
 set -euo pipefail
@@ -15,6 +15,13 @@ set -euo pipefail
 if [ "$(uname -s)" != "Linux" ]; then
   echo "rc5.sh runs in the Linux container only;" \
     "it must not run on the developer's machine" >&2
+  exit 1
+fi
+
+# Linux alone does not prove a container, and this script deletes /work.
+if [ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ]; then
+  echo "rc5.sh must run in a container, not a Linux host: neither" \
+    "/.dockerenv nor /run/.containerenv exists, and it deletes /work" >&2
   exit 1
 fi
 
@@ -34,17 +41,19 @@ SOURCEFED_HEAD=1736930a47241ea4a364c81f28ddd4e23a17472f
 DAEMON=chauffeur-1.0.0-rc.5-linux-arm64.tar.gz
 CLIENT=fdcn-chauffeur-1.0.0-rc.5.tgz
 
-rm -rf "$CONFIG" "$STATE" "$RUN" "$SRC" "$PREFIX" "$WORK/unpacked"
-mkdir -p "$CONFIG" "$STATE" "$PREFIX/bin" "$PREFIX/share" "$WORK/unpacked"
-# The daemon refuses a socket folder another mode or owner could reach.
-install -d -m 0700 "$RUN"
-
 echo "== checksums"
 (cd "$ART" && sha256sum -c - <<'SUMS'
 983a4339b62f642fa9f03f9b5c16d0c95f6ac98e8aef78f3ef2744166c2e9a41  chauffeur-1.0.0-rc.5-linux-arm64.tar.gz
 8f24e8ed8f4a6c36ab2238722e90dddf026e8bbbc17f7522aab96798baa26d68  fdcn-chauffeur-1.0.0-rc.5.tgz
 SUMS
 )
+
+# Both artifacts are verified before the work dir is cleared, so a wrong
+# tarball never destroys a previous run's work.
+rm -rf "$CONFIG" "$STATE" "$RUN" "$SRC" "$PREFIX" "$WORK/unpacked"
+mkdir -p "$CONFIG" "$STATE" "$PREFIX/bin" "$PREFIX/share" "$WORK/unpacked"
+# The daemon refuses a socket folder another mode or owner could reach.
+install -d -m 0700 "$RUN"
 
 echo "== chauffeur-next"
 tar -xzf "$ART/$DAEMON" -C "$WORK/unpacked"
