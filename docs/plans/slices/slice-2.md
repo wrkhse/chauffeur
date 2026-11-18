@@ -980,3 +980,20 @@ The 12 labelled events and v1's recorded gate replies are in
 `crates/protocol/fixtures/sourcefed-events.json` and
 `sourcefed-events.v1.json`, checked by
 `crates/protocol/tests/sourcefed_events.rs`.
+
+### Playground
+
+The v2 playground is built with `bun run build` and served from a throwaway
+nginx container publishing `127.0.0.1:4173`: nothing is served from the host.
+
+A real Chromium, through agent-browser, opens the _Navigate_ tab with its
+shipped example `sourcefed: a CI failure is delivered` run as it stands, then
+the first example, `sourcefed: noise is withheld`.
+
+The CI failure shows `rule_matched`, `round_ready` with `steps ["screen"]`, and
+`step_settled` with `answer {outcome "yes", level 0.05, model "stand-in"}`, then
+the result `{"intents": []}` under the "no intent: the caller's default" badge.
+The noise example shows the withhold intent. The tab needs no daemon: its
+WebAssembly build runs the rule against the stand-in replies typed into the tab.
+
+![The Navigate tab after the CI-failure example](../../media/slice-2-playground.png)
