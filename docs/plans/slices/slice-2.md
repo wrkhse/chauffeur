@@ -1,8 +1,9 @@
 # Slice 2: sourcefed triage
 
-**Status:** In progress: requests, intents and limits, admission and running,
-and the daemon's socket are built; the rule sources, the bindings and
-sourcefed's side are next.
+**Status:** Implemented, released as `chauffeur-next` `1.0.0-rc.5`, with the
+daemon's socket and rule sources, the `@fdcn/chauffeur` client and
+`chauffeur navigate` bindings, the playground's _Navigate_ tab, and
+sourcefed's triage running against the release.
 
 **You can:** let sourcefed ask Chauffeur before it queues each event, so
 OpenCode, Pi, MCP and the CLI receive the same filtered stream, as in
@@ -26,6 +27,24 @@ flowchart LR
     Client -- "JSON-RPC, Unix socket" --> Daemon["crates/daemon"]
     Cli -- "JSON-RPC, Unix socket" --> Daemon
 ```
+
+## Recording
+
+One `termctrl` session runs the container-only proof in `scripts/e2e/`. It
+checks both rc.5 tarballs by sha256, installs the daemon as Homebrew lays it
+out, and checks that it reports `chauffeur-next 1.0.0-rc.5`. sourcefed is
+cloned at PR #29's merge commit `0a1a5e7` and built, and the twelve recorded
+events go through
+`new ChauffeurTriage({ connect: chauffeurNavigators(connect) })` against the
+shipped daemon. Each case prints its intents, and the run ends
+`12 cases: 6 withheld, 6 delivered; every verdict matches the fixture`.
+
+The judge is a placeholder, so the proof is the shipped client, daemon, rule
+loading and verdict path agreeing with sourcefed's triage, not a real model's
+answers. The invocation is in
+[`scripts/e2e/README.md`](../../../scripts/e2e/README.md).
+
+<video src="../../media/slice-2.mp4" controls muted playsinline width="100%"></video>
 
 ## Wire contract
 
@@ -980,3 +999,20 @@ The 12 labelled events and v1's recorded gate replies are in
 `crates/protocol/fixtures/sourcefed-events.json` and
 `sourcefed-events.v1.json`, checked by
 `crates/protocol/tests/sourcefed_events.rs`.
+
+### Playground
+
+The v2 playground is built with `bun run build` and served from a throwaway
+nginx container publishing `127.0.0.1:4173`: nothing is served from the host.
+
+A real Chromium, through agent-browser, opens the _Navigate_ tab with its
+shipped example `sourcefed: a CI failure is delivered` run as it stands, then
+the first example, `sourcefed: noise is withheld`.
+
+The CI failure shows `rule_matched`, `round_ready` with `steps ["screen"]`, and
+`step_settled` with `answer {outcome "yes", level 0.05, model "stand-in"}`, then
+the result `{"intents": []}` under the "no intent: the caller's default" badge.
+The noise example shows the withhold intent. The tab needs no daemon: its
+WebAssembly build runs the rule against the stand-in replies typed into the tab.
+
+![The Navigate tab after the CI-failure example](../../media/slice-2-playground.png)
