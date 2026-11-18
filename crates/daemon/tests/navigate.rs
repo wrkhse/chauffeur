@@ -530,7 +530,7 @@ fn a_projects_file_naming_a_relative_path_is_refused() {
     let refused = chauffeur_daemon::run(&paths).unwrap_err().to_string();
 
     let expected = format!(
-        "{}: `work/app` is not an absolute path",
+        "{}: `\"work/app\"` is not an absolute path",
         paths.config.join("projects.json").display()
     );
     assert_eq!(refused, expected);
