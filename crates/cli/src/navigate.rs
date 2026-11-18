@@ -1,0 +1,605 @@
+//! `chauffeur navigate`: one request on stdin, the JSON-RPC messages that
+//! come back on stdout, one per line, and an exit status a script can test.
+
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::process::ExitCode;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+/// How much longer than the request's deadline the daemon is waited for.
+const MARGIN: Duration = Duration::from_secs(2);
+
+/// The deadline the daemon gives a request that names none.
+const DEFAULT_DEADLINE_MS: u64 = 3_000;
+const MAX_DEADLINE_MS: u64 = 30_000;
+const MAX_REPLY: u64 = 4 * 1024 * 1024;
+
+/// The ID of the one request sent.
+const ID: u64 = 1;
+
+/// How a navigation ended, as the command's exit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Intents or a verdict came back: 0.
+    Answered,
+    /// The daemon rejected the request: 1.
+    Rejected,
+    /// No daemon answered, or it speaks another protocol: 2.
+    Unavailable,
+}
+
+impl From<Ended> for ExitCode {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::Answered => Self::SUCCESS,
+            Ended::Rejected => Self::from(1),
+            Ended::Unavailable => Self::from(2),
+        }
+    }
+}
+
+/// Sends the request read from `input` to the daemon on `socket` and
+/// writes each message it sends back to `output`, until the reply.
+pub fn navigate(socket: &Path, input: &mut impl Read, output: &mut impl Write) -> Ended {
+    let mut text = Vec::new();
+    // The read is bounded so a stdin that never ends cannot exhaust memory,
+    // but it is not judged here: the line written to the daemon adds the
+    // JSON-RPC envelope to this JSON, so it is always the longer of the two,
+    // and the one check on that line refuses everything this bound could
+    // catch, with the same message. A stdin over the bound is therefore
+    // either not JSON, or refused by that check.
+    let limit = u64::try_from(chauffeur_daemon::MAX_LINE).unwrap_or(u64::MAX);
+    let read = input.take(limit.saturating_add(1)).read_to_end(&mut text);
+    let params: Value = match read.map(|_| serde_json::from_slice(&text)) {
+        Ok(Ok(params)) => params,
+        Ok(Err(error)) => {
+            return complain(
+                &format!("the request on stdin is not JSON: {error}"),
+                Ended::Rejected,
+            );
+        }
+        Err(error) => return complain(&format!("cannot read stdin: {error}"), Ended::Rejected),
+    };
+    let deadline = params
+        .get("deadline_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_DEADLINE_MS)
+        .min(MAX_DEADLINE_MS);
+    let request =
+        json!({ "jsonrpc": "2.0", "id": ID, "method": "chauffeur.navigate", "params": params });
+    let line = request.to_string();
+    // The daemon's limit counts the newline `writeln!` adds.
+    if line.len().saturating_add(1) > chauffeur_daemon::MAX_LINE {
+        return complain("request over 1 MiB", Ended::Rejected);
+    }
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return complain(
+            &format!("no daemon answers on {}", socket.display()),
+            Ended::Unavailable,
+        );
+    };
+    let wait = Duration::from_millis(deadline).saturating_add(MARGIN);
+    let until = Instant::now().checked_add(wait);
+    if writeln!(stream, "{line}").is_err() {
+        return complain("the daemon closed the connection", Ended::Unavailable);
+    }
+    let Ok(reader) = stream.try_clone() else {
+        return complain("cannot read from the daemon", Ended::Unavailable);
+    };
+    relay(&stream, BufReader::new(reader), until, output)
+}
+
+/// Copies each message to `output` until the reply to the request, or
+/// `until`, however many events arrive before it.
+///
+/// A scoped reader hands over each line as it comes, so a reply from a peer
+/// that closes at once is read without relying on a socket timeout, which
+/// fails once the peer is gone. One deadline bounds the whole reply, and
+/// shutting the stream down ends a read the relay no longer waits for.
+fn relay(
+    stream: &UnixStream,
+    reader: impl BufRead + Send,
+    until: Option<Instant>,
+    output: &mut impl Write,
+) -> Ended {
+    thread::scope(|scope| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let _reader = scope.spawn(move || read_lines(reader, &sender));
+        let ended = forward(&receiver, until, output);
+        // The reader may be in a read the relay no longer waits for.
+        let _ = stream.shutdown(Shutdown::Both);
+
+        ended
+    })
+}
+
+/// One thing the reader sent: the daemon's next line, or why no more come.
+enum Incoming {
+    /// A line, without its newline.
+    Line(String),
+    /// A line over `MAX_REPLY`, which is never printed.
+    OverLimit,
+    /// The read itself failed.
+    Failed(io::Error),
+}
+
+/// Reads the daemon's lines, each at most `MAX_REPLY + 1` bytes, sending
+/// each to `sender` and returning at the end of the input, an over-limit
+/// line, a read error, or a relay that stopped listening.
+fn read_lines(mut reader: impl BufRead, sender: &SyncSender<Incoming>) {
+    let limit = MAX_REPLY.saturating_add(1);
+    let over = usize::try_from(MAX_REPLY).unwrap_or(usize::MAX);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match (&mut reader).take(limit).read_line(&mut line) {
+            Ok(0) => return,
+            Ok(_) if line.len() > over => {
+                let _ = sender.send(Incoming::OverLimit);
+                return;
+            }
+            Ok(_) => {
+                if sender
+                    .send(Incoming::Line(std::mem::take(&mut line)))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(Incoming::Failed(error));
+                return;
+            }
+        }
+    }
+}
+
+/// Writes each line the reader sends until the request's answer, the
+/// deadline, or the end of the daemon's output.
+///
+/// One request goes over each connection, so any message carrying an `error`
+/// is its answer, even the `id: null` refusal the daemon writes when it is at
+/// its connection limit. A `result` answers only when it carries the
+/// request's id.
+fn forward(
+    receiver: &Receiver<Incoming>,
+    until: Option<Instant>,
+    output: &mut impl Write,
+) -> Ended {
+    loop {
+        let left = until.map(|until| until.saturating_duration_since(Instant::now()));
+        let arrived = left.map_or_else(
+            || receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            |left| receiver.recv_timeout(left),
+        );
+        let line = match arrived {
+            Ok(Incoming::Line(line)) => line,
+            Ok(Incoming::OverLimit) => {
+                return complain("the daemon's reply exceeds 4 MiB", Ended::Unavailable);
+            }
+            Ok(Incoming::Failed(error)) => {
+                return complain(&read_failure(&error), Ended::Unavailable);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return complain("the daemon did not answer in time", Ended::Unavailable);
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let text = line.trim_end();
+        // A reader that went away, such as `head -1`, has what it wanted.
+        if let Err(error) = writeln!(output, "{text}") {
+            return if error.kind() == io::ErrorKind::BrokenPipe {
+                Ended::Answered
+            } else {
+                complain(
+                    &format!("cannot write to stdout: {error}"),
+                    Ended::Unavailable,
+                )
+            };
+        }
+        let Ok(message) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        // One request goes over each connection, so any error is its answer,
+        // even one the daemon writes without an id at its connection limit.
+        if message.get("error").is_some() {
+            let reason = message
+                .pointer("/error/data/reason")
+                .and_then(Value::as_str);
+            return if reason == Some("unsupported_protocol") {
+                Ended::Unavailable
+            } else {
+                Ended::Rejected
+            };
+        }
+        if message.get("id") != Some(&json!(ID)) {
+            continue;
+        }
+        return match message.get("result") {
+            Some(_) => Ended::Answered,
+            None => Ended::Rejected,
+        };
+    }
+    complain(
+        "the daemon closed the connection without answering",
+        Ended::Unavailable,
+    )
+}
+
+/// Why reading from the daemon failed: a missed deadline, or anything else.
+fn read_failure(error: &io::Error) -> String {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        "the daemon did not answer in time".to_owned()
+    } else {
+        format!("cannot read from the daemon: {error}")
+    }
+}
+
+fn complain(message: &str, ended: Ended) -> Ended {
+    let _ = writeln!(io::stderr().lock(), "chauffeur navigate: {message}");
+    ended
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    struct FailedWriter(io::ErrorKind);
+
+    impl Write for FailedWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn relay_distinguishes_closed_pipe_from_other_write_errors() {
+        for (kind, expected) in [
+            (io::ErrorKind::BrokenPipe, Ended::Answered),
+            (io::ErrorKind::PermissionDenied, Ended::Unavailable),
+        ] {
+            let (stream, _peer) = UnixStream::pair().unwrap();
+            let reader = BufReader::new(&b"{}\n"[..]);
+            let until = Instant::now().checked_add(Duration::from_secs(1));
+            assert_eq!(
+                relay(&stream, reader, until, &mut FailedWriter(kind)),
+                expected
+            );
+        }
+    }
+
+    /// A stdin over the read bound is rejected before any connection: the
+    /// read holds at most `MAX_LINE + 1` bytes, so this one is not JSON, and
+    /// the missing socket would end a connection attempt with exit 2.
+    #[test]
+    fn stdin_over_the_read_bound_is_rejected_before_connecting() {
+        let bytes = vec![b' '; chauffeur_daemon::MAX_LINE.saturating_add(1)];
+        let mut input = bytes.as_slice();
+        assert_eq!(
+            navigate(Path::new("/missing"), &mut input, &mut Vec::new()),
+            Ended::Rejected
+        );
+    }
+
+    /// The reply limit as written, a literal so that editing `MAX_REPLY`
+    /// fails these tests instead of moving their target with it.
+    const REPLY_LIMIT: usize = 4 * 1024 * 1024;
+
+    /// A reply to the request, padded with spaces inside its empty result so
+    /// that, with its newline, it is `size` bytes.
+    fn padded_reply(size: usize) -> String {
+        let opening = r#"{"jsonrpc":"2.0","id":1,"result":{"#;
+        let closing = "}}\n";
+        let padding = size
+            .saturating_sub(opening.len())
+            .saturating_sub(closing.len());
+        format!("{opening}{}{closing}", " ".repeat(padding))
+    }
+
+    #[test]
+    fn a_reply_exactly_at_the_limit_is_answered() {
+        let line = padded_reply(REPLY_LIMIT);
+        assert_eq!(line.len(), REPLY_LIMIT);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut output = Vec::new();
+        assert_eq!(
+            relay(&stream, BufReader::new(line.as_bytes()), None, &mut output),
+            Ended::Answered
+        );
+        assert_eq!(output.as_slice(), line.as_bytes());
+    }
+
+    #[test]
+    fn a_reply_one_byte_over_the_limit_is_refused_and_never_printed() {
+        let size = REPLY_LIMIT.saturating_add(1);
+        let line = padded_reply(size);
+        assert_eq!(line.len(), size);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut output = Vec::new();
+        assert_eq!(
+            relay(&stream, BufReader::new(line.as_bytes()), None, &mut output),
+            Ended::Unavailable
+        );
+        assert_eq!(output, Vec::<u8>::new());
+    }
+
+    /// `relay` over one end of a socket pair, read through a clone as
+    /// `navigate` reads the daemon's lines.
+    fn relayed(ours: &UnixStream, until: Option<Instant>, output: &mut impl Write) -> Ended {
+        relay(
+            ours,
+            BufReader::new(ours.try_clone().unwrap()),
+            until,
+            output,
+        )
+    }
+
+    /// A daemon past its connection limit writes its rejection and closes at
+    /// once: the line is still read, and its reason is the exit status.
+    #[test]
+    fn a_rejection_from_a_peer_that_already_closed_is_relayed() {
+        let rejection = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"#,
+            r#""message":"the daemon is busy","data":{"reason":"busy"}}}"#
+        );
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(format!("{rejection}\n").as_bytes()).unwrap();
+        drop(peer);
+        let mut output = Vec::new();
+
+        assert_eq!(relayed(&ours, None, &mut output), Ended::Rejected);
+
+        assert_eq!(output.as_slice(), format!("{rejection}\n").as_bytes());
+    }
+
+    /// The daemon's connection-limit refusal carries `id: null`: it is the
+    /// request's answer all the same, so the command exits 1.
+    #[test]
+    fn a_busy_refusal_without_an_id_is_rejected() {
+        let refusal = json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "error": {
+                "code": -32_000,
+                "message": "the daemon is busy: it serves 64 connections already",
+                "data": { "reason": "busy" },
+            },
+        });
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(format!("{refusal}\n").as_bytes()).unwrap();
+        drop(peer);
+        let mut output = Vec::new();
+
+        assert_eq!(relayed(&ours, None, &mut output), Ended::Rejected);
+
+        assert_eq!(output.as_slice(), format!("{refusal}\n").as_bytes());
+    }
+
+    /// A daemon that never answers must not hold the command: the deadline
+    /// ends it. The peer keeps its end open past the assertion and then
+    /// drops it, so a wait that never returns fails on the message instead
+    /// of hanging the test.
+    #[test]
+    fn a_silent_peer_ends_at_the_deadline() {
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let _silent = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            drop(peer);
+        });
+        let until = Instant::now().checked_add(Duration::from_millis(100));
+        let mut output = Vec::new();
+        let started = Instant::now();
+
+        assert_eq!(relayed(&ours, until, &mut output), Ended::Unavailable);
+
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(1), "{waited:?} waiting");
+        assert_eq!(output, Vec::<u8>::new());
+    }
+
+    /// A daemon that trickles bytes without ever finishing its line cannot
+    /// extend the deadline: the whole reply is bounded, not each read.
+    #[test]
+    fn a_trickled_reply_ends_at_the_deadline() {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            for _ in 0..100 {
+                if peer.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let until = Instant::now().checked_add(Duration::from_millis(100));
+        let mut output = Vec::new();
+        let started = Instant::now();
+
+        let ended = relayed(&ours, until, &mut output);
+        let waited = started.elapsed();
+        drop(ours);
+        writer.join().unwrap();
+
+        assert_eq!(ended, Ended::Unavailable);
+        assert!(waited < Duration::from_secs(1), "{waited:?} waiting");
+        assert_eq!(output, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_read_failure_tells_a_missed_deadline_from_a_broken_read() {
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::WouldBlock] {
+            assert_eq!(
+                read_failure(&io::Error::from(kind)),
+                "the daemon did not answer in time"
+            );
+        }
+        let broken = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            read_failure(&broken),
+            format!("cannot read from the daemon: {broken}")
+        );
+    }
+
+    /// A socket path in a fresh folder of this test's own, short enough for
+    /// a Unix socket's path limit.
+    fn socket_path(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("chvn-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root.join("daemon.sock")
+    }
+
+    /// The request on stdin whose serialized line, the newline included, is
+    /// `size` bytes. The padding sits inside a JSON string, where spaces
+    /// survive serialization, and is counted from the real envelope rather
+    /// than assumed. Its deadline is short, so a client that wrongly
+    /// connects waits little.
+    fn request_of_line_bytes(size: usize) -> Vec<u8> {
+        let envelope = |params: Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": ID,
+                "method": "chauffeur.navigate",
+                "params": params,
+            })
+        };
+        let empty = envelope(json!({ "deadline_ms": 200, "pad": "" }))
+            .to_string()
+            .len();
+        let padding = size.saturating_sub(1).saturating_sub(empty);
+        assert!(padding > 0, "the line is {padding} bytes short of padding");
+        let params = json!({ "deadline_ms": 200, "pad": " ".repeat(padding) });
+        let line = envelope(params.clone()).to_string();
+        assert_eq!(
+            line.len().saturating_add(1),
+            size,
+            "the request line is the size asked for"
+        );
+        serde_json::to_vec(&params).unwrap()
+    }
+
+    /// How long a test's peer waits for the client to connect, and then for
+    /// its request line: a client that never gets there fails the test
+    /// instead of hanging the suite on a read that never returns.
+    const PEER_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// The listener's next connection, waited for at most `PEER_TIMEOUT`, so
+    /// a client that never connects cannot hang the peer. A stream that does
+    /// arrive has its read bounded too.
+    fn connection_within(listener: &UnixListener) -> Option<UnixStream> {
+        listener.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        while started.elapsed() < PEER_TIMEOUT {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // This platform's accepted streams inherit the listener's
+                    // nonblocking mode; the peer reads its line in full.
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(PEER_TIMEOUT)).unwrap();
+                    return Some(stream);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("cannot accept a connection: {error}"),
+            }
+        }
+        None
+    }
+
+    /// The listener's next connection, which a client inside the limit always
+    /// makes: one that never arrives fails the test instead of hanging it.
+    fn accepted(listener: &UnixListener) -> UnixStream {
+        let Some(stream) = connection_within(listener) else {
+            panic!("no connection reached the listener within {PEER_TIMEOUT:?}");
+        };
+        stream
+    }
+
+    /// The request's line, read through `stream` within `PEER_TIMEOUT`, so a
+    /// client that connects and then stops fails the test instead of hanging
+    /// the peer.
+    fn request_line(stream: &UnixStream) -> String {
+        let mut line = String::new();
+        let read = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
+        assert!(
+            read.is_ok(),
+            "the request's line never arrived within {PEER_TIMEOUT:?}: {read:?}"
+        );
+        line
+    }
+
+    /// A request whose line, its newline included, is exactly the daemon's
+    /// limit is sent and answered: the limit counts the newline `writeln!`
+    /// adds.
+    #[test]
+    fn a_request_at_the_line_limit_is_answered() {
+        const REPLY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let path = socket_path("limit");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = thread::spawn(move || {
+            let mut stream = accepted(&listener);
+            assert_eq!(request_line(&stream).len(), chauffeur_daemon::MAX_LINE);
+            writeln!(stream, "{REPLY}").unwrap();
+        });
+        let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE);
+        let mut input = request.as_slice();
+        let mut output = Vec::new();
+
+        assert_eq!(navigate(&path, &mut input, &mut output), Ended::Answered);
+
+        peer.join().unwrap();
+        assert_eq!(output.as_slice(), format!("{REPLY}\n").as_bytes());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A request one byte over the line limit is refused before connecting,
+    /// so the listener never sees it. A peer that does see a connection
+    /// reads its line, records it, and refuses at once, so a client that
+    /// wrongly connected ends instead of blocking on a write nobody drains.
+    #[test]
+    fn a_request_one_byte_over_the_line_limit_never_connects() {
+        const REFUSAL: &str = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"#,
+            r#""message":"the request line is over 1 MiB","data":{"reason":"over_limit"}}}"#
+        );
+        let path = socket_path("over");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = thread::spawn(move || {
+            let Some(mut stream) = connection_within(&listener) else {
+                return false;
+            };
+            request_line(&stream);
+            let _ = writeln!(stream, "{REFUSAL}");
+            true
+        });
+        let request = request_of_line_bytes(chauffeur_daemon::MAX_LINE.saturating_add(1));
+        let mut input = request.as_slice();
+        let mut output = Vec::new();
+
+        assert_eq!(navigate(&path, &mut input, &mut output), Ended::Rejected);
+
+        assert!(
+            !peer.join().unwrap(),
+            "the request's line reached the listener"
+        );
+        assert_eq!(output, Vec::<u8>::new());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+}
