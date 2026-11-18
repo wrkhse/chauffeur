@@ -126,13 +126,17 @@ termctrl mark rc5 end
 termctrl stop rc5
 ```
 
-Render the recording with the plan's captions and the footer. At
-`--cols 120`, a 7 px cell and a 2x pixel ratio, the video is about 1700 px
-wide:
+Render the recording with the plan's captions and the footer into the
+scratch folder. At `--cols 120`, a 7 px cell and a 2x pixel ratio, the video
+is about 1700 px wide, so the GIF scales it to 1200 px at 10 frames a second:
 
 ```sh
-termctrl video "$TMPDIR/rc5.termctrl" --out docs/media/slice-2.mp4 \
+termctrl video "$TMPDIR/rc5.termctrl" --out "$TMPDIR/slice-2.mp4" \
   --edit scripts/e2e/rc5.plan.json --cell-width 7 --pixel-ratio 2 --footer
+
+ffmpeg -y -i "$TMPDIR/slice-2.mp4" -vf \
+  "fps=10,scale=1200:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
+  -loop 0 docs/media/slice-2.gif
 ```
 
 ### How it fails

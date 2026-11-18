@@ -1,7 +1,7 @@
 # Recording a slice
 
 Slice 1's recording, as commands to adapt for the next slice. It ends with
-`docs/media/slice-1.mp4`: OpenCode above the audit log, 17 seconds, in which
+`docs/media/slice-1.gif`: OpenCode above the audit log, 17 seconds, in which
 the agent commits, Chauffeur's message arrives and the agent amends.
 
 ## Set up
@@ -116,11 +116,14 @@ ffmpeg -y -i oc.mp4 -i audit.mp4 -filter_complex \
   "[0:v][1:v]vstack=inputs=2:shortest=1,scale=1600:-2:flags=lanczos,format=yuv420p" \
   -c:v libx264 -preset slow -crf 26 -movflags +faststart -an slice-1.mp4
 
-cp slice-1.mp4 ~/path/to/chauffeur/docs/media/slice-1.mp4
+ffmpeg -y -i slice-1.mp4 -vf \
+  "fps=10,scale=1200:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
+  -loop 0 slice-1.gif
+
+cp slice-1.gif ~/path/to/chauffeur/docs/media/slice-1.gif
 ```
 
-Render in the scratch folder and copy only the finished video into the
-repository.
+Render in the scratch folder and copy only the GIF into the repository.
 
 ## Check and clean up
 
