@@ -523,7 +523,8 @@ fn finished<T>(receive: &Receiver<(usize, T)>, wait: Duration) -> Option<(usize,
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
@@ -534,7 +535,23 @@ mod tests {
     use chauffeur_runtime::{Cancel, Pool, Ran, Source};
     use serde_json::{Value, json};
 
-    use super::{Ask, Report, Router, dispatch, finished};
+    use super::{Ask, Hook, Left, Report, Router, RuleRun, dispatch, finished};
+
+    /// A rule hooking `sourcefed.event`, for a test that settles its run
+    /// without running it.
+    fn hook(id: &str, project: Option<&str>) -> Hook {
+        let rule = Rule::parse(
+            id,
+            r#"{ "on": "sourcefed.event", "strategy": [{ "id": "screen", "judge": "system-one",
+                 "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                          "instructions": "Is this noise?" } }] }"#,
+        )
+        .unwrap();
+        Hook {
+            rule: Arc::new(rule),
+            project: project.map(PathBuf::from),
+        }
+    }
 
     /// The dispatcher keeps no more jobs running than the pool has workers:
     /// every one of 16 jobs comes back, on a pool worker, with no more than
@@ -999,6 +1016,83 @@ mod tests {
 
             assert_eq!(done.entry, logged);
             assert_eq!(done.unsettled, Some(word), "the word for {logged}");
+            assert!(done.then.is_none() && done.run.is_none());
+        }
+    }
+
+    /// What a dispatch leaves undone is settled in hook order: a run a worker
+    /// started is settled as one cut at the deadline, one no worker could
+    /// start as refused with its reason, and one no worker started as
+    /// skipped. Only the first two report a result, so only they reach `ran`;
+    /// a project rule's line names its project, and a loaded rule's does not.
+    #[test]
+    fn settle_logs_each_run_it_is_left_with_at_its_own_end() {
+        let hooked = [
+            hook("acme/triage", Some("/projects/acme")),
+            hook("sourcefed/triage", None),
+            hook("acme/comments", Some("/projects/acme")),
+        ];
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(Vec::new()),
+            deadline: Instant::now(),
+            cancel: Cancel::new(Source::Harness),
+        };
+        let left = Left {
+            open: std::iter::once(0).collect(),
+            refused: vec![(1, "no system-one model is registered".to_owned())],
+            unstarted: vec![2],
+        };
+        let deadline = json!({
+            "rule": "acme/triage",
+            "project": "/projects/acme",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "deadline": true,
+        });
+        let refused = json!({
+            "rule": "sourcefed/triage",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "refused": "no system-one model is registered",
+        });
+        let skipped = json!({
+            "rule": "acme/comments",
+            "project": "/projects/acme",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "skipped": "deadline",
+        });
+        let reported = Mutex::new(Vec::new());
+        let ran = |rule: &Rule, done: &RuleRun| {
+            let mut calls = reported.lock().unwrap();
+            calls.push((rule.id().to_owned(), done.entry.clone()));
+        };
+        let mut returned = BTreeMap::new();
+
+        Router::settle(left, &hooked, &ask, &ran, &mut returned);
+
+        let calls = reported.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            [
+                ("acme/triage".to_owned(), deadline.clone()),
+                ("sourcefed/triage".to_owned(), refused.clone()),
+            ],
+            "the deadline and the refusal report a result, and the skip none"
+        );
+        let indexes: Vec<usize> = returned.keys().copied().collect();
+        assert_eq!(indexes, [0, 1, 2], "each index is settled exactly once");
+        let settled = [
+            (0, deadline, Some("deadline")),
+            (1, refused, Some("refused")),
+            (2, skipped, None),
+        ];
+        for (index, entry, word) in settled {
+            let done = returned.get(&index).unwrap();
+            assert_eq!(done.entry, entry, "the entry for index {index}");
+            assert_eq!(done.unsettled, word, "the word for index {index}");
             assert!(done.then.is_none() && done.run.is_none());
         }
     }
