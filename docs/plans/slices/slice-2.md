@@ -75,15 +75,19 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
   path of at most 4096 bytes, the `project_bytes` limit; a relative path, or
   one that is not text, is `invalid`. The daemon then reads that project's
   `.chauffeur/rules/` too, bounded and cached, and applies the project's
-  System Two allowance. The project and the entries of `projects.json` are
-  canonicalized for that allowance, so a symlinked worktree, or `/var` and
-  `/private/var` spellings, still match.
+  System Two allowance. The project is canonicalized once, and that one path
+  serves the walk, the allowance, the cooldown key and the audit line, so a
+  symlinked worktree, or `/var` and `/private/var` spellings, is one project.
+  A request whose project cannot be resolved is refused, with a message that
+  quotes the path and says why; it is not treated as having no rules.
 - **Inline trust:** an inline strategy carries its caller's user-level trust,
   so a judge that names a `model`, and a `person` judge, are allowed. Inline
   System Two, a judge whose tier is `system-two` or a step naming
   `system-two`, runs only when the request names a `project` that the
   user-level `projects.json` in Chauffeur's config folder lists. That file is
-  a JSON list of absolute project paths, empty by default. Without a
+  a JSON list of absolute project paths, empty by default. Each entry is
+  canonicalized when that file loads, not on each navigation, so a symlinked
+  worktree that moves needs a reload for its allowance to follow. Without a
   `project` the request is refused at parse with `judge_unavailable`; a
   project the list does not name is refused by the daemon with
   `judge_unavailable` too. System Two stays unconfigured until slice 11.
@@ -600,20 +604,26 @@ pub struct Paths {
 }
 ```
 
-A project's rules come from `<project>/.chauffeur/rules/`. The project and
-that folder are canonicalized, so a folder that resolves outside the project
+A project's rules come from `<project>/.chauffeur/rules/`. The request's
+project is canonicalized once, and that one path serves the walk, the
+`projects.json` allowance, the cooldown key and the audit line, so a
+symlinked worktree, or `/var/...` and `/private/var/...`, is one project with
+one walk, one allowance, one cooldown and one audit spelling. Its rules
+folder is canonicalized too, so a folder that resolves outside the project
 is not read, and the walk skips every symlink: a clone cannot add a rule or
-a folder from outside it. The walk examines at most 4,096 entries in at most
-256 folders and takes at most 512 rule files and 8 MiB of them in all, each
-at most 1 MiB, with IDs relative to that folder. A bound stops the walk with
-a refusal, "the project's rules folder is over …", and the rules found
-before it still load. A rule whose ID a shipped, user or integration rule
-already has is skipped, with a line saying so, so a cloned repository cannot
-replace the user's own rules. A project rule naming a `model` is refused,
-since models load only from shipped and user configuration, as is one using
-the `person` tier, since only shipped and user configuration may ask a
-person, or System Two for a project `projects.json` does not list. A rule
-cannot name a placeholder at all: a judge entry holds only a tier, an
+a folder from outside it. A request whose project cannot be resolved is
+refused, with a message that quotes the path and says why, rather than
+answered as a project with no rules. The walk examines at most 4,096 entries
+in at most 256 folders and takes at most 512 rule files and 8 MiB of them in
+all, each at most 1 MiB, with IDs relative to that folder. A bound stops the
+walk with a refusal, "the project's rules folder is over …", and the rules
+found before it still load. A rule whose ID a shipped, user or integration
+rule already has is skipped, with a line saying so, so a cloned repository
+cannot replace the user's own rules. A project rule naming a `model` is
+refused, since models load only from shipped and user configuration, as is
+one using the `person` tier, since only shipped and user configuration may
+ask a person, or System Two for a project `projects.json` does not list. A
+rule cannot name a placeholder at all: a judge entry holds only a tier, an
 optional model and a confidence, and refuses unknown fields.
 Each refusal is printed to stderr once for each load of a changed folder,
 with its path and reason escaped, so a rule file cannot forge a line; the
@@ -630,12 +640,9 @@ order, all under the request's admission.
 
 A project rule's ID is relative to its own folder, so its intents read like
 a shipped, integration or user rule's with the same ID; an intent carries no
-source, and a later slice may add an optional `source` field. The daemon
-canonicalizes the request's project once, and keys a project rule's cooldown
-and its audit entry's `project` by that path, so one project reached through
-a symlink, or as `/var/...` and `/private/var/...`, is one project with one
-cooldown, while two projects' rules with the same ID do not suppress each
-other.
+source, and a later slice may add an optional `source` field. Cooldowns are
+keyed by the project's one canonical path, so two projects' rules with the
+same ID do not suppress each other.
 
 Verified by:
 

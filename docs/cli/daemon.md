@@ -37,12 +37,15 @@ chauffeur daemon run --models fixtures/placeholders.json
   projects whose inline System Two strategies may run, as a JSON array of
   absolute paths, such as `["/Users/me/src/app"]`. A project it does not list
   is refused with `judge_unavailable`; with no file, no project may run one.
-  Each entry is canonicalized when the file loads, and a request's `project`
-  when it arrives, so a symlinked worktree, or `/var` and `/private/var`
-  spellings, still match; an entry that does not exist yet stays as written.
-  The file may be at most 64 KiB and list at most 256 projects, and one that
-  is larger or names a relative path is refused: the daemon does not start
-  with it, and a reload keeps the list loaded before.
+  Each entry is canonicalized when the file loads, not on each navigation, so
+  a symlinked worktree that moves needs a reload for its allowance to follow;
+  an entry that does not exist yet stays as written. A request's `project` is
+  canonicalized once, and that one path serves the walk, the allowance, the
+  cooldown key and the audit line, so a symlinked worktree, or `/var` and
+  `/private/var` spellings, is one project. The file may be at most 64 KiB
+  and list at most 256 projects, and one that is larger or names a relative
+  path is refused: the daemon does not start with it, and a reload keeps the
+  list loaded before.
 - **Keys** come from its own environment, so start it where the keys are set,
   or put them in the service's environment file when Homebrew runs it.
 - **Several calls per connection.** Each call runs on its own thread: at
@@ -109,20 +112,23 @@ rule files are read from each of the shipped and your own `rules/`.
 
 A navigation naming a `project` also reads that project's
 `.chauffeur/rules/`, with IDs relative to that folder, after the rules above.
-The project and its rules folder are canonicalized, so a folder that resolves
-outside the project is not read, and the walk skips every symlink. It
-examines at most 4,096 entries in at most 256 folders and takes at most 512
-rule files and 8 MiB of them in all, each at most 1 MiB; a folder over a
-bound is refused with a line saying so. The daemon caches at most 32 projects
-by each file's path, length, modification time, inode and change time, and
-the configuration load that built the entry, so an edit applies to the next
-navigation. The daemon canonicalizes the request's project once, and keys a
-project rule's cooldown and its audit entry's `project` by that path, so one
-project reached through a symlink, or as `/var/...` and `/private/var/...`,
-is one project with one cooldown. A project that cannot be canonicalized,
-such as a folder that is not there, has no rules. A project rule that names a
-`model`, uses the `person` tier, or uses System Two for a project
-`projects.json` does not list, is refused: only shipped and user
+The daemon canonicalizes the request's project once, and that one path serves
+the walk of its rules, the `projects.json` allowance, a project rule's
+cooldown key and the audit entry's `project`, so one project reached through
+a symlink, or as `/var/...` and `/private/var/...`, has one walk, one
+allowance, one cooldown and one audit spelling. The rules folder is
+canonicalized too, so a folder that resolves outside the project is not read,
+and the walk skips every symlink. A navigation whose project cannot be
+resolved, such as a folder that is not there, is refused, with a message
+that quotes the path and says why it did not resolve; the request is not
+treated as having no rules. The walk examines at most 4,096 entries in at
+most 256 folders and takes at most 512 rule files and 8 MiB of them in all,
+each at most 1 MiB; a folder over a bound is refused with a line saying so.
+The daemon caches at most 32 projects by each file's path, length,
+modification time, inode and change time, and the configuration load that
+built the entry, so an edit applies to the next navigation. A project rule
+that names a `model`, uses the `person` tier, or uses System Two for a
+project `projects.json` does not list, is refused: only shipped and user
 configuration may name a model or ask a person. A rule whose ID a loaded rule
 already has is skipped, with a line saying so, so a clone cannot replace the
 user's own rules. The daemon says why on stderr once for each load of the

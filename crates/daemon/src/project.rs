@@ -8,12 +8,12 @@
 //! already has is skipped, with a line saying so: a cloned repository cannot
 //! replace the user's own rules.
 //!
-//! A project's folder is untrusted, since a clone brings it. A project that
-//! cannot be canonicalized has no rules, and a `.chauffeur/rules/` that
-//! resolves outside the project is not read. The walk skips every symlink and
-//! stops at [`MAX_ENTRIES`] entries, [`MAX_FOLDERS`] folders, [`MAX_RULES`]
-//! rule files or [`MAX_BYTES`] of rule files, recording a refusal; the rules
-//! found before the cap still load.
+//! A project's folder is untrusted, since a clone brings it. The navigation
+//! resolves the project once, and a `.chauffeur/rules/` that resolves outside
+//! it is not read. The walk skips every symlink, checks each folder again
+//! before it is read, and stops at [`MAX_ENTRIES`] entries, [`MAX_FOLDERS`]
+//! folders, [`MAX_RULES`] rule files or [`MAX_BYTES`] of rule files,
+//! recording a refusal; the rules found before the cap still load.
 //!
 //! An edit that keeps a rule file's length and modification time changes its
 //! inode or change time, so the next navigation reloads. An edit within the
@@ -124,27 +124,28 @@ impl Cache {
 
     /// `project`'s rules, reloaded when its folder's signature changed.
     ///
-    /// The project and its rules folder are canonicalized first: a project
-    /// that cannot be, or a folder resolving outside it, has no rules. The
-    /// walk and the load run outside the lock; only the cache lookup and the
-    /// insert take it. Refusals print on every load, and a load happens only
-    /// on a cache miss: a changed folder is reported once, though two misses
-    /// racing on the same project may both load and both report.
+    /// `project` is the canonical path the navigation resolved, and its rules
+    /// folder is canonicalized: a folder resolving outside the project has no
+    /// rules. The walk and the load run outside the lock; only the cache
+    /// lookup and the insert take it. Refusals print on every load, and a
+    /// load happens only on a cache miss: a changed folder is reported once,
+    /// though two misses racing on the same project may both load and both
+    /// report.
     #[must_use]
     pub fn rules(&self, loaded: &Loaded, project: &Path) -> Arc<Rules> {
-        let Some((project, folder)) = rules_folder(project) else {
+        let Some(folder) = rules_folder(project) else {
             return Arc::new(Rules::empty());
         };
         let epoch = loaded.epoch();
         let signature = signature(&folder);
         if let Ok(mut entries) = self.entries.lock()
-            && let Some(cached) = entries.get(epoch, &project, &signature)
+            && let Some(cached) = entries.get(epoch, project, &signature)
         {
             return cached;
         }
-        let rules = Arc::new(load(loaded, &project, &folder, &signature));
+        let rules = Arc::new(load(loaded, project, &folder, &signature));
         if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(epoch, project, signature, Arc::clone(&rules));
+            entries.insert(epoch, project.to_path_buf(), signature, Arc::clone(&rules));
         }
         for refused in &rules.refused {
             eprintln!("chauffeur: {refused}");
@@ -208,23 +209,23 @@ impl Entries {
     }
 }
 
-/// The project's canonical path and its canonical rules folder, when the
-/// folder is inside the project. A project that cannot be canonicalized, or
-/// a rules folder that resolves outside it, has no rules.
-fn rules_folder(project: &Path) -> Option<(PathBuf, PathBuf)> {
-    let project = std::fs::canonicalize(project).ok()?;
+/// The project's canonical rules folder, when it is inside the project.
+/// `project` is the canonical path the navigation resolved; only the folder
+/// is canonicalized, so one that resolves outside the project is not read.
+fn rules_folder(project: &Path) -> Option<PathBuf> {
     let folder = std::fs::canonicalize(project.join(RULES)).ok()?;
-    folder.starts_with(&project).then_some((project, folder))
+    folder.starts_with(project).then_some(folder)
 }
 
-/// The path quoted and escaped for a line on stderr, so a rule file cannot
-/// forge one.
-fn quoted(path: &Path) -> String {
+/// The path quoted and escaped for a message, so a project's folder or a
+/// rule file cannot forge a line.
+pub fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.to_string_lossy().escape_debug())
 }
 
 /// The folder's rule files and the state that says whether they changed,
-/// from one bounded walk that skips symlinks.
+/// from one bounded walk that skips symlinks and re-checks each folder before
+/// it reads it.
 fn signature(folder: &Path) -> Signature {
     let shown = quoted(folder);
     let mut files = Vec::new();
@@ -243,6 +244,13 @@ fn signature(folder: &Path) -> Signature {
             break;
         }
         folders = folders.saturating_add(1);
+        if !inside(&next, folder) {
+            refused = Some(format!(
+                "{shown}: {} is not a folder inside the project",
+                quoted(&next)
+            ));
+            break;
+        }
         let Ok(entries) = std::fs::read_dir(&next) else {
             continue;
         };
@@ -292,6 +300,19 @@ fn signature(folder: &Path) -> Signature {
     }
     files.sort_by(|(one, _), (other, _)| one.cmp(other));
     Signature { files, refused }
+}
+
+/// Whether `path` is still a folder inside `folder`: the walk reads a folder
+/// it queued only while it is not a symlink and still resolves inside the
+/// project's rules.
+fn inside(path: &Path, folder: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(folder))
 }
 
 impl State {
@@ -418,7 +439,8 @@ mod tests {
         }
     }
 
-    /// A uniquely named temporary folder, emptied.
+    /// A uniquely named temporary folder, emptied, as the filesystem
+    /// resolves it.
     fn temporary(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -429,7 +451,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("the temporary folder should be writable");
-        path
+        fs::canonicalize(&path).expect("the temporary folder should resolve")
     }
 
     /// A load whose shipped rules are `rules`, each a name and its file's
@@ -524,7 +546,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, project.join(".chauffeur/rules/x.json"))
             .expect("the symlink");
 
-        let (_, folder) = rules_folder(&project).expect("the rules folder is inside it");
+        let folder = rules_folder(&project).expect("the rules folder is inside it");
         let walked = signature(&folder);
 
         assert!(walked.files.is_empty(), "the symlink was skipped");
@@ -544,10 +566,35 @@ mod tests {
         std::os::unix::fs::symlink(&outside, project.join(".chauffeur/rules/linked"))
             .expect("the symlink");
 
-        let (_, folder) = rules_folder(&project).expect("the rules folder is inside it");
+        let folder = rules_folder(&project).expect("the rules folder is inside it");
         let walked = signature(&folder);
 
         assert!(walked.files.is_empty(), "the symlinked folder was skipped");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A folder the walk queued is checked again before it is read: one that
+    /// is a symlink by then is refused, not followed.
+    #[test]
+    fn a_folder_that_is_a_symlink_when_it_is_read_is_refused() {
+        let root = temporary("swapped");
+        let real = root.join("real");
+        fs::create_dir_all(&real).expect("the real rules folder");
+        fs::write(real.join("x.json"), "{}").expect("a rule file");
+        let link = root.join("rules");
+        std::os::unix::fs::symlink(&real, &link).expect("the symlink");
+
+        let walked = signature(&link);
+
+        assert!(walked.files.is_empty(), "the symlinked folder was not read");
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: {} is not a folder inside the project",
+                quoted(&link),
+                quoted(&link)
+            ))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -571,9 +618,9 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A project that is not there has no rules.
+    /// A project that is not there has no rules folder.
     #[test]
-    fn a_project_that_cannot_be_canonicalized_has_no_rules() {
+    fn a_project_that_is_not_there_has_no_rules_folder() {
         let root = temporary("missing");
 
         assert!(rules_folder(&root.join("not-there")).is_none());
@@ -592,10 +639,12 @@ mod tests {
         let walked = signature(&folder);
 
         assert!(walked.files.is_empty(), "none is a rule file");
-        let refused = walked.refused.expect("the walk stopped at its bound");
-        assert!(
-            refused.contains(&format!("over {MAX_ENTRIES} entries")),
-            "{refused}"
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: the project's rules folder is over {MAX_ENTRIES} entries",
+                quoted(&folder)
+            ))
         );
         let _ = fs::remove_dir_all(&folder);
     }
@@ -636,16 +685,19 @@ mod tests {
             MAX_RULES,
             "the files before the cap are taken"
         );
-        let refused = walked.refused.expect("the walk stopped at its bound");
-        assert!(
-            refused.contains(&format!("over {MAX_RULES} rule files")),
-            "{refused}"
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: the project's rules folder is over {MAX_RULES} rule files",
+                quoted(&folder)
+            ))
         );
         let _ = fs::remove_dir_all(&folder);
     }
 
     /// A path is shown wrapped in quotes with the quote and newline inside
-    /// it escaped, so a rule file's name cannot forge a line on stderr.
+    /// it escaped, so a project's folder or a rule file's name cannot forge a
+    /// line.
     #[test]
     fn a_quoted_path_escapes_a_quote_and_a_newline() {
         assert_eq!(
@@ -692,10 +744,12 @@ mod tests {
         let walked = signature(&folder);
 
         assert!(walked.files.is_empty(), "the file was not taken");
-        let refused = walked.refused.expect("the walk stopped at its bound");
-        assert!(
-            refused.contains(&format!("over {MAX_MIB} MiB of rule files")),
-            "{refused}"
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: the project's rules folder is over {MAX_MIB} MiB of rule files",
+                quoted(&folder)
+            ))
         );
         let _ = fs::remove_dir_all(&folder);
     }
@@ -714,7 +768,8 @@ mod tests {
         let project = root.join("project");
         fs::create_dir_all(project.join(".chauffeur/rules")).expect("the rules folder");
         fs::write(project.join(".chauffeur/rules/taken.json"), "{}").expect("the colliding rule");
-        let (project, folder) = rules_folder(&project).expect("the rules folder is inside it");
+        let folder = rules_folder(&project).expect("the rules folder is inside it");
+        let project = fs::canonicalize(&project).expect("the project resolves");
         let walked = signature(&folder);
 
         let rules = load(&loaded, &project, &folder, &walked);

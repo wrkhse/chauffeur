@@ -437,9 +437,12 @@ fn system_two(project: &str) -> Value {
 #[test]
 fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
     let paths = paths("s2-unlisted", &models(Duration::ZERO));
+    let unlisted = paths.state.parent().unwrap().join("unlisted");
+    fs::create_dir_all(&unlisted).unwrap();
+    let canonical = fs::canonicalize(&unlisted).unwrap();
     let mut caller = Caller::new(start(&paths));
 
-    caller.navigate(1, &system_two("/nowhere/listed"));
+    caller.navigate(1, &system_two(&unlisted.display().to_string()));
     let reply = caller.message();
 
     assert_eq!(
@@ -448,7 +451,10 @@ fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
     );
     assert_eq!(
         reply["error"]["message"],
-        "System Two runs only for a project listed in projects.json, and /nowhere/listed is not",
+        format!(
+            "System Two runs only for a project listed in projects.json, and {} is not",
+            canonical.display()
+        ),
         "the refusal names the project and the file that allows one: {reply}"
     );
 }
@@ -456,10 +462,16 @@ fn an_inline_system_two_for_a_project_not_listed_is_unavailable() {
 #[test]
 fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
     let paths = paths("s2-listed", &models(Duration::ZERO));
-    fs::write(paths.config.join("projects.json"), r#"["/work/app"]"#).unwrap();
+    let project = paths.state.parent().unwrap().join("app");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        paths.config.join("projects.json"),
+        json!([project.display().to_string()]).to_string(),
+    )
+    .unwrap();
     let mut caller = Caller::new(start(&paths));
 
-    caller.navigate(1, &system_two("/work/app"));
+    caller.navigate(1, &system_two(&project.display().to_string()));
     let reply = caller.message();
 
     assert_eq!(
@@ -476,7 +488,7 @@ fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
 /// one of its spellings: an inline System Two request through the link passes
 /// the allowance and fails only for having no model, as the folder itself
 /// does. A project that is not listed is still refused, and the refusal names
-/// the path its request gave.
+/// its canonical path.
 #[test]
 fn an_inline_system_two_for_a_listed_project_reached_through_a_symlink_is_allowed() {
     let paths = paths("s2-symlink", &models(Duration::ZERO));
@@ -507,12 +519,18 @@ fn an_inline_system_two_for_a_listed_project_reached_through_a_symlink_is_allowe
         "the link is a spelling of the listed project: {reply}"
     );
 
-    caller.navigate(2, &system_two("/nowhere/listed"));
+    let other = paths.state.parent().unwrap().join("other");
+    fs::create_dir_all(&other).unwrap();
+    let canonical_other = fs::canonicalize(&other).unwrap();
+    caller.navigate(2, &system_two(&other.display().to_string()));
     let unlisted = caller.until_reply(2).pop().unwrap();
 
     assert_eq!(
         unlisted["error"]["message"],
-        "System Two runs only for a project listed in projects.json, and /nowhere/listed is not",
+        format!(
+            "System Two runs only for a project listed in projects.json, and {} is not",
+            canonical_other.display()
+        ),
         "{unlisted}"
     );
 }
@@ -990,6 +1008,36 @@ fn a_deadline_that_cuts_a_rule_short_settles_each_step_as_failed() {
     }
 }
 
+/// A project that cannot be resolved refuses the navigation rather than
+/// running as a project with no rules, naming the quoted path and why it did
+/// not resolve.
+#[test]
+fn a_navigation_naming_a_project_that_cannot_be_resolved_is_refused() {
+    let paths = paths("unresolved", &models(Duration::ZERO));
+    let missing = paths.state.parent().unwrap().join("not-there");
+    let mut caller = Caller::new(start(&paths));
+
+    caller.navigate(1, &with_project(event("CI failed"), &missing));
+    let reply = caller.message();
+
+    assert_eq!(
+        reply,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32_602,
+                "message": format!(
+                    "project \"{}\" cannot be resolved: entity not found",
+                    missing.display()
+                ),
+                "data": { "reason": "invalid" }
+            }
+        }),
+        "the project is refused, not read as one with no rules: {reply}"
+    );
+}
+
 #[test]
 fn a_project_rule_returns_its_intents_alongside_the_integrations() {
     let paths = paths("project-rule", &models(Duration::ZERO));
@@ -1129,6 +1177,7 @@ fn editing_a_project_rule_changes_the_next_navigation() {
 fn adding_a_project_rule_changes_the_next_navigation() {
     let paths = paths("project-add", &models(Duration::ZERO));
     let project = paths.state.parent().unwrap().join("project");
+    fs::create_dir_all(&project).unwrap();
     let mut caller = Caller::new(start(&paths));
     let request = with_project(event("codecov[bot]: Coverage 81.2%"), &project);
 
