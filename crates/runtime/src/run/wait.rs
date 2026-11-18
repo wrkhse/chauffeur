@@ -1,12 +1,13 @@
 //! Waiting for a job on a worker until it finishes, its deadline passes or
 //! its caller cancels it. A result that comes after is dropped.
 
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use super::pool::Pool;
+use super::pool::{ExecuteError, Pool};
 use crate::{Permit, Source};
 
 /// How often a waiting caller looks at its cancellation.
@@ -64,7 +65,8 @@ impl Cancel {
 }
 
 /// How waiting for a job ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum Waited<T> {
     /// The job finished in time.
     Done(T),
@@ -72,8 +74,12 @@ pub enum Waited<T> {
     Deadline,
     /// The caller cancelled first.
     Cancelled,
-    /// The job could not start, or its worker stopped without a result.
-    Refused(String),
+    /// Every worker was busy.
+    Busy,
+    /// The pool could not start the job's worker, keeping the error it gave.
+    Failed(io::Error),
+    /// The job's worker stopped without a result.
+    Stopped,
 }
 
 /// Runs `job` on `pool` and waits for it until `deadline` or until
@@ -100,7 +106,9 @@ pub fn within<T: Send + 'static>(
         drop(shared);
     }));
     if let Err(error) = started {
-        return Waited::Refused(format!("cannot start a worker: {error}"));
+        // A pool that cannot take the job is not asked again: the deadline
+        // would only pass while waiting.
+        return not_started(error);
     }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -115,9 +123,35 @@ pub fn within<T: Send + 'static>(
         match received {
             Ok(done) => return Waited::Done(done),
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                return Waited::Refused("the run's worker stopped".to_owned());
-            }
+            Err(RecvTimeoutError::Disconnected) => return Waited::Stopped,
         }
+    }
+}
+
+/// How a job the pool did not take ends the wait.
+fn not_started<T>(error: ExecuteError) -> Waited<T> {
+    match error {
+        ExecuteError::Busy => Waited::Busy,
+        ExecuteError::Spawn(error) => Waited::Failed(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{ExecuteError, Waited, not_started};
+
+    /// A worker whose thread could not start is not a busy pool: the
+    /// refusal keeps the error that stopped it.
+    #[test]
+    fn a_worker_that_could_not_start_keeps_its_error() {
+        let refused = not_started::<()>(ExecuteError::Spawn(io::Error::other("no thread")));
+
+        assert!(matches!(refused, Waited::Failed(error) if error.to_string() == "no thread"));
+        assert!(matches!(
+            not_started::<()>(ExecuteError::Busy),
+            Waited::Busy
+        ));
     }
 }

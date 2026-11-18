@@ -119,7 +119,7 @@ fn with_no_model_answering_the_step_fails_and_nothing_is_returned() {
 }
 
 #[test]
-fn a_run_whose_worker_stops_is_refused_at_once_not_late() {
+fn a_run_whose_worker_stops_ends_at_once_not_late() {
     let models = r#"{ "models": { "jev": { "format": "systemone", "endpoint": "http://127.0.0.1:9", "model": "jev-latest",
                                           "key": { "env": "TYPESAFE_API_KEY" } } },
                       "tiers": { "system-one": ["jev"] } }"#;
@@ -137,10 +137,7 @@ fn a_run_whose_worker_stops_is_refused_at_once_not_late() {
         Duration::from_secs(5),
     );
 
-    assert!(
-        matches!(&ran, Ran::Refused(reason) if reason.contains("worker")),
-        "{ran:?}"
-    );
+    assert!(matches!(&ran, Ran::Stopped), "{ran:?}");
     assert!(started.elapsed() < Duration::from_secs(1));
 }
 
@@ -353,10 +350,7 @@ fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() 
         in_ms(1_000),
         &Cancel::new(Source::Integration),
     );
-    assert!(
-        matches!(&refused, Ran::Refused(reason) if reason.contains("busy")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Ran::Busy), "{refused:?}");
 
     // The harness pool is separate, so its strategy still settles.
     let harness = Cancel::new(Source::Harness).admitted(admission.admit(Source::Harness).unwrap());

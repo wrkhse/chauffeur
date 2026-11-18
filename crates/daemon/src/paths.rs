@@ -13,12 +13,15 @@ pub struct Paths {
     pub name: String,
     /// The daemon's socket.
     pub socket: PathBuf,
-    /// The user's configuration: `models.json`, `rules/`, `redaction.json`.
+    /// The user's configuration: `models.json`, `projects.json`, `rules/`,
+    /// `redaction.json`.
     pub config: PathBuf,
     /// Shipped content: `models/`, `rules/`, `safety/`.
     pub distribution: PathBuf,
     /// What the daemon keeps across restarts: the audit log.
     pub state: PathBuf,
+    /// A `models.json` used in place of the shipped and the user's, for tests.
+    pub models: Option<PathBuf>,
 }
 
 impl Paths {
@@ -63,6 +66,7 @@ impl Paths {
             config,
             distribution,
             state,
+            models: None,
         }
     }
 }

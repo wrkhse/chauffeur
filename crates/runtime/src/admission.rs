@@ -52,21 +52,30 @@ impl Capacity {
     };
 }
 
-/// Why a navigation was not admitted.
+/// Why a navigation was not admitted, and the limit it reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub struct Busy {
     /// The source that asked.
     pub from: Source,
-    /// Whether the source's share, rather than the global capacity, was full.
-    pub share: bool,
+    /// The limit that was reached, carrying how many calls it allows.
+    pub limit: Limit,
+}
+
+/// The limit admission holds a call to, and how many calls it allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Limit {
+    /// One source's share of the calls, such as 8.
+    Share(usize),
+    /// The calls allowed across every source, such as 16.
+    Global(usize),
 }
 
 impl fmt::Display for Busy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let which = if self.share {
-            format!("the {} share", self.from.name())
-        } else {
-            "every share".to_owned()
+        let which = match self.limit {
+            Limit::Share(_) => format!("the {} share", self.from.name()),
+            Limit::Global(_) => "every share".to_owned(),
         };
         write!(f, "{which} of capacity is in use")
     }
@@ -96,24 +105,25 @@ impl Ledger {
     ///
     /// # Errors
     ///
-    /// [`Busy`], naming whether the share or the capacity is full.
+    /// [`Busy`], naming the limit that is full and how many calls it allows.
     pub fn take(&mut self, source: Source) -> Result<(), Busy> {
+        let limit = Limit::Share(self.capacity.per_source);
         let Some(count) = self.by_source.get_mut(source.index()) else {
             return Err(Busy {
                 from: source,
-                share: true,
+                limit,
             });
         };
         if *count >= self.capacity.per_source {
             return Err(Busy {
                 from: source,
-                share: true,
+                limit,
             });
         }
         if self.total >= self.capacity.global {
             return Err(Busy {
                 from: source,
-                share: false,
+                limit: Limit::Global(self.capacity.global),
             });
         }
         *count = count.saturating_add(1);

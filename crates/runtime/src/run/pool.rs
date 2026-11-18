@@ -11,6 +11,18 @@ use std::thread;
 /// Work handed to a worker.
 pub type Job = Box<dyn FnOnce() + Send>;
 
+/// Why a job did not start.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExecuteError {
+    /// Every worker is busy.
+    #[error("every worker is busy")]
+    Busy,
+    /// A worker's thread could not start.
+    #[error("a worker could not start: {0}")]
+    Spawn(#[source] io::Error),
+}
+
 /// Worker threads that wait for another job once theirs is done.
 ///
 /// A job goes to a waiting worker, or to a new one when none waits, so a
@@ -47,8 +59,9 @@ impl Pool {
     ///
     /// # Errors
     ///
-    /// When no worker waits and `max` are alive, or a new thread cannot start.
-    pub fn execute(&self, job: Job) -> io::Result<()> {
+    /// [`ExecuteError::Busy`] when no worker waits and `max` are alive, or
+    /// [`ExecuteError::Spawn`] when a new thread cannot start.
+    pub fn execute(&self, job: Job) -> Result<(), ExecuteError> {
         let waiting = self
             .idle
             .workers
@@ -76,14 +89,11 @@ impl Pool {
         self.alive.load(Ordering::SeqCst)
     }
 
-    fn start(&self, job: Job) -> io::Result<()> {
+    fn start(&self, job: Job) -> Result<(), ExecuteError> {
         // Counted in first, so two callers cannot both take the last place.
         if self.alive.fetch_add(1, Ordering::SeqCst) >= self.max {
             self.alive.fetch_sub(1, Ordering::SeqCst);
-            return Err(io::Error::other(format!(
-                "all {} workers are busy",
-                self.max
-            )));
+            return Err(ExecuteError::Busy);
         }
         let (idle, alive) = (Arc::downgrade(&self.idle), Arc::clone(&self.alive));
         let started = thread::Builder::new()
@@ -96,7 +106,7 @@ impl Pool {
         if started.is_err() {
             self.alive.fetch_sub(1, Ordering::SeqCst);
         }
-        started.map(drop)
+        started.map(drop).map_err(ExecuteError::Spawn)
     }
 }
 

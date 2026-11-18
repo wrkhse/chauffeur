@@ -8,8 +8,9 @@ mod proofs;
 mod redact;
 mod run;
 
-pub use admission::{Admission, Busy, Capacity, Ledger, Permit, Source};
+pub use admission::{Admission, Busy, Capacity, Ledger, Limit, Permit, Source};
 pub use redact::{Masking, Prefix, REDACTED, RedactError, RedactionConfig, Redactor};
 pub use run::{
-    Cancel, Context, EventLog, Job, Keys, MAX_EVENTS, Pool, Ran, Waited, run, run_strategy, within,
+    Cancel, Context, EventLog, ExecuteError, Job, Keys, MAX_EVENTS, Pool, Ran, Waited, run,
+    run_strategy, within,
 };

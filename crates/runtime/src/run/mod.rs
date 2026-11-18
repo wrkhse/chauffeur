@@ -13,7 +13,7 @@ use crate::Source;
 use crate::redact::{Masking, Redactor};
 
 pub use log::{EventLog, MAX_EVENTS};
-pub use pool::{Job, Pool};
+pub use pool::{ExecuteError, Job, Pool};
 pub use wait::{Cancel, Waited, within};
 
 /// The most workers kept waiting between runs: enough for every rule hooked
@@ -45,12 +45,17 @@ pub struct Context {
 
 /// How a strategy's run ended.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Ran {
     /// Every step settled: the run's events and verdict.
     Settled(Run<Answer>),
-    /// The strategy could not run, such as a placeholder whose answers would
-    /// not load, or no worker free.
+    /// The strategy could not run: a placeholder whose answers would not
+    /// load, or a worker whose thread could not start.
     Refused(String),
+    /// Every worker was busy.
+    Busy,
+    /// The run's worker stopped without a result.
+    Stopped,
     /// The deadline passed first; a late result is dropped.
     Deadline,
     /// The caller cancelled first; a late result is dropped.
@@ -63,7 +68,9 @@ impl Ran {
     pub fn then<'a>(&self, rule: &'a Rule) -> Option<&'a Then> {
         match self {
             Self::Settled(run) => Then::first_met(rule.then(), &run.verdict),
-            Self::Refused(_) | Self::Deadline | Self::Cancelled => None,
+            Self::Refused(_) | Self::Busy | Self::Stopped | Self::Deadline | Self::Cancelled => {
+                None
+            }
         }
     }
 }
@@ -112,7 +119,9 @@ pub fn run_strategy<S: AsRef<Strategy> + Send + Sync + 'static>(
         Waited::Done(ran) => ran,
         Waited::Deadline => Ran::Deadline,
         Waited::Cancelled => Ran::Cancelled,
-        Waited::Refused(reason) => Ran::Refused(reason),
+        Waited::Busy => Ran::Busy,
+        Waited::Failed(error) => Ran::Refused(format!("a worker could not start: {error}")),
+        Waited::Stopped => Ran::Stopped,
     }
 }
 

@@ -19,19 +19,27 @@ const MAX_FOLDERS: usize = 256;
 /// The largest rule file read; a larger one is refused with its path.
 const MAX_RULE_BYTES: u64 = 1 << 20;
 
+/// The largest `projects.json` read; a larger one is refused.
+const MAX_PROJECTS_BYTES: u64 = 64 * 1024;
+
+/// The most projects `projects.json` may list.
+const MAX_PROJECTS: usize = 256;
+
 /// Everything loaded from the distribution and the user's configuration.
 pub struct Loaded {
     /// Rules by ID; a user rule replaces a shipped one with the same ID.
     pub rules: Vec<Arc<Rule>>,
     /// Each rule file that was refused, with why.
     pub refused: Vec<String>,
+    /// The projects whose inline System Two is allowed, from `projects.json`.
+    projects: BTreeSet<PathBuf>,
     /// Models, redaction and keys.
     pub context: Arc<Context>,
     /// The rule each file holds, so a file that stops loading keeps it.
     files: BTreeMap<PathBuf, Arc<Rule>>,
 }
 
-/// Loads models, redaction and rules for `paths`.
+/// Loads models, redaction, projects and rules for `paths`.
 ///
 /// A rule file that cannot load is refused on its own, with its path, and
 /// the rest still load. When `previous` loaded it, that rule still runs, so
@@ -39,10 +47,16 @@ pub struct Loaded {
 ///
 /// # Errors
 ///
-/// Models or redaction that cannot load.
+/// Models, redaction or projects that cannot load.
 pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonError> {
-    let mut model_files = json_files(&paths.distribution.join("models"));
-    model_files.extend(existing(paths.config.join("models.json")));
+    let model_files = paths.models.clone().map_or_else(
+        || {
+            let mut files = json_files(&paths.distribution.join("models"));
+            files.extend(existing(paths.config.join("models.json")));
+            files
+        },
+        |models| vec![models],
+    );
     let models =
         Models::load(&model_files).map_err(|error| DaemonError::Config(error.to_string()))?;
 
@@ -51,10 +65,15 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
     let redactor =
         Redactor::load(&redaction_files).map_err(|error| DaemonError::Config(error.to_string()))?;
 
+    let projects_file = paths.config.join("projects.json");
+    let projects = load_projects(&projects_file)
+        .map_err(|error| DaemonError::Config(format!("{}: {error}", projects_file.display())))?;
+
     let keys = Box::new(|name: &str| std::env::var(name).ok().filter(|key| !key.is_empty()));
     let mut loaded = Loaded {
         rules: Vec::new(),
         refused: Vec::new(),
+        projects,
         context: Arc::new(Context {
             models,
             redactor,
@@ -84,6 +103,12 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
 }
 
 impl Loaded {
+    /// The projects whose inline System Two is allowed.
+    #[must_use]
+    pub const fn projects(&self) -> &BTreeSet<PathBuf> {
+        &self.projects
+    }
+
     /// Adds the rule `path` holds, in place of any with its ID.
     fn add(&mut self, path: PathBuf, rule: Arc<Rule>) {
         self.rules.retain(|loaded| loaded.id() != rule.id());
@@ -111,6 +136,51 @@ fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
     let text =
         String::from_utf8(bytes).map_err(|error| format!("the rule file is not UTF-8: {error}"))?;
     Rule::parse(&id, &text).map_err(|error| error.to_string())
+}
+
+/// The projects `path` lists, each an absolute path: at most
+/// [`MAX_PROJECTS`] from a file of at most [`MAX_PROJECTS_BYTES`].
+///
+/// A file that is not there lists none, so no project may run inline System
+/// Two until the user writes one. Any other problem refuses the file, so a
+/// typo cannot quietly allow a project.
+fn load_projects(path: &Path) -> Result<BTreeSet<PathBuf>, String> {
+    if !path.is_file() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(MAX_PROJECTS_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    // Counted before it is read as text: a file cut inside a multi-byte
+    // character is over the limit, not a broken character.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PROJECTS_BYTES {
+        return Err("the file is over 64 KiB".to_owned());
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("the file is not UTF-8: {error}"))?;
+
+    let listed: Vec<String> = serde_json::from_str(&text)
+        .map_err(|error| format!("it is not a JSON array of paths: {error}"))?;
+    if listed.len() > MAX_PROJECTS {
+        return Err(format!(
+            "it lists {} projects; the most is {MAX_PROJECTS}",
+            listed.len()
+        ));
+    }
+
+    let mut projects = BTreeSet::new();
+    for entry in listed {
+        let project = PathBuf::from(entry);
+        if !project.is_absolute() {
+            return Err(format!("`{}` is not an absolute path", project.display()));
+        }
+        projects.insert(project);
+    }
+    Ok(projects)
 }
 
 fn existing(path: PathBuf) -> Option<PathBuf> {
@@ -172,29 +242,36 @@ fn json_files_below(folder: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{MAX_RULE_BYTES, load_rule};
+    use super::{MAX_PROJECTS, MAX_PROJECTS_BYTES, MAX_RULE_BYTES, load_projects, load_rule};
+
+    /// A uniquely named temporary path, so tests run in parallel.
+    fn temporary(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        std::env::temp_dir().join(format!(
+            "chauffeur-{name}-{}-{nanos}.json",
+            std::process::id()
+        ))
+    }
+
+    /// Writes `bytes` to a uniquely named temporary file.
+    fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let path = temporary(name);
+        let written = fs::write(&path, bytes);
+        assert!(written.is_ok(), "the temporary file should be writable");
+        path
+    }
 
     /// Writes `bytes` to a uniquely named temporary rule file, returning its
     /// folder and path.
     fn temp_rule(bytes: &[u8]) -> (PathBuf, PathBuf) {
-        let folder = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        let path = folder.join(format!(
-            "chauffeur-rule-{}-{nanos}.json",
-            std::process::id()
-        ));
-        let written = fs::write(&path, bytes);
-        assert!(
-            written.is_ok(),
-            "the temporary rule file should be writable"
-        );
-        (folder, path)
+        (std::env::temp_dir(), temp_file("rule", bytes))
     }
 
     /// The smallest file over the limit is refused for its size, before it is
@@ -253,5 +330,122 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         assert!(loaded.is_ok(), "a rule at the limit should load");
+    }
+
+    /// A file over the limit is refused for its size, before it is read as
+    /// JSON: its contents are not a list of paths.
+    #[test]
+    fn a_projects_file_over_64_kib_is_refused() {
+        let over = usize::try_from(MAX_PROJECTS_BYTES.saturating_add(1)).unwrap_or(0);
+        let bytes = vec![b' '; over];
+        let path = temp_file("projects-size", &bytes);
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(refused.err(), Some("the file is over 64 KiB".to_owned()));
+    }
+
+    /// A valid list padded to exactly the limit is read in full: the cap only
+    /// refuses a larger file.
+    #[test]
+    fn a_projects_file_at_64_kib_is_accepted() {
+        let exact = usize::try_from(MAX_PROJECTS_BYTES).unwrap_or(0);
+        let mut bytes = br#"["/a"]"#.to_vec();
+        assert!(
+            bytes.len() <= exact,
+            "the sample list fits within the limit"
+        );
+        bytes.resize(exact, b' ');
+
+        let path = temp_file("projects-exact-size", &bytes);
+        let loaded = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            loaded,
+            Ok(BTreeSet::from([PathBuf::from("/a")])),
+            "a list at the limit should load"
+        );
+    }
+
+    /// A file cut inside a multi-byte character is refused for its size:
+    /// the bytes are counted before they are read as UTF-8, so a cut
+    /// character cannot be reported as broken text first.
+    #[test]
+    fn a_projects_file_over_64_kib_cut_inside_a_character_is_refused_for_its_size() {
+        let over = usize::try_from(MAX_PROJECTS_BYTES.saturating_add(1)).unwrap_or(0);
+        let mut bytes = format!("[\"/{}\"]", "€".repeat(30_000)).into_bytes();
+        bytes.truncate(over);
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "the cut lands inside a three-byte character"
+        );
+        let path = temp_file("projects-utf8-cut", &bytes);
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(refused.err(), Some("the file is over 64 KiB".to_owned()));
+    }
+
+    /// A file within the limit that is not UTF-8 says so.
+    #[test]
+    fn a_projects_file_that_is_not_utf8_is_refused_as_such() {
+        let path = temp_file("projects-not-utf8", b"[\"/\xff\"]");
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        let message = refused.err().unwrap_or_default();
+        assert!(message.starts_with("the file is not UTF-8: "), "{message}");
+    }
+
+    /// 257 paths are one more than the list may hold.
+    #[test]
+    fn a_projects_file_listing_257_projects_is_refused() {
+        let listed: Vec<String> = (0..=256)
+            .map(|index| format!("\"/work/{index}\""))
+            .collect();
+        let bytes = format!("[{}]", listed.join(","));
+        let path = temp_file("projects-count", bytes.as_bytes());
+
+        let refused = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            refused.err(),
+            Some("it lists 257 projects; the most is 256".to_owned())
+        );
+    }
+
+    /// 256 paths are as many as the list may hold.
+    #[test]
+    fn a_projects_file_listing_256_projects_is_accepted() {
+        let listed: Vec<String> = (0..MAX_PROJECTS)
+            .map(|index| format!("\"/work/{index}\""))
+            .collect();
+        let bytes = format!("[{}]", listed.join(","));
+        let path = temp_file("projects-count-exact", bytes.as_bytes());
+
+        let loaded = load_projects(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            loaded.map(|projects| projects.len()),
+            Ok(MAX_PROJECTS),
+            "a list at the limit should load"
+        );
+    }
+
+    /// A file that is not there lists no projects.
+    #[test]
+    fn a_missing_projects_file_lists_none() {
+        let path = temporary("projects-missing");
+        assert!(!path.exists(), "the temporary path should not exist");
+
+        let loaded = load_projects(&path);
+
+        assert_eq!(loaded, Ok(BTreeSet::new()));
     }
 }

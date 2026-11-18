@@ -35,5 +35,6 @@ echo '{ "event": "tool.after", "session": "s1", "tool": "shell",
   what rules filter and judge on, such as `session`, `tool` and `input`.
 - `actions` is empty when no rule matched, a rule was cooling down, a judge
   failed, or nothing in a rule's `then` held. [`audit`](audit.md) says which.
-- Errors: stdin that is not JSON, no daemon on the socket, or an event the
-  daemon refuses, each with its message.
+- Errors: stdin that is not JSON, no daemon on the socket, an event the
+  daemon refuses, or a daemon that does not answer in time
+  (`the daemon did not answer in time`), each with its message.

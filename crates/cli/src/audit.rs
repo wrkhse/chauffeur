@@ -62,6 +62,9 @@ fn summary(line: &str) -> String {
     if run.get("deadline").is_some() {
         parts.push("missed its deadline".to_owned());
     }
+    if let Some(reason) = run.get("skipped").and_then(Value::as_str) {
+        parts.push(format!("skipped before it ran: {reason}"));
+    }
     let steps = run.get("steps").and_then(Value::as_array);
     parts.extend(steps.into_iter().flatten().map(step));
     if let Some(elapsed) = run.get("elapsed_ms").and_then(Value::as_u64) {
@@ -111,4 +114,69 @@ fn local_time(at: &str) -> String {
                 .to_string()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::summary;
+
+    /// A run that did not happen says why on its brief line: cooling down,
+    /// refused, past its deadline, or skipped before it started.
+    #[test]
+    fn a_brief_line_says_why_a_run_did_not_happen() {
+        assert_eq!(
+            summary(
+                &json!({
+                    "at": "12:00:00",
+                    "rule": "conventional-commits",
+                    "event": "tool.after",
+                    "session": "s1",
+                    "cooldown": true,
+                })
+                .to_string()
+            ),
+            "12:00:00  conventional-commits  s1  cooling down"
+        );
+        assert_eq!(
+            summary(
+                &json!({
+                    "at": "12:00:00",
+                    "rule": "conventional-commits",
+                    "event": "tool.after",
+                    "session": "s1",
+                    "refused": "the placeholder would not load",
+                })
+                .to_string()
+            ),
+            "12:00:00  conventional-commits  s1  refused: the placeholder would not load"
+        );
+        assert_eq!(
+            summary(
+                &json!({
+                    "at": "12:00:00",
+                    "rule": "conventional-commits",
+                    "event": "tool.after",
+                    "session": "s1",
+                    "deadline": true,
+                })
+                .to_string()
+            ),
+            "12:00:00  conventional-commits  s1  missed its deadline"
+        );
+        assert_eq!(
+            summary(
+                &json!({
+                    "at": "12:00:00",
+                    "rule": "conventional-commits",
+                    "event": "tool.after",
+                    "session": "s1",
+                    "skipped": "deadline",
+                })
+                .to_string()
+            ),
+            "12:00:00  conventional-commits  s1  skipped before it ran: deadline"
+        );
+    }
 }

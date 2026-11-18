@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_runtime::{
-    Admission, Busy, Cancel, Capacity, EventLog, Ledger, Pool, Source, Waited, within,
+    Admission, Busy, Cancel, Capacity, EventLog, Ledger, Limit, Pool, Source, Waited, within,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -51,7 +51,7 @@ fn a_flood_of_81_with_capacity_8_admits_8_and_refuses_73() {
         busy,
         Err(Busy {
             from: Source::Integration,
-            share: true
+            limit: Limit::Share(8)
         })
     )));
     drop(admitted);
@@ -71,7 +71,7 @@ fn one_source_at_its_share_leaves_room_for_another() {
         admission.admit(Source::Harness).unwrap_err(),
         Busy {
             from: Source::Harness,
-            share: true
+            limit: Limit::Share(8)
         }
     );
     let busy = admission.admit(Source::Harness).unwrap_err();
@@ -98,7 +98,7 @@ fn a_full_capacity_refuses_every_source() {
         busy,
         Busy {
             from: Source::Integration,
-            share: false
+            limit: Limit::Global(2)
         }
     );
     assert_eq!(busy.to_string(), "every share of capacity is in use");
@@ -143,7 +143,7 @@ fn a_job_that_finishes_in_time_is_done() {
 
     let waited = within(&pool, soon(2_000), &Cancel::new(Source::Harness), |_, _| 42);
 
-    assert_eq!(waited, Waited::Done(42));
+    assert!(matches!(waited, Waited::Done(42)));
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn a_job_past_its_deadline_is_dropped_and_its_worker_freed() {
         },
     );
 
-    assert_eq!(waited, Waited::Deadline);
+    assert!(matches!(waited, Waited::Deadline));
     assert!(!finished.load(Ordering::SeqCst), "the job is still running");
     assert!(eventually(|| finished.load(Ordering::SeqCst)));
     assert!(eventually(|| pool.waiting() == 1));
@@ -188,7 +188,7 @@ fn cancelling_stops_the_wait_and_the_job_sees_it() {
         seen.store(cancel.is_cancelled(), Ordering::SeqCst);
     });
 
-    assert_eq!(waited, Waited::Cancelled);
+    assert!(matches!(waited, Waited::Cancelled));
     assert!(eventually(|| saw.load(Ordering::SeqCst)));
 }
 
@@ -221,7 +221,7 @@ fn a_cancelled_wait_keeps_the_slot_until_the_job_finishes() {
     });
     stopping.join().unwrap();
 
-    assert_eq!(waited, Waited::Cancelled);
+    assert!(matches!(waited, Waited::Cancelled));
     drop(cancel);
     assert_eq!(admission.in_use().total(), 1);
     release.store(true, Ordering::SeqCst);
@@ -240,13 +240,13 @@ fn a_job_cancelled_before_it_starts_never_runs() {
         running.store(true, Ordering::SeqCst);
     });
 
-    assert_eq!(waited, Waited::Cancelled);
+    assert!(matches!(waited, Waited::Cancelled));
     assert!(!ran.load(Ordering::SeqCst));
     assert_eq!(pool.alive(), 0);
 }
 
 #[test]
-fn a_job_that_panics_is_refused_and_frees_its_worker_and_slot() {
+fn a_job_that_panics_stops_and_frees_its_worker_and_slot() {
     let admission = Admission::new(Capacity {
         global: 1,
         per_source: 1,
@@ -259,10 +259,7 @@ fn a_job_that_panics_is_refused_and_frees_its_worker_and_slot() {
         panic!("the job fails");
     });
 
-    assert!(
-        matches!(&waited, Waited::Refused(reason) if reason.contains("worker")),
-        "{waited:?}"
-    );
+    assert!(matches!(&waited, Waited::Stopped), "{waited:?}");
     drop(cancel);
     assert!(eventually(|| admission.in_use().total() == 0));
     assert!(eventually(|| pool.alive() == 0 && pool.waiting() == 0));
@@ -290,11 +287,8 @@ fn past_its_most_workers_the_pool_refuses_a_job() {
         (refused, busy.join().unwrap())
     });
 
-    assert!(
-        matches!(&holding.0, Waited::Refused(reason) if reason.contains("busy")),
-        "{holding:?}"
-    );
-    assert_eq!(holding.1, Waited::Done(()));
+    assert!(matches!(&holding.0, Waited::Busy), "{holding:?}");
+    assert!(matches!(&holding.1, Waited::Done(())));
     assert!(eventually(|| pool.alive() == 0));
 }
 
@@ -324,7 +318,7 @@ fn a_deadline_already_past_never_takes_a_worker() {
         },
     );
 
-    assert_eq!(waited, Waited::Deadline);
+    assert!(matches!(waited, Waited::Deadline));
     assert!(!ran.load(Ordering::SeqCst));
     assert_eq!(pool.alive(), 0);
 }
