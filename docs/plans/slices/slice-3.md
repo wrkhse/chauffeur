@@ -90,7 +90,7 @@ without knowing models.
 let mut running = plan.start(Some(deadline));
 
 // Each round holds the steps whose needs are met.
-while let Some(round) = running.questions(Instant::now()) {
+while let Some(round) = running.questions(Instant::now) {
     // Or running.fail(step, Failure::Timeout).
     running.answer(round.ask(&panel))?;
 }
@@ -104,7 +104,8 @@ Verified by scenario tests:
   Jev's P(yes) of 0.55 to 0.85 on a 0.7 bar and not for 0.25, and a failure
   listed in `when` asks it too.
 - The deadline: the steps end 1 s before it, and an escalation with less
-  than 500 ms left before that is not started.
+  than 500 ms left before that is not started. Only a run with a deadline
+  reads the clock, and only before a round after the first.
 - `after` alone: a string need waits for a skipped step and then runs; an
   object need never matches a skipped step; `Failed` matches only when listed;
   a step with both `all` and `any` runs only when both hold.

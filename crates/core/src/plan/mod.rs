@@ -101,7 +101,7 @@ impl<Q> Plan<Q> {
         }
 
         let mut running = self.start(None);
-        while let Some(round) = running.questions(Instant::now()) {
+        while let Some(round) = running.questions(Instant::now) {
             let reply = round.ask(panel);
 
             // Round::ask answers every open step once, so a refused reply

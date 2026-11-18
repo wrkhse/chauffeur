@@ -445,11 +445,11 @@ fn escalate_with(left: Duration) -> Result<(Option<u32>, Run<Answer>), Box<dyn E
     let mut running = plan.start(Some(deadline));
     let end = running.end().ok_or("no end")?;
 
-    running.questions(now).ok_or("no first round")?;
+    running.questions(|| now).ok_or("no first round")?;
     running.answer([("fast".to_owned(), Outcome::Value(yes(800)))])?;
 
     let late = end.checked_sub(left).ok_or("no time left")?;
-    let second = running.questions(late).map(|round| round.number());
+    let second = running.questions(|| late).map(|round| round.number());
 
     Ok((second, running.finish()))
 }
@@ -505,7 +505,7 @@ fn an_escalation_with_500_ms_left_starts() {
 
 /// The open round's number and step IDs.
 fn open(running: &mut Running<'_, Question, Answer>, now: Instant) -> Option<(u32, Vec<String>)> {
-    running.questions(now).map(|round| {
+    running.questions(|| now).map(|round| {
         let steps = round.steps().iter().map(|step| step.id().to_owned());
         (round.number(), steps.collect())
     })
@@ -519,6 +519,65 @@ fn the_first_round_starts_even_past_the_end() {
     let later = deadline.checked_add(Duration::from_secs(5)).unwrap();
 
     assert_eq!(open(&mut running, later), Some((1, ids(&["fast"]))));
+}
+
+/// A clock that counts its reads in `reads`.
+fn counting(reads: &Cell<u32>) -> impl Fn() -> Instant + Copy + '_ {
+    || {
+        reads.set(reads.get().saturating_add(1));
+        Instant::now()
+    }
+}
+
+/// The escalation's events when Jev answers near the bar and glide says yes.
+fn escalated() -> [Event<Answer>; 6] {
+    [
+        started(&["fast", "sure"]),
+        ready(1, &["fast"]),
+        settled("fast", Outcome::Value(yes(800))),
+        ready(2, &["sure"]),
+        settled("sure", Outcome::Value(yes(900))),
+        Event::Finished,
+    ]
+}
+
+#[test]
+fn a_run_without_a_deadline_never_reads_the_clock() {
+    let plan = Plan::new(escalation()).unwrap();
+    let jev = Scripted::answering(yes(800));
+    let glide = Scripted::answering(yes(900));
+    let panel = Panel::new().with("jev", &jev).with("glide", &glide);
+    let reads = Cell::new(0);
+    let mut running = plan.start(None);
+
+    while let Some(round) = running.questions(counting(&reads)) {
+        running.answer(round.ask(&panel)).unwrap();
+    }
+
+    assert_eq!(reads.get(), 0);
+    assert_eq!(running.finish().events, escalated());
+}
+
+#[test]
+fn a_run_with_a_deadline_reads_the_clock_only_before_a_later_round() {
+    let plan = Plan::new(escalation()).unwrap();
+    let deadline = Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+    let reads = Cell::new(0);
+    let mut running = plan.start(Some(deadline));
+    let number = |running: &mut Running<'_, Question, Answer>| {
+        running
+            .questions(counting(&reads))
+            .map(|round| round.number())
+    };
+    let answer = |step: &str, p: u16| [(step.to_owned(), Outcome::Value(yes(p)))];
+
+    assert_eq!((number(&mut running), reads.get()), (Some(1), 0));
+    running.answer(answer("fast", 800)).unwrap();
+    assert_eq!((number(&mut running), reads.get()), (Some(2), 1));
+    running.answer(answer("sure", 900)).unwrap();
+    assert_eq!((number(&mut running), reads.get()), (None, 1));
+
+    assert_eq!(running.finish().events, escalated());
 }
 
 /// Runs the escalation with Jev saying no, so `sure` is skipped, and a
@@ -1148,7 +1207,7 @@ fn a_round_asks_each_judge_once_in_order_and_fails_a_missing_one() {
     let panel = Panel::new().with("one", &one);
     let mut running: Running<'_, Question, Answer> = plan.start(None);
 
-    let round = running.questions(Instant::now()).unwrap();
+    let round = running.questions(Instant::now).unwrap();
     let asked = round.ask(&panel);
 
     assert_eq!(

@@ -15,7 +15,7 @@ pub const RESERVE: Duration = Duration::from_secs(1);
 pub const MIN_ESCALATION: Duration = Duration::from_millis(500);
 
 /// A plan being run, round by round. The caller asks each round's steps,
-/// passes their answers back, and passes the time, so core keeps no clock.
+/// passes their answers back, and passes a clock, so core keeps none.
 pub struct Running<'p, Q, O> {
     plan: &'p Plan<Q>,
     run: rungs::Run<'p>,
@@ -58,16 +58,23 @@ impl<'p, Q, O: Reply + Clone> Running<'p, Q, O> {
 
     /// The round to ask now, or none when the run is over. While a round is
     /// open it is returned again, unchanged.
-    pub fn questions(&mut self, now: Instant) -> Option<Round<'p, Q>> {
+    ///
+    /// `clock` gives the current time. It is called only for a run with a
+    /// deadline, before a round after the first while a step is pending, so
+    /// a run without one never reads it.
+    pub fn questions(&mut self, clock: impl FnOnce() -> Instant) -> Option<Round<'p, Q>> {
         if !self.open.is_empty() {
             return Some(self.round_of_open());
         }
 
         let before: Vec<Option<Status>> = self.statuses();
-        let late = self
-            .end
-            .is_some_and(|end| end.saturating_duration_since(now) < MIN_ESCALATION);
-        if self.round > 0 && late {
+        let pending = before.contains(&Some(Status::Pending));
+        let late = self.round > 0
+            && pending
+            && self
+                .end
+                .is_some_and(|end| end.saturating_duration_since(clock()) < MIN_ESCALATION);
+        if late {
             for (index, status) in before.iter().enumerate() {
                 if *status == Some(Status::Pending) {
                     let _skipped = self.run.skip(index);

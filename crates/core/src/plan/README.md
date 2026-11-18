@@ -90,7 +90,7 @@ let panel = Panel::new().with("jev", &jev).with("glide", &glide);
 let deadline = Instant::now() + Duration::from_secs(5);
 let mut running = plan.start(Some(deadline));
 
-while let Some(round) = running.questions(Instant::now()) {
+while let Some(round) = running.questions(Instant::now) {
     running.answer(round.ask(&panel))?;
 }
 
@@ -120,8 +120,10 @@ lists it in `skipped()`.
   to `start`, so the answers in hand return in time. The first round always
   starts; a later round starts only with `MIN_ESCALATION`, 500 ms, left
   before that end, and with less every pending step is skipped. Core keeps
-  no clock: the caller passes the time to `questions`. A step open at
-  `finish` settles as `Failed(Deadline)`.
+  no clock: the caller passes one to `questions`, such as `Instant::now`,
+  and core reads it only before a later round of a run with a deadline, so
+  a run without one, such as in WebAssembly, never reads the time. A step
+  open at `finish` settles as `Failed(Deadline)`.
 - **All or nothing.** `answer` settles every step of the round at once. A
   reply that names a step outside the round, names one twice, leaves one
   out, or that the machine refuses, returns a `ReplyError` and leaves the
