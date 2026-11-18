@@ -640,7 +640,9 @@ Verified by:
 messages on stdout, exiting 0 with intents or a verdict, 1 when rejected and
 2 when no daemon answers. `@fdcn/chauffeur/client` sends `navigate` over the
 socket and closes on abort; `/judge` holds `ask`, `judge` and `noul`, with
-results typed from their questions.
+results typed from their questions. From v1.0.0-rc.5 on, each prerelease also
+carries the client as `fdcn-chauffeur-<version>.tgz`, and integrations pin its
+asset URL until it is on npm.
 
 Files: `crates/cli/src/navigate.rs`, `packages/chauffeur/src/client/`,
 `packages/chauffeur/src/judge/`

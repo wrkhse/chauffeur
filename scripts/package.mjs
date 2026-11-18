@@ -3,6 +3,7 @@
 //
 //   node scripts/package.mjs version
 //   node scripts/package.mjs tarball --target darwin-arm64 --binary target/release/chauffeur --out dist
+//   node scripts/package.mjs client-tarball
 //   node scripts/package.mjs sums dist
 //
 // A tarball holds bin/chauffeur and share/chauffeur/: the shipped models,
@@ -33,6 +34,11 @@ export function version(root = ROOT) {
 
 export function tarballName(release, target) {
   return `chauffeur-${release}-${target}.tar.gz`
+}
+
+/** The name `npm pack` gives `@fdcn/chauffeur` at `release`. */
+export function clientTarballName(release) {
+  return `fdcn-chauffeur-${release}.tgz`
 }
 
 /** Write `out/chauffeur-<version>-<target>.tar.gz` and return its path. */
@@ -73,7 +79,9 @@ export function tarball({ target, binary, out, root = ROOT }) {
 /** Write `SHA256SUMS` for every tarball in `folder` and return its text. */
 export function sums(folder) {
   const lines = readdirSync(folder)
-    .filter((name) => name.endsWith(".tar.gz"))
+    .filter(
+      (name) => name.endsWith(".tar.gz") || /^fdcn-chauffeur-.+\.tgz$/.test(name)
+    )
     .toSorted()
     .map((name) => `${createHash("sha256").update(readFileSync(join(folder, name))).digest("hex")}  ${name}`)
 
@@ -92,7 +100,7 @@ function option(args, name) {
   return at === -1 ? undefined : args[at + 1]
 }
 
-const USAGE = "usage: package.mjs version | tarball --target TARGET --binary PATH [--out DIR] | sums [DIR]"
+const USAGE = "usage: package.mjs version | tarball --target TARGET --binary PATH [--out DIR] | client-tarball | sums [DIR]"
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2)
@@ -106,6 +114,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!target || !binary) throw new Error(USAGE)
 
     console.log(tarball({ target, binary: resolve(binary), out: option(args, "--out") ?? "dist" }))
+  } else if (command === "client-tarball") {
+    console.log(clientTarballName(version()))
   } else if (command === "sums") {
     process.stdout.write(sums(args[0] ?? "dist"))
   } else {

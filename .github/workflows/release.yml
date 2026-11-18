@@ -4,10 +4,13 @@ name: Release
 # workspace's. Each target is built and smoke-tested on its own machine, the
 # tarballs go to a GitHub prerelease, and, once approved, chauffeur-next is
 # regenerated in the tap from that release's SHA256SUMS.
+#
+# A manual run rehearses the publish side without a tag.
 
 on:
   push:
     tags: ['v*-rc.*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +20,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name == 'push'
     strategy:
       fail-fast: true
       matrix:
@@ -54,8 +58,47 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  client:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+      - name: The tag names the client's version
+        run: test "v$(node -p 'require("./packages/chauffeur/package.json").version')" = "$GITHUB_REF_NAME"
+      # The client's tests run against a real daemon in CI, so build one.
+      - run: cargo build --locked -p chauffeur-cli
+      - name: Install, check and pack the client
+        working-directory: packages/chauffeur
+        env:
+          CHAUFFEUR_BIN: ${{ github.workspace }}/target/debug/chauffeur
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          mkdir -p ../../dist
+          npm pack --pack-destination ../../dist
+          # The tarball's name under dist, which the upload uses rather than
+          # a glob.
+          echo "CLIENT_TARBALL=dist/$(node ../../scripts/package.mjs client-tarball)" >> "$GITHUB_ENV"
+      - name: A consumer installs the packed client
+        run: node scripts/client-consumer-smoke.mjs "dist/$(node scripts/package.mjs client-tarball)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: client
+          path: ${{ env.CLIENT_TARBALL }}
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, client]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -75,6 +118,7 @@ jobs:
 
   tap:
     needs: publish
+    if: github.event_name == 'push'
     runs-on: macos-latest
     environment: release
     env:
@@ -124,3 +168,44 @@ jobs:
           git add "Formula/chauffeur-next.rb"
           git commit -m "chauffeur-next ${GITHUB_REF_NAME#v}"
           git push
+
+  # Rehearses the publish side without a tag: CLIENT_TARBALL -> upload ->
+  # download -> sums -> gh release create dist/*.
+  rehearsal:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+      - run: cargo build --locked -p chauffeur-cli
+      - name: Pack the client
+        working-directory: packages/chauffeur
+        env:
+          CHAUFFEUR_BIN: ${{ github.workspace }}/target/debug/chauffeur
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          mkdir -p ../../dist
+          npm pack --pack-destination ../../dist
+          echo "CLIENT_TARBALL=dist/$(node ../../scripts/package.mjs client-tarball)" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: client
+          path: ${{ env.CLIENT_TARBALL }}
+          if-no-files-found: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: client
+          path: dist
+      - run: node scripts/package.mjs sums dist
+      - name: SHA256SUMS lists the client's tarball
+        run: grep -F "$(node scripts/package.mjs client-tarball)" dist/SHA256SUMS

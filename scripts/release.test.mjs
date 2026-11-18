@@ -2,12 +2,13 @@
 
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { formula, parseSums } from "./homebrew.mjs"
-import { TARGETS, sums, tarball, version } from "./package.mjs"
+import { clientTarballName, TARGETS, sums, tarball, version } from "./package.mjs"
 
 /** A checkout with just what packaging reads, at `release`. */
 function checkout(release = "1.0.0-rc.1") {
@@ -37,6 +38,10 @@ test("the version is the workspace's", () => {
   } finally {
     rmSync(root, { recursive: true })
   }
+})
+
+test("the client's tarball is the name npm pack gives it", () => {
+  assert.equal(clientTarballName("1.0.0-rc.5"), "fdcn-chauffeur-1.0.0-rc.5.tgz")
 })
 
 test("a tarball holds the binary, the shipped content and the license, and SHA256SUMS lists it", () => {
@@ -76,12 +81,45 @@ test("a tarball holds the binary, the shipped content and the license, and SHA25
   }
 })
 
+test("SHA256SUMS lists each tarball and the client's, sorted, and no stray tgz", () => {
+  const folder = mkdtempSync(join(tmpdir(), "chauffeur-sums-"))
+  const client = "fdcn-chauffeur-1.0.0-rc.1.tgz"
+  const target = "chauffeur-1.0.0-rc.1-linux-x64.tar.gz"
+
+  try {
+    // Written out of order, so the listing proves it sorts by name.
+    writeFileSync(join(folder, "foo.tgz"), "stray\n")
+    writeFileSync(join(folder, client), "")
+    writeFileSync(join(folder, target), "target bytes\n")
+
+    const digest = (name) =>
+      createHash("sha256").update(readFileSync(join(folder, name))).digest("hex")
+    const text = sums(folder)
+
+    assert.equal(text, `${digest(target)}  ${target}\n${digest(client)}  ${client}\n`)
+    assert.ok(!text.includes("foo.tgz"), text)
+    for (const line of text.trimEnd().split("\n")) {
+      assert.match(line, /^[0-9a-f]{64} {2}\S+$/)
+    }
+    assert.equal(readFileSync(join(folder, "SHA256SUMS"), "utf8"), text)
+  } finally {
+    rmSync(folder, { recursive: true })
+  }
+})
+
 function fixtureSums(release) {
   return TARGETS.map((target, at) => `${String(at).repeat(64)}  chauffeur-${release}-${target}.tar.gz`).join("\n")
 }
 
 test("the formula names every target's tarball and checksum, and installs chauffeur-next", () => {
-  const ruby = formula("1.0.0-rc.1", parseSums(fixtureSums("1.0.0-rc.1")))
+  const release = "1.0.0-rc.1"
+  const targets = fixtureSums(release)
+  // A release's SHA256SUMS also lists the client's tarball, and the formula
+  // installs the four targets only.
+  const ruby = formula(release, parseSums(`${targets}\n${"f".repeat(64)}  fdcn-chauffeur-${release}.tgz`))
+
+  assert.equal(ruby, formula(release, parseSums(targets)))
+  assert.ok(!ruby.includes("fdcn-chauffeur"), ruby)
 
   for (const [at, target] of TARGETS.entries()) {
     const url = `releases/download/v1.0.0-rc.1/chauffeur-1.0.0-rc.1-${target}.tar.gz"`

@@ -206,13 +206,26 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+      - name: The client's version is the workspace's
+        working-directory: .
+        run: test "$(node -p 'require("./packages/chauffeur/package.json").version')" = "$(node scripts/package.mjs version)"
       - run: cargo build --locked -p chauffeur-cli
         working-directory: .
       - run: bun install --frozen-lockfile
       - run: bun run check
         env:
           CHAUFFEUR_BIN: ${{ github.workspace }}/target/debug/chauffeur
-      - run: node ../../scripts/client-consumer-smoke.mjs
+      - name: Pack the client
+        run: |
+          mkdir -p "$RUNNER_TEMP/client"
+          npm pack --pack-destination "$RUNNER_TEMP/client"
+      - name: A consumer installs the client under its release tarball's name
+        working-directory: .
+        run: node scripts/client-consumer-smoke.mjs "$RUNNER_TEMP/client/$(node scripts/package.mjs client-tarball)"
+      # No node test packs the client itself, so this path stays exercised here.
+      - name: A consumer installs the client packed from source
+        working-directory: .
+        run: node scripts/client-consumer-smoke.mjs
 
   package:
     strategy:

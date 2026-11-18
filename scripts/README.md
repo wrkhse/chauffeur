@@ -10,12 +10,16 @@ dependencies beyond Node (and Go, for `benchstat`).
 | `smoke.mjs`        | Installs a tarball as `chauffeur` and as `chauffeur-next`, then runs each: `version`, the daemon, the shipped rule, a nudge through `emit`, and the run in `audit` |
 | `bench.mjs`        | Benchmarks this tree, or a base commit and this tree, and compares them through `benchstat`; see [Benchmarks](../crates/README.md#benchmarks)                      |
 | `bench.test.mjs`   | `bench.mjs`'s arguments                                                                                                                                            |
-| `release.test.mjs` | `node --test scripts/*.test.mjs`: tarball layout, checksums, the formula's URLs, checksums and names                                                               |
+| `release.test.mjs` | `node --test scripts/*.test.mjs`: tarball layout, `SHA256SUMS` for each target's tarball and the client's `.tgz`, the formula's URLs, checksums and names          |
 
 ## Cutting a release candidate
 
-1. Set `version` in the root `Cargo.toml` to the candidate, such as
-   `1.0.0-rc.1`, and commit it on `v2`.
+1. Set the candidate's version, such as `1.0.0-rc.1`, everywhere it is
+   recorded: `version` under `[workspace.package]` in the root `Cargo.toml`
+   and in `packages/chauffeur/package.json`, plus `Cargo.lock`, which a
+   cargo command such as `cargo check` refreshes. Commit all three on `v2`.
+   A `package.json` left behind stops the `client` job after the tag is
+   pushed.
 2. Tag and push: `git tag v1.0.0-rc.1 && git push origin v1.0.0-rc.1`.
 
 `.github/workflows/release.yml` does the rest:
@@ -23,7 +27,9 @@ dependencies beyond Node (and Go, for `benchstat`).
 ```mermaid
 flowchart LR
     Tag["Tag v1.0.0-rc.1"] --> Build["build: four targets,<br/>each smoke-tested on its own machine"]
-    Build --> Pre["publish: GitHub prerelease,<br/>tarballs and SHA256SUMS"]
+    Tag --> Client["client: npm pack the tarball,<br/>a consumer installs it"]
+    Build --> Pre["publish: GitHub prerelease,<br/>tarballs, the client's tgz and SHA256SUMS"]
+    Client --> Pre
     Pre --> Tap["tap: render chauffeur-next.rb,<br/>brew style, audit, install, test"]
     Tap --> Push["push to StevenJPx2/homebrew-taps"]
 ```
@@ -36,6 +42,10 @@ flowchart LR
 | `linux-x64`    | `ubuntu-latest`    | `x86_64-unknown-linux-musl`  |
 
 - The build stops if the tag is not `v` and the workspace's version.
+- From v1.0.0-rc.5 on, each prerelease also carries `@fdcn/chauffeur` as
+  `fdcn-chauffeur-<version>.tgz`. An integration pins that asset URL in its
+  dependencies, such as
+  <https://github.com/wrkhse/chauffeur/releases/download/v1.0.0-rc.5/fdcn-chauffeur-1.0.0-rc.5.tgz>.
 - The tap job runs in the `release` environment, which only `v*-rc.*` tags
   may use and which waits for your approval. Its `TAP_DEPLOY_KEY` is an SSH
   deploy key that can write to `StevenJPx2/homebrew-taps` and nothing else.
