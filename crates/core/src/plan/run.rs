@@ -164,14 +164,20 @@ impl<'p, Q, O: Reply + Clone> Running<'p, Q, O> {
         Ok(())
     }
 
+    /// Settles every step still open in the round as failed with `failure`,
+    /// such as when the round's answers were refused.
+    pub fn fail_round(&mut self, failure: Failure) {
+        for index in std::mem::take(&mut self.open) {
+            let _failed = self.run.fail(index);
+            self.record(index, Outcome::Failed(failure));
+        }
+    }
+
     /// The events and the verdict. A step still open settles as failed by
     /// the deadline; a step never decided is skipped.
     #[must_use]
     pub fn finish(mut self) -> Run<O> {
-        for index in std::mem::take(&mut self.open) {
-            let _failed = self.run.fail(index);
-            self.record(index, Outcome::Failed(Failure::Deadline));
-        }
+        self.fail_round(Failure::Deadline);
 
         for index in 0..self.plan.steps.len() {
             if self.run.status(index) == Some(Status::Pending) {

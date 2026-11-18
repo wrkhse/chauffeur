@@ -104,10 +104,10 @@ impl<Q> Plan<Q> {
         while let Some(round) = running.questions(Instant::now()) {
             let reply = round.ask(panel);
 
-            // Round::ask answers every open step once. Should a judge's reply
-            // still be refused, finish fails the open steps rather than loop.
+            // Round::ask answers every open step once, so a refused reply
+            // means a judge broke the machine's rules: its steps fail as invalid.
             if running.answer(reply).is_err() {
-                break;
+                running.fail_round(Failure::Invalid);
             }
         }
 

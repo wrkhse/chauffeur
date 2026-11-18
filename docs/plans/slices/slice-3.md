@@ -48,9 +48,15 @@ run is over. Core keeps what rungs knows nothing about:
 A string need is `Need::settled`, an object need `Need::outcome`, and `all`
 and `any` are a step's `after` and `after_any`. Every step has one attempt.
 
+**Breaking:** a strategy has at most 16 steps, as many as rungs holds. This
+differs on the wire from 1.0.0-rc.5, which allowed 32: a `navigate` request
+or rule file with 17 or more steps is refused with `limit_exceeded` naming
+`steps`, and the navigate schema's strategy `maxItems` is 16.
+
 Files: `crates/core/src/plan/need.rs`, `crates/core/src/plan/near.rs`,
 `crates/core/src/plan/run.rs`, `crates/core/src/plan/reply.rs`,
-`crates/core/src/proofs.rs`, `crates/core/tests/scenarios.rs`, `deny.toml`
+`crates/core/src/proofs.rs`, `crates/core/tests/scenarios.rs`,
+`crates/protocol/src/limits.rs`, `deny.toml`
 
 ```toml
 # crates/core/Cargo.toml

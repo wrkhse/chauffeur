@@ -126,7 +126,10 @@ lists it in `skipped()`.
   reply that names a step outside the round, names one twice, leaves one
   out, or that the machine refuses, returns a `ReplyError` and leaves the
   run unchanged: `questions` returns the same round again. `fail` settles
-  one open step as failed, and `answer` then covers the rest.
+  one open step as failed, and `answer` then covers the rest; `fail_round`
+  settles every open step as failed at once. `Plan::run` fails a refused
+  round's steps as `Failed(Invalid)`, since `Round::ask` answers each open
+  step once and only a judge breaking the machine's rules is refused.
 - **Invalid answers.** `Round::ask` asks each judge its share of the round
   in one `judge_all` call. A judge that returns the wrong number of outcomes
   settles each of its steps as `Failed(Invalid)`, never as an answer, and so

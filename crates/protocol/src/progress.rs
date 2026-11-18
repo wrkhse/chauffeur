@@ -31,7 +31,8 @@ pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>
                     }
                     settled
                 }
-                // No rule's plan has `after` yet, so no step is skipped.
+                // TODO(slice 3, PR 2): report a skipped step as `step_skipped` once
+                // rules lower `after`; no rule's plan skips a step yet.
                 RunEvent::Started { .. } | RunEvent::Finished | RunEvent::StepSkipped { .. } => {
                     return None;
                 }

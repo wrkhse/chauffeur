@@ -998,6 +998,82 @@ fn a_failed_step_settles_alone_and_the_rest_are_answered_after() {
     );
 }
 
+/// a and b in round 1, then c, which waits on a failing.
+fn after_failed() -> Result<Plan<Question>, PlanError> {
+    let failed = Need::outcome("a", None, Some(vec![When::Failed]));
+
+    Plan::new([
+        Step::new("a", "ja", YES_NO),
+        Step::new("b", "jb", YES_NO),
+        Step::new("c", "jc", YES_NO).after([failed]),
+    ])
+}
+
+#[test]
+fn failing_the_round_settles_every_open_step_and_the_next_round_opens() {
+    let plan = after_failed().unwrap();
+    let now = Instant::now();
+    let mut running = plan.start(None);
+    open(&mut running, now);
+
+    running.fail_round(Failure::Timeout);
+    assert_eq!(open(&mut running, now), Some((2, ids(&["c"]))));
+    running.answer(reply(&[("c", 0)])).unwrap();
+
+    assert_eq!(
+        running.finish().events,
+        [
+            started(&["a", "b", "c"]),
+            ready(1, &["a", "b"]),
+            settled("a", Outcome::Failed(Failure::Timeout)),
+            settled("b", Outcome::Failed(Failure::Timeout)),
+            ready(2, &["c"]),
+            settled("c", Outcome::Value(said(0))),
+            Event::Finished,
+        ]
+    );
+}
+
+#[test]
+fn a_step_of_a_failed_round_is_no_longer_asked() {
+    let plan = after_failed().unwrap();
+    let mut running = plan.start(None);
+    open(&mut running, Instant::now());
+
+    running.fail_round(Failure::Timeout);
+
+    assert_eq!(
+        running.answer(reply(&[("a", 0)])),
+        Err(ReplyError::NotAsked("a".into()))
+    );
+}
+
+#[test]
+fn failing_the_round_with_none_open_changes_nothing() {
+    let plan = trio().unwrap();
+    let now = Instant::now();
+    let mut running = plan.start(None);
+    open(&mut running, now);
+    running.answer(reply(&[("a", 0), ("b", 1)])).unwrap();
+
+    running.fail_round(Failure::Timeout);
+    assert_eq!(open(&mut running, now), Some((2, ids(&["c"]))));
+    running.answer(reply(&[("c", 2)])).unwrap();
+
+    assert_eq!(
+        running.finish().events,
+        [
+            started(&["a", "b", "c"]),
+            ready(1, &["a", "b"]),
+            settled("a", Outcome::Value(said(0))),
+            settled("b", Outcome::Value(said(1))),
+            ready(2, &["c"]),
+            settled("c", Outcome::Value(said(2))),
+            Event::Finished,
+        ]
+    );
+}
+
 #[test]
 fn an_answer_outside_its_values_settles_as_invalid() {
     let plan = Plan::new([Step::new("a", "j", YES_NO)]).unwrap();
