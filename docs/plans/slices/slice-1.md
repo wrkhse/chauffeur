@@ -38,7 +38,7 @@ agent commits as `Add …`. Jev answers yes at 0.89 in 367 ms, Chauffeur's
 message arrives in the conversation, and the agent amends the commit to
 `docs(readme): add hello line`.
 
-<video src="../../media/slice-1.mp4" controls muted playsinline width="100%"></video>
+![OpenCode above the audit log: the agent commits, Jev answers yes, and the agent amends the commit](../../media/slice-1.gif)
 
 ## What it builds
 

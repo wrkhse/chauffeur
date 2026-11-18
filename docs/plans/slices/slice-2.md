@@ -44,7 +44,7 @@ loading and verdict path agreeing with sourcefed's triage, not a real model's
 answers. The invocation is in
 [`scripts/e2e/README.md`](../../../scripts/e2e/README.md).
 
-<video src="../../media/slice-2.mp4" controls muted playsinline width="100%"></video>
+![The rc.5 triage run: each sourcefed case prints its intents and every verdict matches the fixture](../../media/slice-2.gif)
 
 ## Wire contract
 
