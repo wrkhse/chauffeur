@@ -413,7 +413,7 @@ mod tests {
 
     use super::{
         Entries, MAX_BYTES, MAX_CACHED, MAX_ENTRIES, MAX_MIB, MAX_RULES, Rules, Signature, allowed,
-        load, quoted, rules_folder, signature,
+        inside, load, quoted, rules_folder, signature,
     };
     use crate::Paths;
     use crate::state::Loaded;
@@ -594,6 +594,40 @@ mod tests {
                 quoted(&link),
                 quoted(&link)
             ))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A queued path is inside only as a real folder inside the rules: one
+    /// outside is not, and neither is a symlink, even to one, or a plain
+    /// file.
+    #[test]
+    fn a_queued_path_is_inside_only_as_a_folder_inside_the_rules() {
+        let root = temporary("inside");
+        let folder = root.join("rules");
+        let outside = root.join("outside");
+        let file = folder.join("x.json");
+        fs::create_dir_all(folder.join("sub")).expect("a folder inside the rules");
+        fs::create_dir_all(&outside).expect("the outside folder");
+        fs::write(&file, "{}").expect("a plain file inside the rules");
+        let link = folder.join("linked");
+        std::os::unix::fs::symlink(&outside, &link).expect("the symlink");
+
+        assert!(
+            inside(&folder.join("sub"), &folder),
+            "a folder inside the rules is inside"
+        );
+        assert!(
+            !inside(&outside, &folder),
+            "a folder outside the rules is not inside"
+        );
+        assert!(
+            !inside(&link, &folder),
+            "a symlink to an outside folder is not inside"
+        );
+        assert!(
+            !inside(&file, &folder),
+            "a plain file inside the rules is not inside"
         );
         let _ = fs::remove_dir_all(&root);
     }
