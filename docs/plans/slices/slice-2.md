@@ -1,8 +1,9 @@
 # Slice 2: sourcefed triage
 
-**Status:** In progress: requests, intents and limits, admission and running,
-and the daemon's socket are built; the rule sources, the bindings and
-sourcefed's side are next.
+**Status:** Implemented, released as `chauffeur-next` `1.0.0-rc.5`, with the
+daemon's socket and rule sources, the `@fdcn/chauffeur` client and
+`chauffeur navigate` bindings, the playground's _Navigate_ tab, and
+sourcefed's triage running against the release.
 
 **You can:** let sourcefed ask Chauffeur before it queues each event, so
 OpenCode, Pi, MCP and the CLI receive the same filtered stream, as in
@@ -26,6 +27,24 @@ flowchart LR
     Client -- "JSON-RPC, Unix socket" --> Daemon["crates/daemon"]
     Cli -- "JSON-RPC, Unix socket" --> Daemon
 ```
+
+## Recording
+
+One `termctrl` session runs the container-only proof in `scripts/e2e/`. It
+checks both rc.5 tarballs by sha256, installs the daemon as Homebrew lays it
+out, and checks that it reports `chauffeur-next 1.0.0-rc.5`. sourcefed is
+cloned at PR #29's merge commit `0a1a5e7` and built, and the twelve recorded
+events go through
+`new ChauffeurTriage({ connect: chauffeurNavigators(connect) })` against the
+shipped daemon. Each case prints its intents, and the run ends
+`12 cases: 6 withheld, 6 delivered; every verdict matches the fixture`.
+
+The judge is a placeholder, so the proof is the shipped client, daemon, rule
+loading and verdict path agreeing with sourcefed's triage, not a real model's
+answers. The invocation is in
+[`scripts/e2e/README.md`](../../../scripts/e2e/README.md).
+
+<video src="../../media/slice-2.mp4" controls muted playsinline width="100%"></video>
 
 ## Wire contract
 

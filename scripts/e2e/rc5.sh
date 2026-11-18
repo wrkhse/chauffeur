@@ -37,7 +37,8 @@ BIN=$PREFIX/bin/chauffeur-next
 SOCKET=$WORK/run/daemon.sock
 
 SOURCEFED=https://github.com/wrkhse/sourcefed.git
-SOURCEFED_HEAD=1736930a47241ea4a364c81f28ddd4e23a17472f
+# PR #29's squash merge on main, so the run proves the merged commit.
+SOURCEFED_HEAD=0a1a5e73f5c53147fbd2ba5a1100fed89a2a1a8d
 DAEMON=chauffeur-1.0.0-rc.5-linux-arm64.tar.gz
 CLIENT=fdcn-chauffeur-1.0.0-rc.5.tgz
 
@@ -64,7 +65,7 @@ cp -R "$WORK/unpacked/share/chauffeur" "$PREFIX/share/chauffeur-next"
 "$BIN" version
 
 echo "== sourcefed ${SOURCEFED_HEAD:0:7}"
-git clone --quiet --branch feat/chauffeur-triage --single-branch "$SOURCEFED" "$SRC"
+git clone --quiet --branch main --single-branch "$SOURCEFED" "$SRC"
 git -C "$SRC" checkout --quiet --detach "$SOURCEFED_HEAD"
 
 head=$(git -C "$SRC" rev-parse HEAD)

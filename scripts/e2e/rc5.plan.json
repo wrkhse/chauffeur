@@ -1,0 +1,23 @@
+{
+  "clips": [
+    {
+      "from": "verify",
+      "to": "triage",
+      "speed": 4,
+      "caption": "The rc.5 artifacts are verified and sourcefed is built at its pinned head in the container"
+    },
+    {
+      "from": "triage",
+      "to": "verdict",
+      "speed": 2,
+      "caption": "The twelve events go through sourcefed's triage against the shipped rc.5 daemon"
+    },
+    {
+      "from": "verdict",
+      "to": "end",
+      "speed": 1,
+      "hold_ms": 2500,
+      "caption": "Six withheld, six delivered; every verdict matches the fixture"
+    }
+  ]
+}

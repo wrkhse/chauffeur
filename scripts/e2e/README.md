@@ -32,12 +32,12 @@ withhold and six deliver.
   - sha256: `983a4339b62f642fa9f03f9b5c16d0c95f6ac98e8aef78f3ef2744166c2e9a41`
 - Client: `fdcn-chauffeur-1.0.0-rc.5.tgz`
   - sha256: `8f24e8ed8f4a6c36ab2238722e90dddf026e8bbbc17f7522aab96798baa26d68`
-- Sourcefed: `wrkhse/sourcefed`, branch `feat/chauffeur-triage`,
-  head `1736930` (PR #29)
+- Sourcefed: `wrkhse/sourcefed`, branch `main`, commit `0a1a5e7`
+  (PR #29's merge commit)
 
 `rc5.sh` checks both checksums with `sha256sum -c` before anything runs.
-It pins the sourcefed checkout to `1736930a47241ea4a364c81f28ddd4e23a17472f`
-and fails if `HEAD` is anything else.
+It pins the sourcefed checkout to `0a1a5e73f5c53147fbd2ba5a1100fed89a2a1a8d`,
+PR #29's merge commit on `main`, and fails if `HEAD` is anything else.
 
 ### Run it
 
@@ -67,7 +67,8 @@ network access.
 
 **Never run `rc5.sh` on the developer's machine.** It installs a Linux
 binary, runs `npm ci` and starts a daemon. The script refuses anything but
-Linux, and the arm64 tarball does not run on macOS.
+Linux and requires a container marker (`/.dockerenv` or
+`/run/.containerenv`); the arm64 tarball does not run on macOS.
 
 ### What it does
 
@@ -75,9 +76,9 @@ Linux, and the arm64 tarball does not run on macOS.
 2. Unpacks the daemon tarball and installs it as Homebrew does:
    `bin/chauffeur` becomes `bin/chauffeur-next`, and `share/chauffeur/`
    becomes `share/chauffeur-next/`.
-3. Clones sourcefed, checks out the pinned head, runs `npm ci` and
-   `node scripts/build-tests.mjs`, and unpacks the client tarball as
-   `@fdcn/chauffeur` in the checkout's `node_modules`.
+3. Clones sourcefed's `main`, checks out the pinned merge commit, runs
+   `npm ci` and `node scripts/build-tests.mjs`, and unpacks the client
+   tarball as `@fdcn/chauffeur` in the checkout's `node_modules`.
 4. Writes `$XDG_CONFIG_HOME/chauffeur-next/models.json` and a placeholder
    answers file generated from the fixture, one answer per case.
 5. Writes `$XDG_CONFIG_HOME/chauffeur-next/rules/sourcefed/triage.json`
@@ -104,6 +105,36 @@ The intents column is the daemon's own reply, captured through the client
 `connect` the driver hands to `chauffeurNavigators`. Sourcefed's triage
 also logs one connection line to stderr when the first case starts.
 
+### Record it
+
+The recording is one `termctrl` session running the same container, marked
+at four moments and cut by `scripts/e2e/rc5.plan.json`. Start it with
+`--record`, then mark `verify` once both checksums pass and sourcefed is at
+its pinned head, `triage` as the case table starts, `verdict` once the
+summary line is on screen, and `end` once the summary has settled:
+
+```sh
+termctrl start rc5 --record "$TMPDIR/rc5.termctrl" --cols 120 --rows 40 -- \
+  docker run --rm --platform linux/arm64 \
+  -v "$PWD:/src:ro" -v rc5-work:/work -v "$PWD/dist:/art:ro" \
+  node:22-bookworm bash /src/scripts/e2e/rc5.sh
+
+termctrl mark rc5 verify
+termctrl mark rc5 triage
+termctrl mark rc5 verdict
+termctrl mark rc5 end
+termctrl stop rc5
+```
+
+Render the recording with the plan's captions and the footer. At
+`--cols 120`, a 7 px cell and a 2x pixel ratio, the video is about 1700 px
+wide:
+
+```sh
+termctrl video "$TMPDIR/rc5.termctrl" --out docs/media/slice-2.mp4 \
+  --edit scripts/e2e/rc5.plan.json --cell-width 7 --pixel-ratio 2 --footer
+```
+
 ### How it fails
 
 `rc5.sh` exits non-zero on a checksum mismatch, a sourcefed checkout at
@@ -111,9 +142,9 @@ another head, a failed build, or a rule that is not written. The driver exits
 non-zero if the installed binary is not `chauffeur-next 1.0.0-rc.5`, the
 daemon does not create its socket, `daemon status` does not list
 `sourcefed/triage`, the fixture does not hold the twelve cases as
-labelled, or any `deliver` differs from the fixture. A deliver case the daemon answered
-without triaging is marked `UNTRIAGED` and fails too, so a missing answer
-cannot pass as a correct delivery. A failure prints the case's line and a
+labelled, or any `deliver` differs from the fixture. A deliver case the daemon
+answered without triaging is marked `UNTRIAGED` and fails too, so a missing
+answer cannot pass as a correct delivery. A failure prints the case's line and a
 summary, and the last 8 KiB of daemon output follows an error.
 
 ### What it does not prove
