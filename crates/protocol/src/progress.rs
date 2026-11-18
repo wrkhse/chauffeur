@@ -31,7 +31,11 @@ pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>
                     }
                     settled
                 }
-                RunEvent::Started { .. } | RunEvent::Finished => return None,
+                // TODO(slice 3, PR 2): report a skipped step as `step_skipped` once
+                // rules lower `after`; no rule's plan skips a step yet.
+                RunEvent::Started { .. } | RunEvent::Finished | RunEvent::StepSkipped { .. } => {
+                    return None;
+                }
             };
             if let (Some(rule), Some(object)) = (rule, fields.as_object_mut()) {
                 object.insert("rule".into(), json!(rule));

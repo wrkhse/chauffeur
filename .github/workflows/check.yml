@@ -82,6 +82,11 @@ jobs:
       - run: cargo install --locked kani-verifier --version "$KANI_VERSION"
       - run: cargo kani setup
       # A run that verifies no harness proves nothing, so it fails too.
+      - name: cargo kani -p chauffeur-core
+        run: |
+          set -o pipefail
+          cargo kani -p chauffeur-core | tee kani-core.log
+          grep -Eq 'Complete - [1-9][0-9]* successfully verified harnesses, 0 failures' kani-core.log
       - name: cargo kani -p chauffeur-judges
         run: |
           set -o pipefail

@@ -67,3 +67,28 @@ impl Question {
         &self.evidence
     }
 }
+
+impl chauffeur_core::Request for Question {
+    /// Its outcomes, and `unsure` after them. A question has 2 to 64
+    /// outcomes, so the count never saturates.
+    fn outcomes(&self) -> u8 {
+        u8::try_from(self.outcomes.len())
+            .unwrap_or(u8::MAX)
+            .saturating_add(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chauffeur_core::Request;
+
+    use super::Question;
+
+    #[test]
+    fn a_yes_no_question_settles_to_yes_no_or_unsure() {
+        let question = Question::noul("Ship it?", ["diff"]).unwrap();
+
+        assert_eq!(question.outcomes().len(), 2);
+        assert_eq!(Request::outcomes(&question), 3);
+    }
+}

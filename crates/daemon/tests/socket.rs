@@ -759,10 +759,12 @@ fn a_client_that_stops_reading_is_cancelled_at_a_messages_write_timeout() {
         "stalled",
         &slow_jev_beside_placeholder(Duration::from_secs(10), 20_000),
     );
-    // One round of 32 steps with long IDs: its `round_ready` is far larger
-    // than a socket's buffers, so its write blocks once they are full.
-    let long_id = "s".repeat(15 * 1024);
-    let steps: Vec<Value> = (0..32)
+    // One round of the most steps a strategy holds (16), each ID as long as
+    // a text may be (16 KiB with its two-digit prefix and dash): its
+    // `round_ready` is about 256 KiB, larger than a socket's buffers, so its
+    // write blocks once they are full.
+    let long_id = "s".repeat(16 * 1024 - 3);
+    let steps: Vec<Value> = (0..16)
         .map(|index| {
             json!({ "id": format!("{index:02}-{long_id}"), "judge": "quick",
                     "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],

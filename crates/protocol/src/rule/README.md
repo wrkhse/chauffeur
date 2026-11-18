@@ -7,7 +7,7 @@ with its ID and the reason, and never fails while running.
 | ------------- | ----------------------------------------------------------------------------------------------------- |
 | `mod.rs`      | `Rule::parse`, then `hooks` (its `on` and `when` match an event) and the loaded parts                 |
 | `file.rs`     | The rule file as written, before any check                                                            |
-| `strategy.rs` | `Strategy`: a rule's judges and steps as a core plan, at most 32 steps; a request may send one inline |
+| `strategy.rs` | `Strategy`: a rule's judges and steps as a core plan, at most 16 steps; a request may send one inline |
 | `judge.rs`    | `JudgeSpec` (tier, model, confidence) from `judges`, or a tier named directly                         |
 | `ask.rs`      | A step's question, inline or named in `asks`                                                          |
 | `then.rs`     | A `then` entry: its `if` names real steps and outcomes, with exactly one action or intent             |
