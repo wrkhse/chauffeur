@@ -4,12 +4,12 @@ Sends an event, or a navigation, to every rule that hooks it, runs them on the
 router's pool of workers, and appends what each did to the audit log. An
 inline strategy runs on its own and returns its verdict.
 
-| File           | Holds                                                                                          |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| `mod.rs`       | `Router`: the loaded configuration, admission, `emit`, `replace` on reload, and one rule's run |
-| `navigate.rs`  | `Router::navigate`: intents from every hooked rule, or an inline strategy's verdict            |
-| `cooldown.rs`  | `Cooldowns`: when each rule last returned something in each session, bounded to 4,096 pairs    |
-| `log_entry.rs` | How a run ended, and each step's answer or failure, as JSON for the audit log                  |
+| File           | Holds                                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `mod.rs`       | `Router`: the loaded configuration, admission, `emit`, `replace` on reload, and one rule's run                         |
+| `navigate.rs`  | `Router::navigate`: intents from every hooked rule, or an inline strategy's verdict                                    |
+| `cooldown.rs`  | `Cooldowns`: when each rule last returned something, a project's rules kept apart by project, bounded to 4,096 triples |
+| `log_entry.rs` | How a run ended, and each step's answer or failure, as JSON for the audit log                                          |
 
 ```mermaid
 sequenceDiagram
@@ -21,7 +21,7 @@ sequenceDiagram
     S->>R: admit, then emit or navigate
     R->>R: rules whose on and when match
     R-->>S: rule_matched, as each run starts
-    R->>C: cooling for this rule and session?
+    R->>C: cooling for this project, rule and session?
     C-->>R: skip, logged as cooldown
     R->>W: run the rest on the pool, until the deadline or a cancel
     W-->>R: verdict, refused, busy, stopped, deadline or cancelled
@@ -39,13 +39,11 @@ use chauffeur_daemon::audit::{Audit, MAX_BYTES};
 let router = Router::new(loaded, Audit::new(&paths.state, MAX_BYTES));
 
 let permit = router.admit(Source::Harness)?;
-let actions = router.emit(
-    &event,
-    Duration::from_millis(1500),
-    &Cancel::new(Source::Harness),
-);
+let cancel = Cancel::new(Source::Harness).admitted(permit);
+let actions = router.emit(&event, Duration::from_millis(1500), &cancel);
 
 let permit = router.admit(Source::Integration)?;
+let cancel = Cancel::new(Source::Integration).admitted(permit);
 let intents = router.navigate(request, &cancel, &|event| send(event))?;
 ```
 
@@ -73,7 +71,24 @@ let intents = router.navigate(request, &cancel, &|event| send(event))?;
 - A rule that misses the deadline, or fails, returns nothing; the other
   rules' intents still return.
 - A navigation streams at most 4,096 events; its intents always return.
-- Past 4,096 rule and session pairs, the oldest cooldown is forgotten.
-  Cooldowns start afresh with each daemon.
+- Past 4,096 project, rule and session triples, the oldest cooldown is
+  forgotten. Cooldowns start afresh with each daemon.
 - A reload swaps the configuration whole; a run in progress keeps the one
-  it started with.
+  it started with. The project cache notices the new load by its epoch, so
+  the next navigation rebuilds a project's rules under the new
+  `projects.json` or loaded rules.
+- A navigation naming a `project` also matches its `.chauffeur/rules/`,
+  read within its own bounds and cached by signature and loaded configuration
+  for at most 32 projects. The project and its rules folder are
+  canonicalized, the walk skips symlinks, and a project rule naming a model,
+  or using System Two where `projects.json` does not list the project, is
+  refused and stays out. A project that cannot be canonicalized, such as a
+  folder that is not there, has no rules.
+- A project rule's cooldown is keyed by its project's canonical path, so a
+  project reached through a symlink or another spelling cools down once, and
+  two projects with a rule of the same ID do not suppress each other.
+- A project rule's audit entry carries that canonical path as `project`,
+  right after `rule`, so one project's runs read the same however the request
+  spells it, and two projects' runs of a rule of the same ID can be told
+  apart; a loaded rule's entry keeps exactly the fields it had and no
+  `project`.

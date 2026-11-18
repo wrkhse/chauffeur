@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -7,7 +7,8 @@ use chauffeur_protocol::{Intent, Navigate, Rejection, Rule, Strategy, Target, pr
 use chauffeur_runtime::{Cancel, Context, EventLog, MAX_EVENTS, Ran, run_strategy};
 use serde_json::{Map, Value, json};
 
-use super::{Ask, Router, log_entry};
+use super::{Ask, Hook, Router, log_entry};
+use crate::project::quoted;
 use crate::state::Loaded;
 
 /// What an inline strategy's run is logged as.
@@ -20,9 +21,10 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// A [`Rejection`]: `busy` when the daemon's workers cannot take the
-    /// strategy, `deadline` or `judge_unavailable` for an inline strategy,
-    /// `cancelled` once the caller cancels.
+    /// A [`Rejection`]: `invalid` for a project that cannot be resolved or a
+    /// request that names no event, `busy` when the daemon's workers cannot
+    /// take the strategy, `deadline` or `judge_unavailable` for an inline
+    /// strategy, `cancelled` once the caller cancels.
     pub fn navigate(
         &self,
         request: Navigate,
@@ -43,14 +45,37 @@ impl Router {
             }
         };
         let evidence = request.evidence().to_vec();
-        let project = request.project().map(Path::to_path_buf);
+        // One project has one spelling: the path the filesystem resolves it
+        // to, used for its rules, its cooldown key, its audit entry and its
+        // System Two allowance, so `/var/...` and `/private/var/...`, or a
+        // symlink and its target, are one project. A project that cannot be
+        // resolved refuses the request rather than running as one with no
+        // rules.
+        let canonical = request.project().map(resolved).transpose()?;
         let answered = match (request.event(), request.into_target()) {
             (Some(event), Target::On(on)) => {
-                let hooked: Vec<Arc<Rule>> = loaded
+                let project_rules = canonical
+                    .as_deref()
+                    .map(|path| self.projects.rules(&loaded, path));
+                let hooked: Vec<Hook> = loaded
                     .rules
                     .iter()
-                    .filter(|rule| rule.hooks(&event))
                     .cloned()
+                    .map(|rule| Hook {
+                        rule,
+                        project: None,
+                    })
+                    .chain(
+                        project_rules
+                            .iter()
+                            .flat_map(|rules| rules.rules.iter())
+                            .cloned()
+                            .map(|rule| Hook {
+                                rule,
+                                project: canonical.clone(),
+                            }),
+                    )
+                    .filter(|hook| hook.rule.hooks(&event))
                     .collect();
                 let ask = Ask {
                     event: on,
@@ -62,7 +87,7 @@ impl Router {
                 Ok(self.intents(&loaded, &hooked, &ask, &send))
             }
             (_, Target::Strategy(strategy)) => {
-                allowed(&loaded, &strategy, project.as_deref())?;
+                allowed(&loaded, &strategy, canonical.as_deref())?;
                 self.inline(&loaded, strategy, &evidence, deadline, cancel, &send)
             }
             (None, Target::On(_)) => Err(Rejection::Invalid("no event to match".to_owned())),
@@ -80,11 +105,11 @@ impl Router {
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
-        hooked: &[Arc<Rule>],
+        hooked: &[Hook],
         ask: &Ask,
         send: &(dyn Fn(Value) + Sync),
     ) -> Value {
-        let announced = |rule: &Rule| send(progress::rule_matched(rule.id()));
+        let announced = |hook: &Hook| send(progress::rule_matched(hook.rule.id()));
         let ran = |rule: &Rule, done: &super::RuleRun| {
             for event in done
                 .run
@@ -152,9 +177,24 @@ impl Router {
     }
 }
 
+/// The path a request's project resolves to. A project that cannot be
+/// resolved refuses the request: it is not read as a project with no rules,
+/// and an inline strategy does not fall back to the spelling it was given.
+fn resolved(path: &Path) -> Result<PathBuf, Rejection> {
+    std::fs::canonicalize(path).map_err(|error| {
+        Rejection::Invalid(format!(
+            "project {} cannot be resolved: {}",
+            quoted(path),
+            error.kind()
+        ))
+    })
+}
+
 /// Refuses an inline System Two strategy for a project `projects.json` does
 /// not list: an inline strategy carries its caller's trust, so only the
-/// user's own listed projects may spend System Two.
+/// user's own listed projects may spend System Two. `project` is the
+/// canonical path the request's project resolves to, so each spelling of a
+/// listed project is allowed.
 fn allowed(loaded: &Loaded, strategy: &Strategy, project: Option<&Path>) -> Result<(), Rejection> {
     if !strategy.uses_tier(Tier::SystemTwo) {
         return Ok(());

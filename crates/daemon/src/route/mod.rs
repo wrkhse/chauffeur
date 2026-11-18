@@ -4,6 +4,7 @@ mod navigate;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use cooldown::Cooldowns;
 use serde_json::{Map, Value, json};
 
 use crate::audit::Audit;
+use crate::project;
 use crate::state::Loaded;
 
 /// How many rule runs are kept waiting between calls: enough for every rule
@@ -41,10 +43,19 @@ const GRACE: Duration = Duration::from_millis(50);
 /// what they did to the audit log.
 pub struct Router {
     loaded: RwLock<Arc<Loaded>>,
+    projects: project::Cache,
     cooldowns: Arc<Cooldowns>,
     admission: Admission,
     rules: Pool,
     audit: Arc<Audit>,
+}
+
+/// A rule to run, and the project it came from when it is a project rule:
+/// owned, so the worker that runs it takes its own copy.
+#[derive(Clone)]
+struct Hook {
+    rule: Arc<Rule>,
+    project: Option<PathBuf>,
 }
 
 /// One rule's run for an event or a navigation: what it was given, owned so
@@ -75,6 +86,7 @@ impl Router {
     pub fn new(loaded: Loaded, audit: Audit) -> Self {
         Self {
             loaded: RwLock::new(Arc::new(loaded)),
+            projects: project::Cache::new(),
             cooldowns: Arc::new(Cooldowns::new()),
             admission: Admission::new(Capacity::DAEMON),
             rules: Pool::new(RULES_KEPT, RULES_ALIVE),
@@ -82,7 +94,9 @@ impl Router {
         }
     }
 
-    /// Replaces the loaded rules, models and redaction; the next event uses them.
+    /// Replaces the loaded rules, models and redaction; the next event uses
+    /// them. A project's cached rules came from the older load, so the next
+    /// navigation reloads them.
     pub fn replace(&self, loaded: Loaded) {
         if let Ok(mut current) = self.loaded.write() {
             *current = Arc::new(loaded);
@@ -116,11 +130,15 @@ impl Router {
         let Some(deadline) = Instant::now().checked_add(deadline) else {
             return Vec::new();
         };
-        let hooked: Vec<Arc<Rule>> = loaded
+        let hooked: Vec<Hook> = loaded
             .rules
             .iter()
             .filter(|rule| rule.hooks(event))
             .cloned()
+            .map(|rule| Hook {
+                rule,
+                project: None,
+            })
             .collect();
         let ask = Ask {
             event: event.name().to_owned(),
@@ -148,81 +166,68 @@ impl Router {
     fn run_all(
         &self,
         loaded: &Arc<Loaded>,
-        hooked: &[Arc<Rule>],
+        hooked: &[Hook],
         ask: &Ask,
-        announced: &(dyn Fn(&Rule) + Sync),
+        announced: &(dyn Fn(&Hook) + Sync),
         ran: &(dyn Fn(&Rule, &RuleRun) + Sync),
     ) -> Vec<(Arc<Rule>, Option<Then>)> {
         let mut returned: BTreeMap<usize, RuleRun> = BTreeMap::new();
-        let jobs =
-            |index: usize, rule: &Arc<Rule>, send: Sender<(usize, Report<Option<RuleRun>>)>| {
-                let rule = Arc::clone(rule);
-                let loaded = Arc::clone(loaded);
-                let cooldowns = Arc::clone(&self.cooldowns);
-                let ask = ask.clone();
-                let job: Job = Box::new(move || {
-                    let announce = send.clone();
-                    // The caller's notify belongs to its own thread, so the
-                    // job reports the start here and the dispatcher sends it
-                    // on.
-                    let started = move || {
-                        // A caller that stopped waiting drops this, and the
-                        // run goes on.
-                        let _ = announce.send((index, Report::Started));
-                    };
-                    // A rule that panics yields nothing, and its worker runs on.
-                    let done = panic::catch_unwind(AssertUnwindSafe(|| {
-                        Self::run_one(&loaded, &cooldowns, &rule, &ask, &started)
-                    }))
-                    .ok();
-                    let _ = send.send((index, Report::Finished(done)));
-                });
-                job
-            };
+        let jobs = |index: usize, hook: &Hook, send: Sender<(usize, Report<Option<RuleRun>>)>| {
+            let Hook { rule, project } = hook.clone();
+            let loaded = Arc::clone(loaded);
+            let cooldowns = Arc::clone(&self.cooldowns);
+            let ask = ask.clone();
+            let job: Job = Box::new(move || {
+                let announce = send.clone();
+                // The caller's notify belongs to its own thread, so the
+                // job reports the start here and the dispatcher sends it
+                // on.
+                let started = move || {
+                    // A caller that stopped waiting drops this, and the
+                    // run goes on.
+                    let _ = announce.send((index, Report::Started));
+                };
+                // A rule that panics yields nothing, and its worker runs on.
+                let done = panic::catch_unwind(AssertUnwindSafe(|| {
+                    Self::run_one(
+                        &loaded,
+                        &cooldowns,
+                        &rule,
+                        project.as_deref(),
+                        &ask,
+                        &started,
+                    )
+                }))
+                .ok();
+                let _ = send.send((index, Report::Finished(done)));
+            });
+            job
+        };
         let on_start = |index: usize| {
-            if let Some(rule) = hooked.get(index) {
-                announced(rule);
+            if let Some(hook) = hooked.get(index) {
+                announced(hook);
             }
         };
         let arrived = |index: usize, done: Option<RuleRun>| {
-            let Some(rule) = hooked.get(index) else {
+            let Some(hook) = hooked.get(index) else {
                 return;
             };
             // A job that panicked reports no run; its rule is still settled,
             // as a worker that stopped.
-            let done = done.unwrap_or_else(|| Self::unsettled(rule, ask, Ran::Stopped));
-            ran(rule, &done);
+            let done = done.unwrap_or_else(|| {
+                Self::unsettled(&hook.rule, hook.project.as_deref(), ask, Ran::Stopped)
+            });
+            ran(&hook.rule, &done);
             returned.insert(index, done);
         };
         let left = dispatch(&self.rules, ask.deadline, hooked, jobs, on_start, arrived);
-        // A run a worker started and never finished is settled as a run cut
-        // at the deadline, so no event leaves a rule half logged.
-        for index in left.open {
-            if let Some(rule) = hooked.get(index) {
-                let done = Self::unsettled(rule, ask, Ran::Deadline);
-                ran(rule, &done);
-                returned.insert(index, done);
-            }
-        }
-        // A run no worker could be started for says so, with the reason.
-        for (index, reason) in left.refused {
-            if let Some(rule) = hooked.get(index) {
-                let done = Self::unsettled(rule, ask, Ran::Refused(reason));
-                ran(rule, &done);
-                returned.insert(index, done);
-            }
-        }
-        for index in left.unstarted {
-            if let Some(rule) = hooked.get(index) {
-                returned.insert(index, Self::skipped(rule, ask));
-            }
-        }
+        Self::settle(left, hooked, ask, ran, &mut returned);
         // The indexes are the hooks', so a BTreeMap gives the runs in hook
         // order, and the audit reads in the order the rules load.
         returned
             .into_iter()
             .filter_map(|(index, done)| {
-                let rule = hooked.get(index)?;
+                let hook = hooked.get(index)?;
                 let RuleRun {
                     entry,
                     then,
@@ -233,22 +238,70 @@ impl Router {
                 if let Err(error) = self.audit.append(entry) {
                     eprintln!("chauffeur: a run was not written to the audit log: {error}");
                 }
-                Some((Arc::clone(rule), then))
+                Some((Arc::clone(&hook.rule), then))
             })
             .collect()
     }
 
+    /// Settles what a dispatch left undone, in hook order: a run a worker
+    /// started and never finished is settled as one cut at the deadline, one
+    /// no worker could be started for says so with its reason, and one no
+    /// worker started is skipped. A project rule's line names its project, as
+    /// its run's would.
+    fn settle(
+        left: Left,
+        hooked: &[Hook],
+        ask: &Ask,
+        ran: &(dyn Fn(&Rule, &RuleRun) + Sync),
+        returned: &mut BTreeMap<usize, RuleRun>,
+    ) {
+        // A run a worker started and never finished is settled as a run cut
+        // at the deadline, so no event leaves a rule half logged.
+        for index in left.open {
+            if let Some(hook) = hooked.get(index) {
+                let done = Self::unsettled(&hook.rule, hook.project.as_deref(), ask, Ran::Deadline);
+                ran(&hook.rule, &done);
+                returned.insert(index, done);
+            }
+        }
+        // A run no worker could be started for says so, with the reason.
+        for (index, reason) in left.refused {
+            if let Some(hook) = hooked.get(index) {
+                let done = Self::unsettled(
+                    &hook.rule,
+                    hook.project.as_deref(),
+                    ask,
+                    Ran::Refused(reason),
+                );
+                ran(&hook.rule, &done);
+                returned.insert(index, done);
+            }
+        }
+        for index in left.unstarted {
+            if let Some(hook) = hooked.get(index) {
+                returned.insert(
+                    index,
+                    Self::skipped(&hook.rule, hook.project.as_deref(), ask),
+                );
+            }
+        }
+    }
+
     /// A rule's line when its run never started: the deadline came first, so
     /// the log says so. Nothing is returned, and the wire has no event for a
-    /// rule that did not run.
-    fn skipped(rule: &Rule, ask: &Ask) -> RuleRun {
+    /// rule that did not run. A project rule's line names its project, as its
+    /// run's would.
+    fn skipped(rule: &Rule, project: Option<&Path>, ask: &Ask) -> RuleRun {
+        let mut entry = Map::new();
+        entry.insert("rule".into(), json!(rule.id()));
+        if let Some(project) = project {
+            entry.insert("project".into(), json!(project.display().to_string()));
+        }
+        entry.insert("event".into(), json!(ask.event));
+        entry.insert("session".into(), json!(ask.session));
+        entry.insert("skipped".into(), json!("deadline"));
         RuleRun {
-            entry: json!({
-                "rule": rule.id(),
-                "event": ask.event,
-                "session": ask.session,
-                "skipped": "deadline",
-            }),
+            entry: Value::Object(entry),
             then: None,
             run: None,
             unsettled: None,
@@ -257,10 +310,13 @@ impl Router {
 
     /// A rule's line when its run started and did not settle: the runtime's
     /// own line for that end, and the word its steps settle with. Nothing is
-    /// returned.
-    fn unsettled(rule: &Rule, ask: &Ask, ran: Ran) -> RuleRun {
+    /// returned. A project rule's line names its project, as its run's would.
+    fn unsettled(rule: &Rule, project: Option<&Path>, ask: &Ask, ran: Ran) -> RuleRun {
         let mut entry = Map::new();
         entry.insert("rule".into(), json!(rule.id()));
+        if let Some(project) = project {
+            entry.insert("project".into(), json!(project.display().to_string()));
+        }
         entry.insert("event".into(), json!(ask.event));
         entry.insert("session".into(), json!(ask.session));
         let word = log_entry::unsettled(&ran);
@@ -275,17 +331,28 @@ impl Router {
     }
 
     /// One rule's run: its log entry, what it returned, and its run. A rule
-    /// in cooldown returns before `announce`, so it is not announced.
+    /// in cooldown returns before `announce`, so it is not announced; a
+    /// project's rule keys its cooldown by that project, so two projects with
+    /// a rule of the same ID do not suppress each other, and its entry names
+    /// the project it came from.
     fn run_one(
         loaded: &Arc<Loaded>,
         cooldowns: &Cooldowns,
         rule: &Arc<Rule>,
+        project: Option<&Path>,
         ask: &Ask,
         announce: &dyn Fn(),
     ) -> RuleRun {
-        let key = (rule.id().to_owned(), ask.session.clone());
+        let key = (
+            project.map(Path::to_path_buf),
+            rule.id().to_owned(),
+            ask.session.clone(),
+        );
         let mut entry = Map::new();
         entry.insert("rule".into(), json!(rule.id()));
+        if let Some(project) = project {
+            entry.insert("project".into(), json!(project.display().to_string()));
+        }
         entry.insert("event".into(), json!(ask.event));
         entry.insert("session".into(), json!(ask.session));
         if cooldowns.cooling(&key, rule.cooldown()) {
@@ -456,7 +523,8 @@ fn finished<T>(receive: &Receiver<(usize, T)>, wait: Duration) -> Option<(usize,
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
@@ -467,7 +535,23 @@ mod tests {
     use chauffeur_runtime::{Cancel, Pool, Ran, Source};
     use serde_json::{Value, json};
 
-    use super::{Ask, Report, Router, dispatch, finished};
+    use super::{Ask, Hook, Left, Report, Router, RuleRun, dispatch, finished};
+
+    /// A rule hooking `sourcefed.event`, for a test that settles its run
+    /// without running it.
+    fn hook(id: &str, project: Option<&str>) -> Hook {
+        let rule = Rule::parse(
+            id,
+            r#"{ "on": "sourcefed.event", "strategy": [{ "id": "screen", "judge": "system-one",
+                 "ask": { "outcomes": ["yes", "no"], "evidence": ["event"],
+                          "instructions": "Is this noise?" } }] }"#,
+        )
+        .unwrap();
+        Hook {
+            rule: Arc::new(rule),
+            project: project.map(PathBuf::from),
+        }
+    }
 
     /// The dispatcher keeps no more jobs running than the pool has workers:
     /// every one of 16 jobs comes back, on a pool worker, with no more than
@@ -870,7 +954,7 @@ mod tests {
             cancel: Cancel::new(Source::Harness),
         };
 
-        let skipped = Router::skipped(&rule, &ask);
+        let skipped = Router::skipped(&rule, None, &ask);
 
         assert_eq!(
             skipped.entry,
@@ -928,10 +1012,87 @@ mod tests {
         ];
 
         for (ran, logged, word) in cases {
-            let done = Router::unsettled(&rule, &ask, ran);
+            let done = Router::unsettled(&rule, None, &ask, ran);
 
             assert_eq!(done.entry, logged);
             assert_eq!(done.unsettled, Some(word), "the word for {logged}");
+            assert!(done.then.is_none() && done.run.is_none());
+        }
+    }
+
+    /// What a dispatch leaves undone is settled in hook order: a run a worker
+    /// started is settled as one cut at the deadline, one no worker could
+    /// start as refused with its reason, and one no worker started as
+    /// skipped. Only the first two report a result, so only they reach `ran`;
+    /// a project rule's line names its project, and a loaded rule's does not.
+    #[test]
+    fn settle_logs_each_run_it_is_left_with_at_its_own_end() {
+        let hooked = [
+            hook("acme/triage", Some("/projects/acme")),
+            hook("sourcefed/triage", None),
+            hook("acme/comments", Some("/projects/acme")),
+        ];
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(Vec::new()),
+            deadline: Instant::now(),
+            cancel: Cancel::new(Source::Harness),
+        };
+        let left = Left {
+            open: std::iter::once(0).collect(),
+            refused: vec![(1, "no system-one model is registered".to_owned())],
+            unstarted: vec![2],
+        };
+        let deadline = json!({
+            "rule": "acme/triage",
+            "project": "/projects/acme",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "deadline": true,
+        });
+        let refused = json!({
+            "rule": "sourcefed/triage",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "refused": "no system-one model is registered",
+        });
+        let skipped = json!({
+            "rule": "acme/comments",
+            "project": "/projects/acme",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "skipped": "deadline",
+        });
+        let reported = Mutex::new(Vec::new());
+        let ran = |rule: &Rule, done: &RuleRun| {
+            let mut calls = reported.lock().unwrap();
+            calls.push((rule.id().to_owned(), done.entry.clone()));
+        };
+        let mut returned = BTreeMap::new();
+
+        Router::settle(left, &hooked, &ask, &ran, &mut returned);
+
+        let calls = reported.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            [
+                ("acme/triage".to_owned(), deadline.clone()),
+                ("sourcefed/triage".to_owned(), refused.clone()),
+            ],
+            "the deadline and the refusal report a result, and the skip none"
+        );
+        let indexes: Vec<usize> = returned.keys().copied().collect();
+        assert_eq!(indexes, [0, 1, 2], "each index is settled exactly once");
+        let settled = [
+            (0, deadline, Some("deadline")),
+            (1, refused, Some("refused")),
+            (2, skipped, None),
+        ];
+        for (index, entry, word) in settled {
+            let done = returned.get(&index).unwrap();
+            assert_eq!(done.entry, entry, "the entry for index {index}");
+            assert_eq!(done.unsettled, word, "the word for index {index}");
             assert!(done.then.is_none() && done.run.is_none());
         }
     }

@@ -18,6 +18,7 @@
 
 pub mod audit;
 mod paths;
+mod project;
 mod route;
 mod rpc;
 mod socket;

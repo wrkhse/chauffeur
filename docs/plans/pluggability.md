@@ -389,6 +389,13 @@ prior history; the caller supplies the evidence it wants considered. Intents
 and transition events return to that caller. The only state kept between
 navigations is a rule's cooldown. Plugins keep their own state.
 
+### Open points
+
+- **An intent does not say which source its rule came from.** An intent names
+  only the rule's ID, so a project's `team/review` reads like an
+  integration's. A later slice may add an optional `source` field to the
+  intent; until then, a caller cannot tell them apart.
+
 ## Judges
 
 Every judge takes one question and returns one result. Judges come in four

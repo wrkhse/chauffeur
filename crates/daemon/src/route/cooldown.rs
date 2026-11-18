@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// How many rule and session pairs keep a cooldown.
+/// How many project, rule and session triples keep a cooldown.
 const BOUND: usize = 4_096;
 
-/// A rule's ID and the session it returned something in.
-pub(super) type Key = (String, String);
+/// The project whose rule fired, when it was a project's rule, the rule's ID,
+/// and the session it returned something in. A project's rule keeps its own
+/// cooldown, so two projects with a rule of the same ID do not suppress each
+/// other.
+pub(super) type Key = (Option<PathBuf>, String, String);
 
 /// When each rule last returned something in each session. Past its bound,
-/// the oldest pair is forgotten.
+/// the oldest triple is forgotten.
 ///
-/// [`Cooldowns::cooling`] spares a run its judges while a pair cools down,
+/// [`Cooldowns::cooling`] spares a run its judges while a triple cools down,
 /// and [`Cooldowns::try_fire`] decides, under one lock, which of the runs
 /// that settle at once returns its action.
 pub(super) struct Cooldowns {

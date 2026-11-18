@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync
 } from "node:fs"
@@ -27,6 +28,10 @@ import { eventually } from "./stand-in.ts"
 
 const ROOT = resolve(import.meta.dir, "../../..")
 const BIN = process.env.CHAUFFEUR_BIN
+
+// The project the fixtures name `<project>`: a temporary folder, as the
+// filesystem resolves it, which `projects.json` lists.
+const PROJECT = realpathSync(mkdtempSync(join(tmpdir(), "chauffeur-project-")))
 
 type Fill = {
   readonly at: string
@@ -66,7 +71,7 @@ function apply(params: Record<string, unknown>, fill: Fill): void {
   }
 }
 
-/** The fixtures, each with its `fill` applied. */
+/** The fixtures, each with its `fill` applied and `<project>` resolved. */
 function cases(): Case[] {
   const text = readFileSync(
     join(ROOT, "crates/protocol/fixtures/navigate.json"),
@@ -79,6 +84,11 @@ function cases(): Case[] {
 
     for (const fill of each.fill ?? []) {
       apply(params, fill)
+    }
+
+    // A fixture naming `<project>` means this harness's own project.
+    if (params.project === "<project>") {
+      params.project = PROJECT
     }
 
     return { ...each, params }
@@ -141,10 +151,10 @@ describe.skipIf(!BIN)("against the real daemon", () => {
     }
     mkdirSync(join(root, "config/chauffeur/rules/sourcefed"), { recursive: true })
     writeFileSync(join(root, "models.json"), JSON.stringify(models))
-    // The project the inline System Two fixture names, so the daemon runs it.
+    // The project the fixtures name `<project>`, so the daemon runs it.
     writeFileSync(
       join(root, "config/chauffeur/projects.json"),
-      JSON.stringify(["/Users/me/src/app"])
+      JSON.stringify([PROJECT])
     )
     writeFileSync(
       join(root, "config/chauffeur/rules/sourcefed/triage.json"),
@@ -350,4 +360,10 @@ describe.skipIf(!BIN)("against the real daemon", () => {
     child.kill()
     await eventually(() => cancelled() === before + 3)
   }, 15_000)
+})
+
+// The fixtures' own project is gone once every test has run, the skipped
+// daemon tests included.
+afterAll(() => {
+  rmSync(PROJECT, { recursive: true, force: true })
 })
