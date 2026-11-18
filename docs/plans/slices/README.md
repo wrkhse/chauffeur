@@ -13,7 +13,7 @@ working end to end goes on the slice's page, and work stops for review.
 | 0   | [Setup](slice-0.md)                                       | Implemented |
 | 1   | [Conventional Commits nudge in OpenCode](slice-1.md)      | Implemented |
 | 2   | [sourcefed triage](slice-2.md)                            | Implemented |
-| 3   | [Escalation from Jev to GLiDE](slice-3.md)                | Planned     |
+| 3   | [Escalation from Jev to GLiDE](slice-3.md)                | In progress |
 | 4   | [opencode-history recall](slice-4.md)                     | Planned     |
 | 5   | [Harm guard, permissions and v1's rules](slice-5.md)      | Planned     |
 | 6   | [Skills and tools](slice-6.md)                            | Planned     |

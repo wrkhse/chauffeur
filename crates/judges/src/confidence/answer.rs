@@ -95,3 +95,65 @@ impl Answer {
         self.level
     }
 }
+
+impl chauffeur_core::Reply for Answer {
+    /// The settled outcome's position in the question's order, or `unsure`'s,
+    /// which follows every outcome.
+    fn settled(&self) -> u8 {
+        let index = match &self.outcome {
+            Settled::Outcome(label) => self
+                .p
+                .iter()
+                .position(|(value, _)| value == label)
+                .unwrap_or(self.p.len()),
+            Settled::Unsure => self.p.len(),
+        };
+        u8::try_from(index).unwrap_or(u8::MAX)
+    }
+
+    fn p(&self, outcome: u8) -> Option<u16> {
+        self.p.get(usize::from(outcome)).map(|(_, p)| p.get())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chauffeur_core::Reply;
+
+    use super::{Answer, AnsweredBy, Settled};
+    use crate::confidence::milli::Milli;
+    use crate::confidence::{Confidence, Probabilities};
+    use crate::question::Question;
+
+    fn answer(yes: f64) -> Answer {
+        let question = Question::noul("Ship it?", ["diff"]).unwrap();
+        let p =
+            Probabilities::read(question.outcomes(), [("yes", yes), ("no", 1.0 - yes)]).unwrap();
+        let bar = Confidence::Bar(Milli::new(700).unwrap());
+        let by = AnsweredBy {
+            model: "jev".into(),
+            placeholder: false,
+        };
+        Answer::settle(&question, p, &bar, by)
+    }
+
+    #[test]
+    fn an_answer_settles_to_its_outcome_position_or_unsure_after_them() {
+        let no = answer(0.1);
+        let unsure = answer(0.5);
+
+        assert_eq!(no.outcome(), &Settled::Outcome("no".into()));
+        assert_eq!(no.settled(), 1);
+        assert_eq!(unsure.outcome(), &Settled::Unsure);
+        assert_eq!(unsure.settled(), 2);
+    }
+
+    #[test]
+    fn its_p_is_each_outcome_in_thousandths() {
+        let no = answer(0.1);
+
+        assert_eq!(Reply::p(&no, 0), Some(100));
+        assert_eq!(Reply::p(&no, 1), Some(900));
+        assert_eq!(Reply::p(&no, 5), None);
+    }
+}

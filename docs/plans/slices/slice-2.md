@@ -113,7 +113,7 @@ directory: `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS.
 - **Nulls:** a JSON null anywhere in `params` is `invalid`; a field with no
   value is left out.
 - **Limits**, checked before admission: a request line of 1 MiB; a `project`
-  of at most 4096 bytes; 32 steps per strategy, counting each copy `for_each`
+  of at most 4096 bytes; 16 steps per strategy, counting each copy `for_each`
   makes; 16 `after` entries per step; 32 judges and 32 asks per strategy; 64
   outcomes per question, and 64 bars in a per-outcome confidence; 64 evidence
   blocks, 64 candidates, and 64 blocks named by one ask; 256 KiB of evidence
@@ -215,7 +215,7 @@ impl From<Exceeded> for Rejection {}
 impl From<RuleError> for Rejection {}
 ```
 
-Rule files are held to the same limits as requests: a strategy of 33 steps or
+Rule files are held to the same limits as requests: a strategy of 17 steps or
 33 judges, or an ask of 65 outcomes or a text over 16 KiB, used or not, is
 refused when it loads, as `RuleError::Limit`; a blank step ID is
 `RuleError::BlankStep`. A described outcome refuses fields beside `value`

@@ -4,7 +4,8 @@ use std::fmt;
 /// so no navigation can ask for unbounded work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Limit {
-    /// Steps in one strategy.
+    /// Steps in one strategy: at most as many as core's step machine holds,
+    /// [`chauffeur_core::MAX_STEPS`].
     Steps,
     /// Outcomes in one question.
     Outcomes,
@@ -65,7 +66,8 @@ impl Limit {
     #[must_use]
     pub const fn max(self) -> u64 {
         match self {
-            Self::Steps | Self::Judges | Self::Asks => 32,
+            Self::Steps => 16,
+            Self::Judges | Self::Asks => 32,
             Self::Outcomes | Self::EvidenceBlocks | Self::Candidates => 64,
             Self::EvidenceBytes => 256 * 1024,
             Self::TextBytes => 16 * 1024,

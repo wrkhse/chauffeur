@@ -1,12 +1,14 @@
 # Slice 3: Escalation from Jev to GLiDE
 
-**Status:** Planned.
+**Status:** In progress: `after` and rounds in core are built; lowering rules to
+plans, SubQ and GLiDE, image evidence, the `student` format, the rest for a
+failing model, `chauffeur strategy` and the playground follow.
 
 **You can:** have the commit nudge and `sourcefed/triage` ask GLiDE only when
 Jev's answer is near the bar the rule acts on, or Jev fails, see each
 strategy as a tree with `chauffeur strategy show`, and step through it in the
-playground's Strategy tab. neo checks an iPhone screen through Chauffeur with its screenshot, and a
-jev-distill student answers before Jev.
+playground's Strategy tab. An iPhone screen check reaches Jev with its
+screenshot, and a jev-distill student answers before Jev.
 
 This slice adds strategies with more than one step: a step's `after` names
 the earlier steps it waits for and the outcomes it needs. The step machine
@@ -34,19 +36,20 @@ Core turns a plan's named steps into a `rungs::Plan` and keeps a `rungs::Run`
 for each run. rungs decides which steps start, which are skipped and when the
 run is over. Core keeps what rungs knows nothing about:
 
-| Core keeps      | How                                                                                                                                                   |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Names           | Step IDs become indices; events and verdicts carry the names                                                                                          |
-| `near`          | An answer settles as one outcome index: the answer times 2^k, plus which of the step's k `near` needs matched; each need lists the indices it accepts |
-| `when`          | The listed outcomes, `failed` as `Outcome::FAILED`, join the need's outcome set                                                                       |
-| The deadline    | With less than 500 ms left before the end, core skips every Pending step, so no escalation starts                                                     |
-| Batches         | A reply is settled on a copy of the run, kept only when every step in it settles                                                                      |
-| Failure reasons | `Failure::Timeout` and the rest stay in the events; rungs only records `FAILED`                                                                       |
+| Core keeps      | How                                                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Names           | Step IDs become indices; events and verdicts carry the names                                                                                                                                                                                                       |
+| `near`          | An answer settles as one outcome index: the answer times 2^k, plus which of the step's k `near` needs matched; each need lists the indices it accepts; probabilities, bars and margins are whole thousandths, so a P of 0.85 lies exactly within 0.15 of a 0.7 bar |
+| `when`          | The listed outcomes, `failed` as `Outcome::FAILED`, join the need's outcome set                                                                                                                                                                                    |
+| The deadline    | With less than 500 ms left before the end, core skips every Pending step, so no escalation starts                                                                                                                                                                  |
+| Batches         | A reply is settled on a copy of the run, kept only when every step in it settles                                                                                                                                                                                   |
+| Failure reasons | `Failure::Timeout` and the rest stay in the events; rungs only records `FAILED`                                                                                                                                                                                    |
 
 A string need is `Need::settled`, an object need `Need::outcome`, and `all`
 and `any` are a step's `after` and `after_any`. Every step has one attempt.
 
-Files: `crates/core/src/plan/run.rs`, `crates/core/src/plan/near.rs`,
+Files: `crates/core/src/plan/need.rs`, `crates/core/src/plan/near.rs`,
+`crates/core/src/plan/run.rs`, `crates/core/src/plan/reply.rs`,
 `crates/core/src/proofs.rs`, `crates/core/tests/scenarios.rs`, `deny.toml`
 
 ```toml
@@ -72,16 +75,21 @@ The steps share the caller's deadline and end 1 s before it, so the answers
 in hand return in time; a step that escalates starts only with 500 ms left
 before that.
 
+The caller's request type implements `Request`, how many values its answer
+can settle to, and its answer type implements `Reply`, which value it settled
+to and its probability for each outcome in thousandths, so core reads answers
+without knowing models.
+
 ```rust
-let mut state = plan.start();
+let mut running = plan.start(Some(deadline));
 
 // Each round holds the steps whose needs are met.
-while let Some(round) = state.questions() {
-    // Or state.fail(step, Failure::Timeout).
-    state = state.answer(ask_judges(&round))?;
+while let Some(round) = running.questions(Instant::now()) {
+    // Or running.fail(step, Failure::Timeout).
+    running.answer(round.ask(&panel))?;
 }
 
-let verdict = state.finish(); // "sure" is skipped when "fast" said yes or no
+let run = running.finish(); // "sure" is skipped when "fast" said yes or no
 ```
 
 Verified by scenario tests:
@@ -187,6 +195,9 @@ Verified by:
 
 - neo's screen check, with a recorded screenshot, reaches Jev with its opt-in
   and reaches no text-only format.
+
+Follow-up: neo asks Jev itself; moving neo's screen check onto Chauffeur is
+neo's own change and follows this slice.
 
 ### The `student` format
 

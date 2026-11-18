@@ -209,6 +209,9 @@ dependencies = [
 [[package]]
 name = "chauffeur-core"
 version = "1.0.0-rc.5"
+dependencies = [
+ "rungs",
+]
 
 [[package]]
 name = "chauffeur-daemon"
@@ -1245,6 +1248,11 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "rungs"
+version = "0.1.0"
+source = "git+https://github.com/wrkhse/rungs?tag=v0.1.0#c5e7e3c9782d51ce1df244fcabb51f9bcffa2f54"
 
 [[package]]
 name = "rustc-demangle"

@@ -9,14 +9,14 @@ The Rust engine. Each crate depends only on the ones below it in this table.
 | `runtime`  | Running one rule for one event: redaction, pooled worker threads with a deadline                                                                                                             |
 | `protocol` | Rule files and their checks, the `when` filter, `then` entries, harness events and their evidence; `navigate` requests, their limits and rejections, intents, and a run's events on the wire |
 | `judges`   | Questions, confidence, `models.json`, tiers in fallback order, and the `systemone` and `placeholder` formats                                                                                 |
-| `core`     | Plans of named steps, judges by name, events and the verdict. No dependencies                                                                                                                |
+| `core`     | Plans of named steps, judges by name, events and the verdict. Its one dependency is rungs, the step machine                                                                                  |
 
 A module with several parts is a folder named after it, one file per
 concept, with a `README.md`:
 
 | Folder                                               | Holds                                                                                   |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [`core/src/plan/`](core/src/plan/)                   | Plans, steps, outcomes and failures                                                     |
+| [`core/src/plan/`](core/src/plan/)                   | Plans of steps that wait on earlier ones, their needs and rounds, outcomes and failures |
 | [`judges/src/question/`](judges/src/question/)       | Questions and their outcomes                                                            |
 | [`judges/src/confidence/`](judges/src/confidence/)   | Probabilities and how an answer settles                                                 |
 | [`judges/src/config/`](judges/src/config/)           | `models.json`                                                                           |

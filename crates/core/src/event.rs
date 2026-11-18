@@ -22,22 +22,29 @@ pub enum Event<O> {
         /// Its outcome.
         outcome: Outcome<O>,
     },
-    /// Every step settled.
+    /// A step was decided against: its needs could not hold, or too little
+    /// time was left.
+    StepSkipped {
+        /// The step's ID.
+        step: String,
+    },
+    /// The run is over.
     Finished,
 }
 
-/// Every step's outcome, in plan order.
+/// Every settled step's outcome, and every skipped step, in plan order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict<O> {
     settled: Vec<(String, Outcome<O>)>,
+    skipped: Vec<String>,
 }
 
 impl<O> Verdict<O> {
-    pub(crate) const fn new(settled: Vec<(String, Outcome<O>)>) -> Self {
-        Self { settled }
+    pub(crate) const fn new(settled: Vec<(String, Outcome<O>)>, skipped: Vec<String>) -> Self {
+        Self { settled, skipped }
     }
 
-    /// The outcome of the step with this ID.
+    /// The outcome of the step with this ID; none for a skipped step.
     #[must_use]
     pub fn get(&self, step: &str) -> Option<&Outcome<O>> {
         self.settled
@@ -46,7 +53,12 @@ impl<O> Verdict<O> {
             .map(|(_, outcome)| outcome)
     }
 
-    /// Each step's ID and outcome, in plan order.
+    /// The IDs of the skipped steps, in plan order.
+    pub fn skipped(&self) -> impl Iterator<Item = &str> {
+        self.skipped.iter().map(String::as_str)
+    }
+
+    /// Each settled step's ID and outcome, in plan order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Outcome<O>)> {
         self.settled
             .iter()

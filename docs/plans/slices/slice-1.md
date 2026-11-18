@@ -46,7 +46,7 @@ message arrives in the conversation, and the agent amends the commit to
 
 A plan of named steps, each asking one judge one question, all asked in one
 round; `Outcome`, `Judge`, `Panel` and `Plan::run`, the events a run emits,
-and the `Verdict`. Core has no dependencies.
+and the `Verdict`. Core's one dependency is rungs, the step machine.
 
 Files: `crates/core/src/plan/`, `judge.rs`, `event.rs`
 

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use chauffeur_core::{Failure, Outcome, Panel};
+use chauffeur_core::{Failure, MAX_STEPS, Outcome, Panel};
 use chauffeur_judges::{Answer, AnsweredBy, Confidence, Milli, Probabilities, Question};
 use chauffeur_protocol::{
     DEFAULT_DEADLINE, Intent, Limit, Navigate, Rejection, Rule, Target, progress,
@@ -180,6 +180,13 @@ fn every_limit_has_a_fixture_over_it() {
     for limit in Limit::ALL {
         assert!(rejected.contains(&json!(limit.name())), "{}", limit.name());
     }
+}
+
+/// A strategy over the step machine's size would pass the protocol and then
+/// be refused as a plan, so the two bounds are one number.
+#[test]
+fn the_steps_limit_is_what_the_step_machine_holds() {
+    assert_eq!(Limit::Steps.max(), u64::try_from(MAX_STEPS).unwrap());
 }
 
 #[test]
