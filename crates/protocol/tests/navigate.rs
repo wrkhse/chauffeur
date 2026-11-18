@@ -116,6 +116,7 @@ fn every_fixture_is_accepted_or_rejected_as_it_expects() {
         // proves.
         if case["parsed"] == "accepts" {
             assert!(parsed.is_ok(), "{name}: {parsed:?}");
+            assert_kept(name, &case["params"], &parsed.unwrap());
             continue;
         }
         match (&case["expect"], &case["reject"], parsed) {

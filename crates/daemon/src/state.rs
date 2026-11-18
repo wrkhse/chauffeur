@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, Metadata};
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,7 +94,7 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
     for folder in [paths.distribution.join("rules"), paths.config.join("rules")] {
         for path in json_files_below(&folder) {
             let kept = previous.and_then(|previous| previous.files.get(&path));
-            match (load_rule(&folder, &path), kept) {
+            match (load_rule(&folder, &path, None), kept) {
                 (Ok(rule), _) => loaded.add(path, Arc::new(rule)),
                 (Err(reason), Some(kept)) => {
                     loaded.refused.push(format!(
@@ -131,13 +133,45 @@ impl Loaded {
     }
 }
 
-pub fn load_rule(folder: &Path, path: &Path) -> Result<Rule, String> {
+/// The device and inode that name a file. The walk records this pair, and a
+/// read refuses a file whose pair differs, so a path swapped in between
+/// cannot substitute another file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct FileId {
+    device: u64,
+    inode: u64,
+}
+
+impl FileId {
+    /// The identity of `metadata`.
+    #[must_use]
+    pub fn of(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Loads the rule file `path`, below `folder`, and refuses one that is not
+/// the file the walk recorded.
+///
+/// `expected` is the device and inode the walk recorded, when it recorded
+/// them. The file is opened and its device and inode compared with
+/// `expected`: one that differs is refused, and the bytes are read from the
+/// opened handle, so a path swapped between the walk and the read cannot
+/// substitute another file.
+pub fn load_rule(folder: &Path, path: &Path, expected: Option<FileId>) -> Result<Rule, String> {
     let id = path.trim_prefix(folder).with_extension("");
     let id = id.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    if let Some(expected) = expected
+        && FileId::of(&file.metadata().map_err(|error| error.to_string())?) != expected
+    {
+        return Err("the rule file is not the one the walk recorded".to_owned());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(MAX_RULE_BYTES.saturating_add(1))
+    file.take(MAX_RULE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
 
@@ -265,10 +299,13 @@ pub fn json_files_below(folder: &Path) -> Vec<PathBuf> {
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{MAX_PROJECTS, MAX_PROJECTS_BYTES, MAX_RULE_BYTES, load_projects, load_rule};
+    use super::{
+        FileId, MAX_PROJECTS, MAX_PROJECTS_BYTES, MAX_RULE_BYTES, load_projects, load_rule,
+    };
 
     /// A uniquely named temporary path, so tests run in parallel.
     fn temporary(name: &str) -> PathBuf {
@@ -295,6 +332,16 @@ mod tests {
         (std::env::temp_dir(), temp_file("rule", bytes))
     }
 
+    /// A valid rule, as a rule file's bytes.
+    fn valid_rule() -> Vec<u8> {
+        concat!(
+            r#"{"on":"x","strategy":[{"id":"s","judge":"system-one","#,
+            r#""ask":{"outcomes":["yes","no"],"instructions":"?"}}]}"#
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
     /// The smallest file over the limit is refused for its size, before it is
     /// read as a rule: its contents are not JSON.
     #[test]
@@ -303,7 +350,7 @@ mod tests {
         let bytes = vec![b' '; over];
 
         let (folder, path) = temp_rule(&bytes);
-        let refused = load_rule(&folder, &path);
+        let refused = load_rule(&folder, &path, None);
         let _ = fs::remove_file(&path);
 
         assert_eq!(
@@ -321,7 +368,7 @@ mod tests {
         assert!(bytes.len() > limit, "the sample is over the limit");
 
         let (folder, path) = temp_rule(&bytes);
-        let refused = load_rule(&folder, &path);
+        let refused = load_rule(&folder, &path, None);
         let _ = fs::remove_file(&path);
 
         assert_eq!(
@@ -334,12 +381,8 @@ mod tests {
     /// refuses a larger file.
     #[test]
     fn a_rule_file_at_one_mebibyte_is_accepted() {
-        let rule = concat!(
-            r#"{"on":"x","strategy":[{"id":"s","judge":"system-one","#,
-            r#""ask":{"outcomes":["yes","no"],"instructions":"?"}}]}"#
-        );
         let exact = usize::try_from(MAX_RULE_BYTES).unwrap_or(0);
-        let mut bytes = rule.as_bytes().to_vec();
+        let mut bytes = valid_rule();
         assert!(
             bytes.len() <= exact,
             "the sample rule fits within the limit"
@@ -347,10 +390,78 @@ mod tests {
         bytes.resize(exact, b' ');
 
         let (folder, path) = temp_rule(&bytes);
-        let loaded = load_rule(&folder, &path);
+        let loaded = load_rule(&folder, &path, None);
         let _ = fs::remove_file(&path);
 
         assert!(loaded.is_ok(), "a rule at the limit should load");
+    }
+
+    /// A file whose device and inode differ from the walk's record is
+    /// refused, so a path swapped between the walk and the read cannot
+    /// substitute one.
+    #[test]
+    fn a_rule_file_replaced_after_the_walk_is_refused() {
+        let (folder, path) = temp_rule(&valid_rule());
+        let recorded = FileId::of(&fs::metadata(&path).expect("the rule's metadata"));
+        let replacement = temp_file("rule-replacement", &valid_rule());
+        fs::rename(&replacement, &path).expect("the rule is replaced");
+
+        let refused = load_rule(&folder, &path, Some(recorded));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            refused.err(),
+            Some("the rule file is not the one the walk recorded".to_owned())
+        );
+    }
+
+    /// A symlink where the walk recorded a file resolves elsewhere, so the
+    /// opened handle's device and inode differ and the rule is refused.
+    #[test]
+    fn a_rule_file_replaced_by_a_symlink_after_the_walk_is_refused() {
+        let (folder, path) = temp_rule(&valid_rule());
+        let recorded = FileId::of(&fs::metadata(&path).expect("the rule's metadata"));
+        let target = temp_file("rule-target", &valid_rule());
+        fs::remove_file(&path).expect("the rule is removed");
+        std::os::unix::fs::symlink(&target, &path).expect("the symlink");
+
+        let refused = load_rule(&folder, &path, Some(recorded));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&target);
+
+        assert_eq!(
+            refused.err(),
+            Some("the rule file is not the one the walk recorded".to_owned())
+        );
+    }
+
+    /// A file with the device and inode the walk recorded loads, so the
+    /// check only refuses a file that is not the one walked.
+    #[test]
+    fn a_rule_file_with_the_recorded_identity_loads() {
+        let (folder, path) = temp_rule(&valid_rule());
+        let recorded = FileId::of(&fs::metadata(&path).expect("the rule's metadata"));
+
+        let loaded = load_rule(&folder, &path, Some(recorded));
+        let _ = fs::remove_file(&path);
+
+        assert!(loaded.is_ok(), "the file the walk recorded should load");
+    }
+
+    /// The identity keeps the device and the inode apart, so a check that
+    /// compares one against the other cannot pass.
+    #[test]
+    fn a_file_id_keeps_the_device_and_the_inode() {
+        let path = temp_file("id", b"");
+        let metadata = fs::metadata(&path).expect("the file's metadata");
+        let id = FileId::of(&metadata);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            (id.device, id.inode),
+            (metadata.dev(), metadata.ino()),
+            "the identity is the device and inode the metadata records"
+        );
     }
 
     /// A file over the limit is refused for its size, before it is read as

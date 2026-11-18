@@ -101,7 +101,8 @@ impl Router {
     /// Every hooked rule's intents; a rule that misses the deadline, fails or
     /// meets no `then` entry gives none, and the rest still return. A rule is
     /// announced as its run starts, not when it is matched; a run cut short
-    /// after that settles each of its steps with its failure word.
+    /// after it is announced settles each of its steps with its failure word,
+    /// and one never announced settles nothing.
     fn intents(
         &self,
         loaded: &Arc<Loaded>,
