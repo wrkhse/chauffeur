@@ -197,7 +197,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chauffeur-cli"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chauffeur-daemon",
  "clap",
@@ -208,11 +208,11 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-core"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 
 [[package]]
 name = "chauffeur-daemon"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "benchfmt",
  "chauffeur-core",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-judges"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "benchfmt",
  "chauffeur-core",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-playground"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chauffeur-core",
  "chauffeur-judges",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-protocol"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "benchfmt",
  "chauffeur-core",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-runtime"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "benchfmt",
  "chauffeur-core",

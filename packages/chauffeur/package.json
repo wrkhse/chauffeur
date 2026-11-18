@@ -1,6 +1,6 @@
 {
   "name": "@fdcn/chauffeur",
-  "version": "1.0.0-rc.4",
+  "version": "1.0.0-rc.5",
   "description": "Ask Chauffeur from any TypeScript program: navigate, and ask with a judge",
   "license": "MIT",
   "repository": {
