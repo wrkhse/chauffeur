@@ -18,7 +18,9 @@
 //! the cap still load.
 //!
 //! A rule file is opened and its device and inode compared with the ones the
-//! walk recorded, and its bytes are read from that handle. Standard library
+//! walk recorded, and its bytes are read from that handle. An entry whose
+//! metadata cannot be read is refused with its path and the error, so a rule
+//! file is never read without the identity that read checks. Standard library
 //! cannot list a folder through an open handle, so a same-user process that
 //! swaps a folder and swaps it back during one walk is a residual race:
 //! closing it needs an fd-relative listing.
@@ -30,6 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -74,7 +77,7 @@ struct State {
 /// early when it did.
 #[derive(Clone, PartialEq, Eq)]
 struct Signature {
-    files: Vec<(PathBuf, Option<State>)>,
+    files: Vec<(PathBuf, State)>,
     refused: Option<String>,
 }
 
@@ -232,6 +235,30 @@ pub fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.to_string_lossy().escape_debug())
 }
 
+/// A test's swap for a folder: the path it receives says which queued
+/// folder to replace, just before that folder is listed.
+#[cfg(test)]
+type BeforeListing = std::cell::RefCell<Option<Box<dyn Fn(&Path)>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    /// A test's swap, run just before a folder is read, so the test can
+    /// replace a queued folder after the walk checked it and before its
+    /// listing.
+    static BEFORE_LISTING: BeforeListing = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a test's swap for `path`, when one is set. A production walk
+/// compiles without this, so no test seam reaches it.
+#[cfg(test)]
+fn before_listing(path: &Path) {
+    BEFORE_LISTING.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
 /// The folder's rule files and the state that says whether they changed,
 /// from one bounded walk that skips symlinks, opens each queued folder,
 /// checks its device and inode before and after the listing, and reads each
@@ -268,6 +295,10 @@ fn signature(folder: &Path) -> Signature {
             ));
             break;
         };
+        // A test can replace the folder here, after its identity was
+        // checked and before it is read.
+        #[cfg(test)]
+        before_listing(&next);
         let Ok(entries) = std::fs::read_dir(&next) else {
             continue;
         };
@@ -318,39 +349,42 @@ fn same_file(one: &Metadata, other: &Metadata) -> bool {
     one.dev() == other.dev() && one.ino() == other.ino()
 }
 
-/// Records the rule file `path`, or says which bound it is over. The
-/// metadata is the walk's, so the state holds the device and inode the read
-/// must still see.
+/// Records the rule file `path` with the metadata the walk read, or says
+/// which bound it is over. An entry whose metadata cannot be read is
+/// refused with its path and the error, so no rule file is recorded without
+/// the identity its read checks.
 fn record_file(
     path: PathBuf,
-    metadata: Option<&Metadata>,
-    files: &mut Vec<(PathBuf, Option<State>)>,
+    metadata: io::Result<Metadata>,
+    files: &mut Vec<(PathBuf, State)>,
     bytes: &mut u64,
     shown: &str,
 ) -> Result<(), String> {
+    let metadata = metadata.map_err(|error| format!("{}: {error}", quoted(&path)))?;
     if files.len() >= MAX_RULES {
         return Err(format!(
             "{shown}: the project's rules folder is over {MAX_RULES} rule files"
         ));
     }
-    let len = metadata.map_or(0, Metadata::len);
+    let len = metadata.len();
     if bytes.saturating_add(len) > MAX_BYTES {
         return Err(format!(
             "{shown}: the project's rules folder is over {MAX_MIB} MiB of rule files"
         ));
     }
     *bytes = bytes.saturating_add(len);
-    files.push((path, metadata.map(State::of)));
+    files.push((path, State::of(&metadata)));
 
     Ok(())
 }
 
 /// Reads `entries` and returns the folders among them, recording the rule
-/// files, or says which bound it is over. `examined` is the walk's count of
-/// entries, so it stays bounded across folders.
+/// files, or says which bound it is over or which entry's metadata could not
+/// be read. `examined` is the walk's count of entries, so it stays bounded
+/// across folders.
 fn read_folder(
     entries: std::fs::ReadDir,
-    files: &mut Vec<(PathBuf, Option<State>)>,
+    files: &mut Vec<(PathBuf, State)>,
     bytes: &mut u64,
     examined: &mut usize,
     shown: &str,
@@ -373,8 +407,7 @@ fn read_folder(
         if kind.is_dir() {
             subfolders.push(path);
         } else if kind.is_file() && is_json(&path) {
-            let metadata = entry.metadata().ok();
-            record_file(path, metadata.as_ref(), files, bytes, shown)?;
+            record_file(path, entry.metadata(), files, bytes, shown)?;
         }
     }
 
@@ -447,7 +480,7 @@ fn load(loaded: &Loaded, project: &Path, folder: &Path, signature: &Signature) -
             ));
             continue;
         }
-        match load_rule(folder, path, state.as_ref().map(State::identity)) {
+        match load_rule(folder, path, Some(state.identity())) {
             Ok(rule) => {
                 if let Err(reason) = allowed(&rule, listed) {
                     refused.push(format!("{}: {}", quoted(path), reason.escape_debug()));
@@ -504,8 +537,9 @@ mod tests {
     use chauffeur_protocol::Rule;
 
     use super::{
-        Entries, MAX_BYTES, MAX_CACHED, MAX_ENTRIES, MAX_MIB, MAX_RULES, Rules, Signature, allowed,
-        inside, load, open_folder, quoted, rules_folder, signature, still_same,
+        BEFORE_LISTING, Entries, MAX_BYTES, MAX_CACHED, MAX_ENTRIES, MAX_MIB, MAX_RULES, Rules,
+        Signature, allowed, inside, load, open_folder, quoted, record_file, rules_folder,
+        signature, still_same,
     };
     use crate::Paths;
     use crate::state::Loaded;
@@ -784,6 +818,55 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A queued folder that changes between the open's check and its
+    /// listing is refused, and the files recorded from it are dropped.
+    #[test]
+    fn a_folder_swapped_before_its_listing_is_refused_and_its_files_dropped() {
+        let root = temporary("swap-listing");
+        let folder = root.join("rules");
+        let queued = folder.join("sub");
+        let kept = folder.join("kept.json");
+        fs::create_dir_all(&queued).expect("the queued folder");
+        fs::write(&kept, "{}").expect("the rule file before the swap");
+        let moved = folder.join("moved");
+        let swapped = queued.join("swapped.json");
+        let swap: Box<dyn Fn(&Path)> = {
+            let queued = queued.clone();
+            Box::new(move |path: &Path| {
+                if path == queued.as_path() {
+                    fs::rename(&queued, &moved).expect("the queued folder moves away");
+                    fs::create_dir_all(&queued).expect("another folder at its path");
+                    fs::write(&swapped, "{}").expect("the swapped folder's rule file");
+                }
+            })
+        };
+        BEFORE_LISTING.with(|hook| *hook.borrow_mut() = Some(swap));
+
+        let walked = signature(&folder);
+
+        BEFORE_LISTING.with(|hook| *hook.borrow_mut() = None);
+        let paths: Vec<&Path> = walked
+            .files
+            .iter()
+            .map(|(path, _)| path.as_path())
+            .collect();
+        assert_eq!(
+            paths,
+            [kept.as_path()],
+            "the file recorded from the swapped folder is dropped"
+        );
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: {} changed while it was listed",
+                quoted(&folder),
+                quoted(&queued)
+            )),
+            "the queued folder is refused, not read"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A `.chauffeur/rules/` that resolves outside the project has no rules,
     /// even when it holds some.
     #[test]
@@ -833,6 +916,26 @@ mod tests {
             ))
         );
         let _ = fs::remove_dir_all(&folder);
+    }
+
+    /// A rule file whose metadata cannot be read is refused with its path
+    /// and the error, so it is never recorded without the identity its read
+    /// checks.
+    #[test]
+    fn a_rule_file_whose_metadata_cannot_be_read_is_refused() {
+        let folder = Path::new("/work/rules");
+        let path = folder.join("x.json");
+        let shown = quoted(folder);
+        let expected = format!("{}: denied", quoted(&path));
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let mut files = Vec::new();
+        let mut bytes = 0;
+
+        let refused = record_file(path, Err(error), &mut files, &mut bytes, &shown);
+
+        assert_eq!(refused, Err(expected), "the entry and the error are named");
+        assert!(files.is_empty(), "no file is recorded without its metadata");
+        assert_eq!(bytes, 0, "nothing counts toward the folder's bytes");
     }
 
     /// Exactly the rule-file bound is taken, not refused: 512 tiny rule

@@ -14,7 +14,7 @@ use chauffeur_protocol::{Event, Rule, Then};
 use chauffeur_runtime::{
     Admission, Busy, Cancel, Capacity, ExecuteError, Job, Permit, Pool, Ran, Source, run_strategy,
 };
-use cooldown::Cooldowns;
+use cooldown::{Cooldowns, Flights};
 use serde_json::{Map, Value, json};
 
 use crate::audit::Audit;
@@ -45,6 +45,7 @@ pub struct Router {
     loaded: RwLock<Arc<Loaded>>,
     projects: project::Cache,
     cooldowns: Arc<Cooldowns>,
+    flights: Arc<Flights>,
     admission: Admission,
     rules: Pool,
     audit: Arc<Audit>,
@@ -88,6 +89,7 @@ impl Router {
             loaded: RwLock::new(Arc::new(loaded)),
             projects: project::Cache::new(),
             cooldowns: Arc::new(Cooldowns::new()),
+            flights: Arc::new(Flights::new()),
             admission: Admission::new(Capacity::DAEMON),
             rules: Pool::new(RULES_KEPT, RULES_ALIVE),
             audit: Arc::new(audit),
@@ -147,7 +149,7 @@ impl Router {
             deadline,
             cancel: cancel.clone(),
         };
-        self.run_all(&loaded, &hooked, &ask, &|_| {}, &|_, _| {})
+        self.run_all(&loaded, &hooked, &ask, &Instant::now, &|_| {}, &|_, _| {})
             .into_iter()
             .filter_map(|(rule, then)| {
                 then.map(|then| {
@@ -164,12 +166,14 @@ impl Router {
     /// a line saying it was skipped, and one whose run did not settle earns the
     /// line its end writes. A result fires its rule's cooldown only when it is
     /// delivered here, so one the caller never hears leaves the rule able to
-    /// run again.
+    /// run again. `now` is the clock the dispatcher reads the deadline and its
+    /// grace from, so a test can move it past both without waiting.
     fn run_all(
         &self,
         loaded: &Arc<Loaded>,
         hooked: &[Hook],
         ask: &Ask,
+        now: &dyn Fn() -> Instant,
         announced: &(dyn Fn(&Hook) + Sync),
         ran: &(dyn Fn(&Rule, &RuleRun) + Sync),
     ) -> Vec<(Arc<Rule>, Option<Then>)> {
@@ -178,6 +182,7 @@ impl Router {
             let Hook { rule, project } = hook.clone();
             let loaded = Arc::clone(loaded);
             let cooldowns = Arc::clone(&self.cooldowns);
+            let flights = Arc::clone(&self.flights);
             let ask = ask.clone();
             let job: Job = Box::new(move || {
                 let announce = send.clone();
@@ -194,6 +199,7 @@ impl Router {
                     Self::run_one(
                         &loaded,
                         &cooldowns,
+                        &flights,
                         &rule,
                         project.as_deref(),
                         &ask,
@@ -228,8 +234,26 @@ impl Router {
             }
             returned.insert(index, done);
         };
-        let left = dispatch(&self.rules, ask.deadline, hooked, jobs, on_start, arrived);
+        let left = dispatch(
+            &self.rules,
+            ask.deadline,
+            now,
+            hooked,
+            jobs,
+            on_start,
+            arrived,
+        );
         Self::settle(left, hooked, ask, &self.cooldowns, ran, &mut returned);
+        self.logged(hooked, returned)
+    }
+
+    /// Writes each run to the log, in hook order, and gives back each rule and
+    /// what it returned.
+    fn logged(
+        &self,
+        hooked: &[Hook],
+        returned: BTreeMap<usize, RuleRun>,
+    ) -> Vec<(Arc<Rule>, Option<Then>)> {
         // The indexes are the hooks', so a BTreeMap gives the runs in hook
         // order, and the audit reads in the order the rules load.
         returned
@@ -382,14 +406,23 @@ impl Router {
     }
 
     /// One rule's run: its log entry, what it returned, and its run. A rule
-    /// in cooldown returns before `announce`, so it is not announced; a
-    /// project's rule keys its cooldown by that project, so two projects with
-    /// a rule of the same ID do not suppress each other, and its entry names
-    /// the project it came from. A result it returns fires no cooldown here:
-    /// only a result the caller delivers does.
+    /// in cooldown returns before `announce`, so it is not announced; one with
+    /// a run still out does the same, and both are logged as cooling. A
+    /// project's rule keys both by that project, so two projects with a rule
+    /// of the same ID do not suppress each other, and its entry names the
+    /// project it came from. A result it returns fires no cooldown here: only
+    /// a result the caller delivers does. Its place in the in-flight set is
+    /// given back when it returns, however it ends, so a result the caller
+    /// never delivers still lets the rule run again.
+    ///
+    /// A cancel and the deadline stop the caller waiting for a run, not the
+    /// judge: the runtime drops a late result, while a judge already asked
+    /// runs on to its own model timeout. Both are read before each round,
+    /// never inside one.
     fn run_one(
         loaded: &Arc<Loaded>,
         cooldowns: &Cooldowns,
+        flights: &Flights,
         rule: &Arc<Rule>,
         project: Option<&Path>,
         ask: &Ask,
@@ -399,6 +432,11 @@ impl Router {
         if cooldowns.cooling(&key, rule.cooldown()) {
             return Self::cooled(rule, project, ask);
         }
+        // A run already out holds one worker, not one per event: a judge that
+        // never returns leaves the rest of the pool free for other rules.
+        let Some(_flight) = flights.begin(key) else {
+            return Self::cooled(rule, project, ask);
+        };
         let mut entry = Map::new();
         entry.insert("rule".into(), json!(rule.id()));
         if let Some(project) = project {
@@ -532,10 +570,12 @@ impl Out {
 /// again. A job no worker can be started for is refused with its reason
 /// rather than tried again, and one that panics after it starts still reports
 /// its finish. Past `deadline` the items left do not run, and the runs still
-/// out are not waited for. Returns what it left undone.
+/// out are not waited for. `now` is the clock both bounds are read from, so a
+/// caller can move it past them without waiting. Returns what it left undone.
 fn dispatch<T, R>(
     pool: &Pool,
     deadline: Instant,
+    now: &dyn Fn() -> Instant,
     items: &[R],
     job: impl Fn(usize, &R, Sender<(usize, Report<T>)>) -> Job,
     mut started: impl FnMut(usize),
@@ -567,7 +607,7 @@ where
             }
         }
         // No worker is free: a run has to finish before this one can start.
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
             break;
         }
@@ -589,7 +629,7 @@ where
         if out.outstanding == 0 {
             break;
         }
-        let left = bound.saturating_duration_since(Instant::now());
+        let left = bound.saturating_duration_since(now());
         if left.is_zero() {
             break;
         }
@@ -619,7 +659,7 @@ fn finished<T>(receive: &Receiver<(usize, T)>, wait: Duration) -> Option<(usize,
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
@@ -630,11 +670,10 @@ mod tests {
     use chauffeur_runtime::{Cancel, Pool, Ran, Source};
     use serde_json::{Value, json};
 
-    use super::cooldown::Cooldowns;
-    use super::{
-        Ask, Hook, Left, Report, Router, RuleRun, cooldown_key, delivered, dispatch, finished,
-    };
+    use super::cooldown::{Cooldowns, Flights};
+    use super::{Ask, GRACE, Hook, Left, Report, Router, RuleRun, delivered, dispatch, finished};
     use crate::Paths;
+    use crate::audit::{Audit, MAX_BYTES};
     use crate::state::Loaded;
 
     /// A rule hooking `sourcefed.event`, for a test that settles its run
@@ -650,22 +689,6 @@ mod tests {
         Hook {
             rule: Arc::new(rule),
             project: project.map(PathBuf::from),
-        }
-    }
-
-    /// A rule hooking `sourcefed.event` with a cooldown, for a test that
-    /// settles a run it never heard from.
-    fn cooling_hook(id: &str) -> Hook {
-        let rule = Rule::parse(
-            id,
-            r#"{ "on": "sourcefed.event", "cooldown_seconds": 60, "strategy": [{ "id": "screen",
-                 "judge": "system-one", "ask": { "outcomes": ["yes", "no"],
-                 "evidence": ["event"], "instructions": "Is this noise?" } }] }"#,
-        )
-        .unwrap();
-        Hook {
-            rule: Arc::new(rule),
-            project: None,
         }
     }
 
@@ -700,9 +723,9 @@ mod tests {
         fs::canonicalize(&path).expect("the temporary folder should resolve")
     }
 
-    /// A load whose system-one tier is a stand-in that answers at once, and
-    /// the temporary folder it lives in.
-    fn loading(name: &str) -> (PathBuf, Loaded) {
+    /// A load whose `models.json` reads `models`, and the temporary folder it
+    /// lives in.
+    fn loading_models(name: &str, models: &str) -> (PathBuf, Loaded) {
         let root = temporary(name);
         let distribution = root.join("distribution");
         fs::create_dir_all(distribution.join("rules")).expect("the shipped rules folder");
@@ -712,23 +735,109 @@ mod tests {
             r#"{ "prefixes": [] }"#,
         )
         .expect("the redaction file");
-        let models = root.join("models.json");
-        fs::write(
-            &models,
-            r#"{ "models": { "stand-in": { "format": "placeholder", "otherwise": { "yes": 0.94, "no": 0.06 } } }, "tiers": { "system-one": ["stand-in"] } }"#,
-        )
-        .expect("the models file");
+        let file = root.join("models.json");
+        fs::write(&file, models).expect("the models file");
         let paths = Paths {
             name: "chauffeur-test".into(),
             socket: root.join("run/daemon.sock"),
             config: root.join("config"),
             distribution,
             state: root.join("state"),
-            models: Some(models),
+            models: Some(file),
         };
         let loaded = crate::state::load(&paths, None).expect("the fixture loads");
 
         (root, loaded)
+    }
+
+    /// A load whose system-one tier is a stand-in that answers at once, and
+    /// the temporary folder it lives in.
+    fn loading(name: &str) -> (PathBuf, Loaded) {
+        loading_models(
+            name,
+            r#"{ "models": { "stand-in": { "format": "placeholder", "otherwise": { "yes": 0.94, "no": 0.06 } } }, "tiers": { "system-one": ["stand-in"] } }"#,
+        )
+    }
+
+    /// A load whose System One model waits for its key on a channel the test
+    /// holds, so a run hangs until the test drops `release`; the key is then
+    /// missing, and the run ends with no judge. `waiting` says a run has
+    /// reached the wait, so a test knows the key is held.
+    struct Hanging {
+        root: PathBuf,
+        loaded: Loaded,
+        release: mpsc::Sender<()>,
+        waiting: mpsc::Receiver<()>,
+    }
+
+    fn hanging(name: &str) -> Hanging {
+        let (root, mut loaded) = loading_models(
+            name,
+            r#"{ "models": { "hung": { "format": "systemone", "endpoint": "http://127.0.0.1:9", "model": "stand-in", "key": { "env": "CHAUFFEUR_TEST_KEY" } } }, "tiers": { "system-one": ["hung"] } }"#,
+        );
+        let (release, held) = mpsc::channel();
+        let (waiting, waited) = mpsc::channel();
+        let held = Mutex::new(held);
+        let context = Arc::get_mut(&mut loaded.context).expect("the fixture's context is its own");
+        context.keys = Box::new(move |_name: &str| {
+            let _ = waiting.send(());
+            if let Ok(held) = held.lock() {
+                let _ = held.recv();
+            }
+            None
+        });
+
+        Hanging {
+            root,
+            loaded,
+            release,
+            waiting: waited,
+        }
+    }
+
+    /// The audit's lines, parsed, with each line's time taken out so two
+    /// runs' lines compare.
+    fn written(folder: &Path) -> Vec<Value> {
+        crate::audit::recent(folder, 8)
+            .expect("the audit log reads")
+            .iter()
+            .map(|line| {
+                let mut entry: Value = serde_json::from_str(line).expect("an audit line is JSON");
+                if let Value::Object(fields) = &mut entry {
+                    fields.remove("at");
+                }
+                entry
+            })
+            .collect()
+    }
+
+    /// A clock a test moves by hand, so a deadline and its grace pass without
+    /// waiting.
+    struct Clock {
+        now: Mutex<Instant>,
+    }
+
+    impl Clock {
+        fn at(now: Instant) -> Self {
+            Self {
+                now: Mutex::new(now),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            *self.now.lock().unwrap()
+        }
+
+        fn set(&self, now: Instant) {
+            *self.now.lock().unwrap() = now;
+        }
+
+        /// The clock moved past `deadline` and `GRACE` together.
+        fn past(&self, deadline: Instant) {
+            let bound = deadline.checked_add(GRACE).unwrap_or(deadline);
+            let past = bound.checked_add(Duration::from_millis(1)).unwrap_or(bound);
+            self.set(past);
+        }
     }
 
     /// The dispatcher keeps no more jobs running than the pool has workers:
@@ -751,6 +860,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &jobs,
             |_index, job: &usize, send| {
                 let (running, highest) = (Arc::clone(&running), Arc::clone(&highest));
@@ -821,6 +931,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &items,
             |index, item: &usize, send| {
                 let item = *item;
@@ -886,6 +997,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &items,
             |index, _item: &usize, send| {
                 Box::new(move || {
@@ -942,6 +1054,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &items,
             |index, item: &usize, send| {
                 let item = *item;
@@ -992,6 +1105,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &items,
             |index, item: &usize, send| {
                 let item = *item;
@@ -1038,6 +1152,7 @@ mod tests {
         let left = dispatch(
             &pool,
             deadline,
+            &Instant::now,
             &items,
             |index, item: &usize, send| {
                 let (item, order, announced) = (*item, Arc::clone(&order), Arc::clone(&announced));
@@ -1290,6 +1405,67 @@ mod tests {
         }
     }
 
+    /// A run still out for a rule that cooled down before the dispatcher
+    /// stopped waiting is settled as the cooldown it shows: for a run that
+    /// never reported, that is the best available answer. The cooldown comes
+    /// from a result delivered before, and the run that never announced
+    /// settles no step.
+    #[test]
+    fn an_open_run_whose_rule_is_cooling_settles_as_the_cooldown() {
+        let (root, loaded) = loading("settle-cooling");
+        let loaded = Arc::new(loaded);
+        let cooldowns = Cooldowns::new();
+        let flights = Flights::new();
+        let rule = settling_rule();
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(vec![("event".to_owned(), "CI failed".to_owned())]),
+            deadline: Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .unwrap_or_else(Instant::now),
+            cancel: Cancel::new(Source::Harness),
+        };
+        let hook = Hook {
+            rule: Arc::clone(&rule),
+            project: None,
+        };
+        let mut done = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &|| {});
+        assert!(done.then.is_some(), "the first run settles: {}", done.entry);
+        delivered(&cooldowns, &hook, &ask, &mut done);
+
+        let hooked = [hook];
+        let left = Left {
+            open: std::iter::once(0).collect(),
+            refused: Vec::new(),
+            unstarted: Vec::new(),
+            begun: BTreeSet::new(),
+        };
+        let reported = Mutex::new(Vec::new());
+        let ran = |rule: &Rule, _done: &RuleRun| {
+            reported.lock().unwrap().push(rule.id().to_owned());
+        };
+        let mut returned = BTreeMap::new();
+
+        Router::settle(left, &hooked, &ask, &cooldowns, &ran, &mut returned);
+
+        assert_eq!(
+            returned.get(&0).expect("the run is settled").entry,
+            json!({
+                "rule": "sourcefed/triage",
+                "event": "sourcefed.event",
+                "session": "s-1",
+                "cooldown": true,
+            }),
+            "a cooling rule's run is logged as the cooldown it shows"
+        );
+        assert!(
+            reported.lock().unwrap().is_empty(),
+            "a run that never announced settles no step"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A run that settles inside its deadline but whose report comes after
     /// the dispatcher stopped waiting is never delivered, so it must not cool
     /// the rule: firing happens when a result is handed back. The next run
@@ -1300,6 +1476,7 @@ mod tests {
         let (root, loaded) = loading("late-report");
         let loaded = Arc::new(loaded);
         let cooldowns = Cooldowns::new();
+        let flights = Flights::new();
         let rule = settling_rule();
         let ask = Ask {
             event: "sourcefed.event".to_owned(),
@@ -1314,11 +1491,11 @@ mod tests {
 
         // The worker's half of a run whose caller stopped waiting before its
         // report came: it settles, and nothing hands its action back.
-        let late = Router::run_one(&loaded, &cooldowns, &rule, None, &ask, &announce);
+        let late = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &announce);
         assert!(late.then.is_some(), "the late run settled: {}", late.entry);
 
         // The next run is not cooling: the undelivered result fired nothing.
-        let mut next = Router::run_one(&loaded, &cooldowns, &rule, None, &ask, &announce);
+        let mut next = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &announce);
         assert!(
             next.entry.get("cooldown").is_none(),
             "an undelivered result left the rule cooling: {}",
@@ -1338,7 +1515,7 @@ mod tests {
             Some(&json!("label")),
             "the delivered result says what it returned"
         );
-        let after = Router::run_one(&loaded, &cooldowns, &rule, None, &ask, &announce);
+        let after = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &announce);
         assert_eq!(
             after.entry.get("cooldown"),
             Some(&json!(true)),
@@ -1349,91 +1526,159 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A run left open is settled on the wire only when the dispatcher heard
-    /// it start: the job that announced earns the deadline line and a `ran`
-    /// call, and the two it never heard from earn their lines alone, the one
-    /// whose rule is cooling as a cooldown. One pool hands out three jobs at
-    /// once; the first announces and each holds its worker past the deadline
-    /// and the grace.
+    /// An announced run that never finished is settled at the deadline, and
+    /// the rule behind it, which no worker could start, is skipped with no
+    /// event. The clock moves past the deadline and its grace as the first run
+    /// starts, so nothing waits for the judge, which waits on a key the test
+    /// never sends. One worker means the second rule's run cannot start while
+    /// the first is out.
     #[test]
-    fn an_open_run_settles_on_the_wire_only_when_it_was_announced() {
-        let pool = Pool::new(3, 3);
-        let items = [0_usize, 1, 2];
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(200))
+    fn a_run_still_out_at_the_deadline_settles_it_and_skips_the_rule_behind_it() {
+        let Hanging {
+            root,
+            loaded,
+            release,
+            waiting: _waiting,
+        } = hanging("still-out");
+        let mut router = Router::new(loaded, Audit::new(&root.join("state"), MAX_BYTES));
+        router.rules = Pool::new(1, 1);
+        let loaded = router.loaded().expect("the router has its load");
+        let hooked = [hook("begun/triage", None), hook("quiet/triage", None)];
+        let base = Instant::now();
+        let deadline = base
+            .checked_add(Duration::from_secs(5))
             .unwrap_or_else(Instant::now);
-
-        let left = dispatch(
-            &pool,
-            deadline,
-            &items,
-            |index, item: &usize, send| {
-                let item = *item;
-                Box::new(move || {
-                    // The first job announces; the others, as a rule in
-                    // cooldown does, never do. Each holds its worker past the
-                    // deadline and its grace.
-                    if item == 0 {
-                        let _ = send.send((index, Report::Started));
-                    }
-                    thread::sleep(Duration::from_millis(800));
-                    let _ = send.send((index, Report::Finished(item)));
-                })
-            },
-            |_| {},
-            |_, _, _| {},
-        );
-
-        assert_eq!(
-            left.open,
-            BTreeSet::from([0, 1, 2]),
-            "every job was handed to a worker"
-        );
-        assert_eq!(left.begun, BTreeSet::from([0]), "only the first announced");
-
-        let hooked = [
-            hook("begun/triage", None),
-            cooling_hook("cooled/triage"),
-            hook("quiet/triage", None),
-        ];
+        let clock = Clock::at(base);
         let ask = Ask {
             event: "sourcefed.event".to_owned(),
             session: "s-1".to_owned(),
             evidence: Arc::new(Vec::new()),
-            deadline: Instant::now(),
+            deadline,
             cancel: Cancel::new(Source::Harness),
         };
-        let cooldowns = Cooldowns::new();
-        let cooling = cooldown_key(None, &hooked[1].rule, &ask.session);
-        assert!(
-            cooldowns.try_fire(cooling, hooked[1].rule.cooldown()),
-            "the cooling rule fired before"
-        );
+        let announced = |_hook: &Hook| clock.past(deadline);
         let reported = Mutex::new(Vec::new());
-        let ran = |rule: &Rule, _done: &RuleRun| {
-            reported.lock().unwrap().push(rule.id().to_owned());
+        let ran = |rule: &Rule, done: &RuleRun| {
+            reported
+                .lock()
+                .unwrap()
+                .push((rule.id().to_owned(), done.entry.clone()));
         };
-        let mut returned = BTreeMap::new();
 
-        Router::settle(left, &hooked, &ask, &cooldowns, &ran, &mut returned);
+        let returned = router.run_all(&loaded, &hooked, &ask, &|| clock.now(), &announced, &ran);
+        drop(release);
 
+        let deadline_line = json!({
+            "rule": "begun/triage",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "deadline": true,
+        });
+        let skipped = json!({
+            "rule": "quiet/triage",
+            "event": "sourcefed.event",
+            "session": "s-1",
+            "skipped": "deadline",
+        });
+        let returned: Vec<(String, bool)> = returned
+            .iter()
+            .map(|(rule, then)| (rule.id().to_owned(), then.is_some()))
+            .collect();
+        assert_eq!(
+            returned,
+            [
+                ("begun/triage".to_owned(), false),
+                ("quiet/triage".to_owned(), false),
+            ],
+            "each rule answers in hook order, with nothing to return"
+        );
         assert_eq!(
             *reported.lock().unwrap(),
-            ["begun/triage"],
-            "only the run the dispatcher announced settles a step"
+            [("begun/triage".to_owned(), deadline_line.clone())],
+            "only the announced run settles a step"
         );
-        let entries: Vec<&Value> = [0, 1, 2]
-            .iter()
-            .filter_map(|index| returned.get(index).map(|done| &done.entry))
-            .collect();
-        assert_eq!(entries.len(), 3, "every open index is logged");
-        assert_eq!(entries[0]["rule"], "begun/triage");
-        assert_eq!(entries[0]["deadline"], true);
-        assert_eq!(entries[1]["rule"], "cooled/triage");
-        assert_eq!(entries[1]["cooldown"], true);
-        assert!(entries[1].get("deadline").is_none());
-        assert_eq!(entries[2]["rule"], "quiet/triage");
-        assert_eq!(entries[2]["deadline"], true);
-        assert_eq!(returned[&0].unsettled, Some("deadline"));
+        assert_eq!(
+            written(&root.join("state")),
+            [deadline_line, skipped],
+            "the log keeps hook order: the deadline, then the skipped rule"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A rule with a run still out is not started again: the second run
+    /// returns before announcing and is logged as cooling, and once the first
+    /// ends the rule runs again. The first run waits on a key the test never
+    /// sends, so it is out until the test drops the sender.
+    #[test]
+    fn a_rule_with_a_run_out_is_not_started_again() {
+        let Hanging {
+            root,
+            loaded,
+            release,
+            waiting,
+        } = hanging("in-flight");
+        let loaded = Arc::new(loaded);
+        let cooldowns = Arc::new(Cooldowns::new());
+        let flights = Arc::new(Flights::new());
+        let rule = hook("in-flight/triage", None).rule;
+        let ask = Ask {
+            event: "sourcefed.event".to_owned(),
+            session: "s-1".to_owned(),
+            evidence: Arc::new(Vec::new()),
+            deadline: Instant::now()
+                .checked_add(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            cancel: Cancel::new(Source::Harness),
+        };
+        let (started, began) = mpsc::channel();
+        let (loading, asking) = (Arc::clone(&loaded), ask.clone());
+        let (cooling, flying, running) = (
+            Arc::clone(&cooldowns),
+            Arc::clone(&flights),
+            Arc::clone(&rule),
+        );
+        let first = thread::spawn(move || {
+            let announce = || {
+                let _ = started.send(());
+            };
+            Router::run_one(
+                &loading, &cooling, &flying, &running, None, &asking, &announce,
+            )
+        });
+        began.recv().expect("the first run starts");
+        waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first run reaches its key");
+
+        let second = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &|| {});
+
+        assert_eq!(
+            second.entry,
+            json!({
+                "rule": "in-flight/triage",
+                "event": "sourcefed.event",
+                "session": "s-1",
+                "cooldown": true,
+            }),
+            "a run still out is logged as cooling"
+        );
+        assert!(second.then.is_none());
+
+        drop(release);
+        let first = first.join().expect("the first run ends");
+        assert!(
+            first.entry.get("cooldown").is_none(),
+            "the first run starts: {}",
+            first.entry
+        );
+
+        let third = Router::run_one(&loaded, &cooldowns, &flights, &rule, None, &ask, &|| {});
+
+        assert!(
+            third.entry.get("cooldown").is_none(),
+            "the rule runs again once its run ends: {}",
+            third.entry
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

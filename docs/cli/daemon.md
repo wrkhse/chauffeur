@@ -73,8 +73,10 @@ chauffeur daemon run --models fixtures/placeholders.json
   A connection's own caps are separate: 16 open calls, 4 of them navigations.
 - **Every run** goes to the audit log, with a line of its own for a rule no
   worker started before the deadline,
-  `{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. See
-  [`audit`](audit.md).
+  `{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. A run
+  that never reported is settled when the call stops waiting: its rule's
+  cooldown is read then, so a cooling rule's line is the cooldown, the best
+  available answer for a run that never returned. See [`audit`](audit.md).
 
 As a service:
 

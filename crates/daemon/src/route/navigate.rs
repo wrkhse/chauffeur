@@ -126,7 +126,7 @@ impl Router {
             }
         };
         let intents: Vec<Value> = self
-            .run_all(loaded, hooked, ask, &announced, &ran)
+            .run_all(loaded, hooked, ask, &Instant::now, &announced, &ran)
             .into_iter()
             .filter_map(|(rule, then)| then.map(|then| Intent::new(rule.id(), &then).to_json()))
             .collect();
