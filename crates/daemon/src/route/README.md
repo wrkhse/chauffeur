@@ -82,10 +82,13 @@ let intents = router.navigate(request, &cancel, &|event| send(event))?;
   for at most 32 projects. The project and its rules folder are
   canonicalized, the walk skips symlinks, and a project rule naming a model,
   or using System Two where `projects.json` does not list the project, is
-  refused and stays out.
-- A project rule's cooldown is keyed by its project, so two projects with a
-  rule of the same ID do not suppress each other.
-- A project rule's audit entry carries its project's path as `project`, right
-  after `rule`, so two projects' runs of a rule of the same ID can be told
+  refused and stays out. A project that cannot be canonicalized, such as a
+  folder that is not there, has no rules.
+- A project rule's cooldown is keyed by its project's canonical path, so a
+  project reached through a symlink or another spelling cools down once, and
+  two projects with a rule of the same ID do not suppress each other.
+- A project rule's audit entry carries that canonical path as `project`,
+  right after `rule`, so one project's runs read the same however the request
+  spells it, and two projects' runs of a rule of the same ID can be told
   apart; a loaded rule's entry keeps exactly the fields it had and no
   `project`.

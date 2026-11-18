@@ -472,6 +472,51 @@ fn an_inline_system_two_for_a_listed_project_is_unavailable_for_its_model() {
     );
 }
 
+/// `projects.json` lists a project's real folder, so a link to that folder is
+/// one of its spellings: an inline System Two request through the link passes
+/// the allowance and fails only for having no model, as the folder itself
+/// does. A project that is not listed is still refused, and the refusal names
+/// the path its request gave.
+#[test]
+fn an_inline_system_two_for_a_listed_project_reached_through_a_symlink_is_allowed() {
+    let paths = paths("s2-symlink", &models(Duration::ZERO));
+    let project = paths.state.parent().unwrap().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let canonical = fs::canonicalize(&project).unwrap();
+    let link = paths.state.parent().unwrap().join("linked");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    fs::write(
+        paths.config.join("projects.json"),
+        json!([canonical.display().to_string()]).to_string(),
+    )
+    .unwrap();
+    let mut caller = Caller::new(start(&paths));
+
+    caller.navigate(1, &system_two(&link.display().to_string()));
+    let reply = caller.until_reply(1).pop().unwrap();
+
+    assert_eq!(
+        reply["error"]["data"]["reason"], "judge_unavailable",
+        "{reply}"
+    );
+    assert!(
+        !reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.json"),
+        "the link is a spelling of the listed project: {reply}"
+    );
+
+    caller.navigate(2, &system_two("/nowhere/listed"));
+    let unlisted = caller.until_reply(2).pop().unwrap();
+
+    assert_eq!(
+        unlisted["error"]["message"],
+        "System Two runs only for a project listed in projects.json, and /nowhere/listed is not",
+        "{unlisted}"
+    );
+}
+
 #[test]
 fn a_projects_file_naming_a_relative_path_is_refused() {
     let paths = paths("relative", &models(Duration::ZERO));
@@ -1235,6 +1280,55 @@ fn two_projects_rules_with_the_same_id_do_not_share_a_cooldown() {
     assert!(
         !fired(&caller.until_reply(4), "team/same"),
         "the other project's rule cools down on its own"
+    );
+}
+
+/// One project reached by two spellings is one project: a link to the folder
+/// runs its rule, the audit entry names the path the filesystem resolves,
+/// and a rule with a cooldown fires once across both spellings.
+#[test]
+fn one_project_reached_through_a_symlink_runs_its_rule_once() {
+    let paths = paths("project-symlink", &models(Duration::ZERO));
+    let project = project_rule(&paths, "team/project.json", PROJECT_RULE_COOLDOWN);
+    let canonical = fs::canonicalize(&project).unwrap();
+    let link = paths.state.parent().unwrap().join("linked");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    let mut caller = Caller::new(start(&paths));
+
+    let through_link = with_project(event("codecov[bot]: Coverage 81.2%"), &link);
+    caller.navigate(1, &through_link);
+    let first = caller.until_reply(1);
+
+    assert!(
+        fired(&first, "team/project"),
+        "the rule runs through the link: {first:?}"
+    );
+    let run = runs(&paths)
+        .into_iter()
+        .find(|run| run["rule"] == "team/project")
+        .expect("the project rule ran");
+    assert_eq!(
+        run["project"],
+        json!(canonical.display().to_string()),
+        "the audit entry names the canonical path: {run}"
+    );
+
+    let direct = with_project(event("codecov[bot]: Coverage 81.2%"), &project);
+    caller.navigate(2, &direct);
+    let second = caller.until_reply(2);
+
+    assert!(
+        !fired(&second, "team/project"),
+        "the same project's other spelling is cooling down: {second:?}"
+    );
+    let cooled = runs(&paths)
+        .into_iter()
+        .find(|run| run["rule"] == "team/project" && run["cooldown"] == true)
+        .expect("the second run was logged as in cooldown");
+    assert_eq!(
+        cooled["project"],
+        json!(canonical.display().to_string()),
+        "the cooling run names the canonical path too: {cooled}"
     );
 }
 

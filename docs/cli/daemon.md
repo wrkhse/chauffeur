@@ -116,12 +116,17 @@ rule files and 8 MiB of them in all, each at most 1 MiB; a folder over a
 bound is refused with a line saying so. The daemon caches at most 32 projects
 by each file's path, length, modification time, inode and change time, and
 the configuration load that built the entry, so an edit applies to the next
-navigation. A project rule that names a `model`, uses the `person` tier, or
-uses System Two for a project `projects.json` does not list, is refused: only
-shipped and user configuration may name a model or ask a person. A rule whose
-ID a loaded rule already has is skipped, with a line saying so, so a clone
-cannot replace the user's own rules. The daemon says why on stderr once for
-each load of the changed folder.
+navigation. The daemon canonicalizes the request's project once, and keys a
+project rule's cooldown and its audit entry's `project` by that path, so one
+project reached through a symlink, or as `/var/...` and `/private/var/...`,
+is one project with one cooldown. A project that cannot be canonicalized,
+such as a folder that is not there, has no rules. A project rule that names a
+`model`, uses the `person` tier, or uses System Two for a project
+`projects.json` does not list, is refused: only shipped and user
+configuration may name a model or ask a person. A rule whose ID a loaded rule
+already has is skipped, with a line saying so, so a clone cannot replace the
+user's own rules. The daemon says why on stderr once for each load of the
+changed folder.
 
 From slice 5, `chauffeur daemon status --project WORKTREE` lists the rules a
 session in that worktree would load, its project rules included, and the

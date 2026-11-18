@@ -631,8 +631,11 @@ order, all under the request's admission.
 A project rule's ID is relative to its own folder, so its intents read like
 a shipped, integration or user rule's with the same ID; an intent carries no
 source, and a later slice may add an optional `source` field. The daemon
-keys a project rule's cooldown by its project, so two projects' rules with
-the same ID do not suppress each other.
+canonicalizes the request's project once, and keys a project rule's cooldown
+and its audit entry's `project` by that path, so one project reached through
+a symlink, or as `/var/...` and `/private/var/...`, is one project with one
+cooldown, while two projects' rules with the same ID do not suppress each
+other.
 
 Verified by:
 
@@ -689,7 +692,9 @@ Verified by:
   rule files is refused, in `crates/daemon/src/project.rs`'s tests.
 - Two projects' rules with the same ID do not share a cooldown: one project's
   rule fires while the other's is cooling down, and each cools down on its
-  own.
+  own. A project reached through a symlink runs its rule, with the canonical
+  path in its audit entry, and its cooldown holds across both spellings: one
+  nudge, not two.
 
 ### The bindings
 

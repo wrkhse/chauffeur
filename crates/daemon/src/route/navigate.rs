@@ -44,9 +44,19 @@ impl Router {
         };
         let evidence = request.evidence().to_vec();
         let project = request.project().map(Path::to_path_buf);
+        // One project has one spelling: the path the filesystem resolves it
+        // to, as the cache already keys its own entry. So `/var/...` and
+        // `/private/var/...`, or a symlink and its target, give one project's
+        // rules, one cooldown key, one audit entry and one allowance. A
+        // project that cannot be canonicalized, such as a folder that is not
+        // there, keeps the spelling its request used: it has no rules, so it
+        // contributes no hooks, and its allowance is decided on that spelling.
+        let canonical = project
+            .as_deref()
+            .and_then(|path| std::fs::canonicalize(path).ok());
         let answered = match (request.event(), request.into_target()) {
             (Some(event), Target::On(on)) => {
-                let project_rules = project
+                let project_rules = canonical
                     .as_deref()
                     .map(|path| self.projects.rules(&loaded, path));
                 let hooked: Vec<Hook> = loaded
@@ -64,7 +74,7 @@ impl Router {
                             .cloned()
                             .map(|rule| Hook {
                                 rule,
-                                project: project.clone(),
+                                project: canonical.clone(),
                             }),
                     )
                     .filter(|hook| hook.rule.hooks(&event))
@@ -79,7 +89,8 @@ impl Router {
                 Ok(self.intents(&loaded, &hooked, &ask, &send))
             }
             (_, Target::Strategy(strategy)) => {
-                allowed(&loaded, &strategy, project.as_deref())?;
+                let spelled = canonical.as_deref().or(project.as_deref());
+                allowed(&loaded, &strategy, spelled)?;
                 self.inline(&loaded, strategy, &evidence, deadline, cancel, &send)
             }
             (None, Target::On(_)) => Err(Rejection::Invalid("no event to match".to_owned())),
@@ -171,7 +182,9 @@ impl Router {
 
 /// Refuses an inline System Two strategy for a project `projects.json` does
 /// not list: an inline strategy carries its caller's trust, so only the
-/// user's own listed projects may spend System Two.
+/// user's own listed projects may spend System Two. `project` is the path the
+/// request's spelling resolves to, so each spelling of a listed project is
+/// allowed.
 fn allowed(loaded: &Loaded, strategy: &Strategy, project: Option<&Path>) -> Result<(), Rejection> {
     if !strategy.uses_tier(Tier::SystemTwo) {
         return Ok(());
