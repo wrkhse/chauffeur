@@ -10,10 +10,20 @@
 //!
 //! A project's folder is untrusted, since a clone brings it. The navigation
 //! resolves the project once, and a `.chauffeur/rules/` that resolves outside
-//! it is not read. The walk skips every symlink, checks each folder again
-//! before it is read, and stops at [`MAX_ENTRIES`] entries, [`MAX_FOLDERS`]
-//! folders, [`MAX_RULES`] rule files or [`MAX_BYTES`] of rule files,
-//! recording a refusal; the rules found before the cap still load.
+//! it is not read. The walk skips every symlink and opens each queued folder,
+//! reading it only while its device and inode are the ones it recorded, and
+//! checks the path again after the listing. It stops at [`MAX_ENTRIES`]
+//! entries, [`MAX_FOLDERS`] folders, [`MAX_RULES`] rule files or
+//! [`MAX_BYTES`] of rule files, recording a refusal; the rules found before
+//! the cap still load.
+//!
+//! A rule file is opened and its device and inode compared with the ones the
+//! walk recorded, and its bytes are read from that handle. An entry whose
+//! metadata cannot be read is refused with its path and the error, so a rule
+//! file is never read without the identity that read checks. Standard library
+//! cannot list a folder through an open handle, so a same-user process that
+//! swaps a folder and swaps it back during one walk is a residual race:
+//! closing it needs an fd-relative listing.
 //!
 //! An edit that keeps a rule file's length and modification time changes its
 //! inode or change time, so the next navigation reloads. An edit within the
@@ -21,6 +31,8 @@
 //! not seen until the file changes again.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, Metadata};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,7 +41,7 @@ use std::time::SystemTime;
 use chauffeur_judges::Tier;
 use chauffeur_protocol::Rule;
 
-use crate::state::{Loaded, MAX_RULES, load_rule};
+use crate::state::{FileId, Loaded, MAX_RULES, load_rule};
 
 /// The folder a project's rules are read from, below the project's root.
 const RULES: &str = ".chauffeur/rules";
@@ -49,14 +61,14 @@ const MAX_MIB: u64 = 8;
 /// The most bytes of rule files one project walk finds.
 const MAX_BYTES: u64 = MAX_MIB * 1024 * 1024;
 
-/// What one rule file looked like when it was walked: its length and
-/// modification time, and the inode and change time that catch an edit
-/// keeping the first two.
+/// What one rule file looked like when it was walked: the device and inode
+/// that name it, its length and modification time, and the change time that
+/// catches an edit keeping the first two.
 #[derive(Clone, PartialEq, Eq)]
 struct State {
+    id: FileId,
     len: u64,
     modified: Option<SystemTime>,
-    inode: u64,
     changed: i64,
     changed_nsec: i64,
 }
@@ -65,7 +77,7 @@ struct State {
 /// early when it did.
 #[derive(Clone, PartialEq, Eq)]
 struct Signature {
-    files: Vec<(PathBuf, Option<State>)>,
+    files: Vec<(PathBuf, State)>,
     refused: Option<String>,
 }
 
@@ -223,9 +235,34 @@ pub fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.to_string_lossy().escape_debug())
 }
 
+/// A test's swap for a folder: the path it receives says which queued
+/// folder to replace, just before that folder is listed.
+#[cfg(test)]
+type BeforeListing = std::cell::RefCell<Option<Box<dyn Fn(&Path)>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    /// A test's swap, run just before a folder is read, so the test can
+    /// replace a queued folder after the walk checked it and before its
+    /// listing.
+    static BEFORE_LISTING: BeforeListing = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a test's swap for `path`, when one is set. A production walk
+/// compiles without this, so no test seam reaches it.
+#[cfg(test)]
+fn before_listing(path: &Path) {
+    BEFORE_LISTING.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
 /// The folder's rule files and the state that says whether they changed,
-/// from one bounded walk that skips symlinks and re-checks each folder before
-/// it reads it.
+/// from one bounded walk that skips symlinks, opens each queued folder,
+/// checks its device and inode before and after the listing, and reads each
+/// rule file from the handle it checked.
 fn signature(folder: &Path) -> Signature {
     let shown = quoted(folder);
     let mut files = Vec::new();
@@ -244,87 +281,175 @@ fn signature(folder: &Path) -> Signature {
             break;
         }
         folders = folders.saturating_add(1);
-        if !inside(&next, folder) {
+        let Some(checked) = inside(&next, folder) else {
             refused = Some(format!(
                 "{shown}: {} is not a folder inside the project",
                 quoted(&next)
             ));
             break;
-        }
+        };
+        let Some(opened) = open_folder(&next, &checked) else {
+            refused = Some(format!(
+                "{shown}: {} is not the folder the walk checked",
+                quoted(&next)
+            ));
+            break;
+        };
+        // A test can replace the folder here, after its identity was
+        // checked and before it is read.
+        #[cfg(test)]
+        before_listing(&next);
         let Ok(entries) = std::fs::read_dir(&next) else {
             continue;
         };
-        let mut subfolders = Vec::new();
-        for entry in entries.flatten() {
-            if examined >= MAX_ENTRIES {
-                refused = Some(format!(
-                    "{shown}: the project's rules folder is over {MAX_ENTRIES} entries"
-                ));
-                break;
-            }
-            examined = examined.saturating_add(1);
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if kind.is_dir() {
-                subfolders.push(path);
-            } else if kind.is_file() && is_json(&path) {
-                if files.len() >= MAX_RULES {
-                    refused = Some(format!(
-                        "{shown}: the project's rules folder is over {MAX_RULES} rule files"
-                    ));
-                    break;
-                }
-                let metadata = entry.metadata().ok();
-                let len = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-                if bytes.saturating_add(len) > MAX_BYTES {
-                    refused = Some(format!(
-                        "{shown}: the project's rules folder is over {MAX_MIB} MiB of rule files"
-                    ));
-                    break;
-                }
-                bytes = bytes.saturating_add(len);
-                files.push((path, metadata.as_ref().map(State::of)));
-            }
-        }
-        if refused.is_some() {
+        let files_before = files.len();
+        let listed = read_folder(entries, &mut files, &mut bytes, &mut examined, &shown);
+        // The handle stays open across the listing, so its inode cannot be
+        // reused while the path is checked again.
+        let unchanged = still_same(&next, &checked);
+        drop(opened);
+        if !unchanged {
+            files.truncate(files_before);
+            refused = Some(format!(
+                "{shown}: {} changed while it was listed",
+                quoted(&next)
+            ));
             break;
         }
-        // Popped in name order, so the same folders always load the same IDs.
-        subfolders.sort_by(|a, b| b.cmp(a));
-        pending.extend(subfolders);
+        match listed {
+            Ok(mut subfolders) => {
+                // Popped in name order, so the same folders always load the
+                // same IDs.
+                subfolders.sort_by(|a, b| b.cmp(a));
+                pending.extend(subfolders);
+            }
+            Err(reason) => {
+                refused = Some(reason);
+                break;
+            }
+        }
     }
     files.sort_by(|(one, _), (other, _)| one.cmp(other));
     Signature { files, refused }
 }
 
-/// Whether `path` is still a folder inside `folder`: the walk reads a folder
-/// it queued only while it is not a symlink and still resolves inside the
-/// project's rules.
-fn inside(path: &Path, folder: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return false;
+/// Opens `path` and returns the handle only when it is the folder
+/// `checked` describes. Standard library cannot list a folder through an
+/// open handle, so a same-user process that swaps a folder and swaps it back
+/// during one walk is a residual race: `read_dir` sees whatever folder is at
+/// the path then. Closing it needs an fd-relative listing.
+fn open_folder(path: &Path, checked: &Metadata) -> Option<File> {
+    let opened = File::open(path).ok()?;
+
+    same_file(&opened.metadata().ok()?, checked).then_some(opened)
+}
+
+/// Whether both metadata name the same file: the same device and inode.
+fn same_file(one: &Metadata, other: &Metadata) -> bool {
+    one.dev() == other.dev() && one.ino() == other.ino()
+}
+
+/// Records the rule file `path` with the metadata the walk read, or says
+/// which bound it is over. An entry whose metadata cannot be read is
+/// refused with its path and the error, so no rule file is recorded without
+/// the identity its read checks.
+fn record_file(
+    path: PathBuf,
+    metadata: io::Result<Metadata>,
+    files: &mut Vec<(PathBuf, State)>,
+    bytes: &mut u64,
+    shown: &str,
+) -> Result<(), String> {
+    let metadata = metadata.map_err(|error| format!("{}: {error}", quoted(&path)))?;
+    if files.len() >= MAX_RULES {
+        return Err(format!(
+            "{shown}: the project's rules folder is over {MAX_RULES} rule files"
+        ));
     }
-    std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(folder))
+    let len = metadata.len();
+    if bytes.saturating_add(len) > MAX_BYTES {
+        return Err(format!(
+            "{shown}: the project's rules folder is over {MAX_MIB} MiB of rule files"
+        ));
+    }
+    *bytes = bytes.saturating_add(len);
+    files.push((path, State::of(&metadata)));
+
+    Ok(())
+}
+
+/// Reads `entries` and returns the folders among them, recording the rule
+/// files, or says which bound it is over or which entry's metadata could not
+/// be read. `examined` is the walk's count of entries, so it stays bounded
+/// across folders.
+fn read_folder(
+    entries: std::fs::ReadDir,
+    files: &mut Vec<(PathBuf, State)>,
+    bytes: &mut u64,
+    examined: &mut usize,
+    shown: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let mut subfolders = Vec::new();
+    for entry in entries.flatten() {
+        if *examined >= MAX_ENTRIES {
+            return Err(format!(
+                "{shown}: the project's rules folder is over {MAX_ENTRIES} entries"
+            ));
+        }
+        *examined = examined.saturating_add(1);
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if kind.is_dir() {
+            subfolders.push(path);
+        } else if kind.is_file() && is_json(&path) {
+            record_file(path, entry.metadata(), files, bytes, shown)?;
+        }
+    }
+
+    Ok(subfolders)
+}
+
+/// The metadata of `path` while it is a folder inside `folder`: the walk
+/// reads a folder it queued only while it is not a symlink, still a folder
+/// and still resolves inside the project's rules.
+fn inside(path: &Path, folder: &Path) -> Option<Metadata> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+
+    std::fs::canonicalize(path)
+        .is_ok_and(|path| path.starts_with(folder))
+        .then_some(metadata)
+}
+
+/// Whether `path` still names the folder `checked` describes. A folder
+/// swapped while it was listed is refused, and a swap back before this check
+/// is the residual race the open's comment names.
+fn still_same(path: &Path, checked: &Metadata) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|now| same_file(&now, checked))
 }
 
 impl State {
     /// The state `metadata` records.
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    fn of(metadata: &Metadata) -> Self {
         Self {
+            id: FileId::of(metadata),
             len: metadata.len(),
             modified: metadata.modified().ok(),
-            inode: metadata.ino(),
             changed: metadata.ctime(),
             changed_nsec: metadata.ctime_nsec(),
         }
+    }
+
+    /// The device and inode the file had when the walk saw it.
+    const fn identity(&self) -> FileId {
+        self.id
     }
 }
 
@@ -345,7 +470,7 @@ fn load(loaded: &Loaded, project: &Path, folder: &Path, signature: &Signature) -
     let listed = loaded.projects().contains(project);
     let mut rules = Vec::new();
     let mut refused: Vec<String> = signature.refused.iter().cloned().collect();
-    for (path, _) in &signature.files {
+    for (path, state) in &signature.files {
         let rule_id = id(folder, path);
         if ids.contains(&rule_id) {
             refused.push(format!(
@@ -355,7 +480,7 @@ fn load(loaded: &Loaded, project: &Path, folder: &Path, signature: &Signature) -
             ));
             continue;
         }
-        match load_rule(folder, path) {
+        match load_rule(folder, path, Some(state.identity())) {
             Ok(rule) => {
                 if let Err(reason) = allowed(&rule, listed) {
                     refused.push(format!("{}: {}", quoted(path), reason.escape_debug()));
@@ -412,8 +537,9 @@ mod tests {
     use chauffeur_protocol::Rule;
 
     use super::{
-        Entries, MAX_BYTES, MAX_CACHED, MAX_ENTRIES, MAX_MIB, MAX_RULES, Rules, Signature, allowed,
-        inside, load, quoted, rules_folder, signature,
+        BEFORE_LISTING, Entries, MAX_BYTES, MAX_CACHED, MAX_ENTRIES, MAX_MIB, MAX_RULES, Rules,
+        Signature, allowed, inside, load, open_folder, quoted, record_file, rules_folder,
+        signature, still_same,
     };
     use crate::Paths;
     use crate::state::Loaded;
@@ -484,6 +610,12 @@ mod tests {
 
         (root, loaded)
     }
+
+    /// A valid rule, for a project rule file.
+    const RULE: &str = concat!(
+        r#"{"on":"x","strategy":[{"id":"s","judge":"system-one","#,
+        r#""ask":{"outcomes":["yes","no"],"instructions":"?"}}]}"#
+    );
 
     /// 33 projects fill a cache of 32, which keeps the one used most
     /// recently and forgets the one used least.
@@ -614,20 +746,123 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &link).expect("the symlink");
 
         assert!(
-            inside(&folder.join("sub"), &folder),
+            inside(&folder.join("sub"), &folder).is_some(),
             "a folder inside the rules is inside"
         );
         assert!(
-            !inside(&outside, &folder),
+            inside(&outside, &folder).is_none(),
             "a folder outside the rules is not inside"
         );
         assert!(
-            !inside(&link, &folder),
+            inside(&link, &folder).is_none(),
             "a symlink to an outside folder is not inside"
         );
         assert!(
-            !inside(&file, &folder),
+            inside(&file, &folder).is_none(),
             "a plain file inside the rules is not inside"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A folder opened for its listing is the one checked only while its
+    /// device and inode are the same; one replaced in between is not.
+    #[test]
+    fn a_folder_replaced_between_the_check_and_the_open_is_not_the_same() {
+        let root = temporary("reopened");
+        let path = root.join("rules");
+        fs::create_dir_all(&path).expect("the rules folder");
+        let checked = fs::symlink_metadata(&path).expect("the folder's metadata");
+        assert!(
+            open_folder(&path, &checked).is_some(),
+            "the folder is the one checked"
+        );
+        assert!(
+            still_same(&path, &checked),
+            "the path still names the folder checked"
+        );
+
+        fs::rename(&path, root.join("moved")).expect("the folder moves away");
+        fs::create_dir_all(&path).expect("another folder at the path");
+
+        assert!(
+            open_folder(&path, &checked).is_none(),
+            "another folder at the path is not the one checked"
+        );
+        assert!(
+            !still_same(&path, &checked),
+            "the path no longer names the folder checked"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A folder swapped for a symlink after it was queued still resolves to
+    /// the folder checked, so the open takes it; the path after the listing
+    /// is not that folder, so the walk refuses it.
+    #[test]
+    fn a_folder_swapped_for_a_symlink_is_refused_after_the_listing() {
+        let root = temporary("opened-link");
+        let real = root.join("real");
+        fs::create_dir_all(&real).expect("the real rules folder");
+        let checked = fs::symlink_metadata(&real).expect("the folder's metadata");
+        let link = root.join("rules");
+        std::os::unix::fs::symlink(&real, &link).expect("the symlink");
+
+        assert!(
+            open_folder(&link, &checked).is_some(),
+            "the link resolves to the folder checked"
+        );
+        assert!(
+            !still_same(&link, &checked),
+            "the path is not the folder checked after the listing"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A queued folder that changes between the open's check and its
+    /// listing is refused, and the files recorded from it are dropped.
+    #[test]
+    fn a_folder_swapped_before_its_listing_is_refused_and_its_files_dropped() {
+        let root = temporary("swap-listing");
+        let folder = root.join("rules");
+        let queued = folder.join("sub");
+        let kept = folder.join("kept.json");
+        fs::create_dir_all(&queued).expect("the queued folder");
+        fs::write(&kept, "{}").expect("the rule file before the swap");
+        let moved = folder.join("moved");
+        let swapped = queued.join("swapped.json");
+        let swap: Box<dyn Fn(&Path)> = {
+            let queued = queued.clone();
+            Box::new(move |path: &Path| {
+                if path == queued.as_path() {
+                    fs::rename(&queued, &moved).expect("the queued folder moves away");
+                    fs::create_dir_all(&queued).expect("another folder at its path");
+                    fs::write(&swapped, "{}").expect("the swapped folder's rule file");
+                }
+            })
+        };
+        BEFORE_LISTING.with(|hook| *hook.borrow_mut() = Some(swap));
+
+        let walked = signature(&folder);
+
+        BEFORE_LISTING.with(|hook| *hook.borrow_mut() = None);
+        let paths: Vec<&Path> = walked
+            .files
+            .iter()
+            .map(|(path, _)| path.as_path())
+            .collect();
+        assert_eq!(
+            paths,
+            [kept.as_path()],
+            "the file recorded from the swapped folder is dropped"
+        );
+        assert_eq!(
+            walked.refused,
+            Some(format!(
+                "{}: {} changed while it was listed",
+                quoted(&folder),
+                quoted(&queued)
+            )),
+            "the queued folder is refused, not read"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -681,6 +916,26 @@ mod tests {
             ))
         );
         let _ = fs::remove_dir_all(&folder);
+    }
+
+    /// A rule file whose metadata cannot be read is refused with its path
+    /// and the error, so it is never recorded without the identity its read
+    /// checks.
+    #[test]
+    fn a_rule_file_whose_metadata_cannot_be_read_is_refused() {
+        let folder = Path::new("/work/rules");
+        let path = folder.join("x.json");
+        let shown = quoted(folder);
+        let expected = format!("{}: denied", quoted(&path));
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let mut files = Vec::new();
+        let mut bytes = 0;
+
+        let refused = record_file(path, Err(error), &mut files, &mut bytes, &shown);
+
+        assert_eq!(refused, Err(expected), "the entry and the error are named");
+        assert!(files.is_empty(), "no file is recorded without its metadata");
+        assert_eq!(bytes, 0, "nothing counts toward the folder's bytes");
     }
 
     /// Exactly the rule-file bound is taken, not refused: 512 tiny rule
@@ -792,13 +1047,7 @@ mod tests {
     /// with a line saying so, and the file is never parsed.
     #[test]
     fn a_project_rule_with_a_loaded_rules_id_is_skipped_with_a_line() {
-        let (root, loaded) = fixture(
-            "collision",
-            &[(
-                "taken",
-                r#"{"on":"x","strategy":[{"id":"s","judge":"system-one","ask":{"outcomes":["yes","no"],"instructions":"?"}}]}"#,
-            )],
-        );
+        let (root, loaded) = fixture("collision", &[("taken", RULE)]);
         let project = root.join("project");
         fs::create_dir_all(project.join(".chauffeur/rules")).expect("the rules folder");
         fs::write(project.join(".chauffeur/rules/taken.json"), "{}").expect("the colliding rule");
@@ -816,6 +1065,41 @@ mod tests {
                 quoted(&folder.join("taken.json"))
             )],
             "the file is reported as skipped, not parsed"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A rule file replaced between the walk and the read is refused, so a
+    /// path cannot substitute another file after the walk saw it.
+    #[test]
+    fn a_rule_file_replaced_after_the_walk_is_refused() {
+        let (root, loaded) = fixture("replaced-file", &[]);
+        let project = root.join("project");
+        fs::create_dir_all(project.join(".chauffeur/rules")).expect("the rules folder");
+        let path = project.join(".chauffeur/rules/x.json");
+        fs::write(&path, RULE).expect("a rule file");
+        let folder = rules_folder(&project).expect("the rules folder is inside it");
+        let project = fs::canonicalize(&project).expect("the project resolves");
+        let walked = signature(&folder);
+        assert_eq!(walked.files.len(), 1, "the walk found the rule file");
+
+        // A same-user process replaces the file after the walk saw it.
+        let replacement = root.join("replacement.json");
+        fs::write(&replacement, RULE).expect("the replacement rule file");
+        fs::rename(&replacement, &path).expect("the rule is replaced");
+
+        let loaded_rules = load(&loaded, &project, &folder, &walked);
+
+        assert!(
+            loaded_rules.rules.is_empty(),
+            "the replacement does not run"
+        );
+        assert_eq!(
+            loaded_rules.refused,
+            [format!(
+                "{}: the rule file is not the one the walk recorded",
+                quoted(&path)
+            )]
         );
         let _ = fs::remove_dir_all(&root);
     }

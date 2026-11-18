@@ -73,8 +73,10 @@ chauffeur daemon run --models fixtures/placeholders.json
   A connection's own caps are separate: 16 open calls, 4 of them navigations.
 - **Every run** goes to the audit log, with a line of its own for a rule no
   worker started before the deadline,
-  `{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. See
-  [`audit`](audit.md).
+  `{"rule": …, "event": …, "session": …, "skipped": "deadline"}`. A run
+  that never reported is settled when the call stops waiting: its rule's
+  cooldown is read then, so a cooling rule's line is the cooldown, the best
+  available answer for a run that never returned. See [`audit`](audit.md).
 
 As a service:
 
@@ -118,16 +120,23 @@ cooldown key and the audit entry's `project`, so one project reached through
 a symlink, or as `/var/...` and `/private/var/...`, has one walk, one
 allowance, one cooldown and one audit spelling. The rules folder is
 canonicalized too, so a folder that resolves outside the project is not read,
-and the walk skips every symlink. A navigation whose project cannot be
+and the walk skips every symlink. Each queued folder is opened and read only
+while its device and inode are the ones the walk recorded, and the path is
+checked again after the listing; each rule file is opened and refused when
+its device and inode are not the ones the walk recorded, and its bytes are
+read from that handle. The standard library cannot list a folder through an
+open handle, so a same-user process that swaps a folder and swaps it back
+during one walk is a residual race: closing it needs an fd-relative listing.
+A navigation whose project cannot be
 resolved, such as a folder that is not there, is refused, with a message
 that quotes the path and says why it did not resolve; the request is not
 treated as having no rules. The walk examines at most 4,096 entries in at
 most 256 folders and takes at most 512 rule files and 8 MiB of them in all,
 each at most 1 MiB; a folder over a bound is refused with a line saying so.
 The daemon caches at most 32 projects by each file's path, length,
-modification time, inode and change time, and the configuration load that
-built the entry, so an edit applies to the next navigation. A project rule
-that names a `model`, uses the `person` tier, or uses System Two for a
+modification time, device, inode and change time, and the configuration load
+that built the entry, so an edit applies to the next navigation. A project
+rule that names a `model`, uses the `person` tier, or uses System Two for a
 project `projects.json` does not list, is refused: only shipped and user
 configuration may name a model or ask a person. A rule whose ID a loaded rule
 already has is skipped, with a line saying so, so a clone cannot replace the

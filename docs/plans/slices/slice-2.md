@@ -612,11 +612,18 @@ symlinked worktree, or `/var/...` and `/private/var/...`, is one project with
 one walk, one allowance, one cooldown and one audit spelling. Its rules
 folder is canonicalized too, so a folder that resolves outside the project
 is not read, and the walk skips every symlink: a clone cannot add a rule or
-a folder from outside it. A request whose project cannot be resolved is
-refused, with a message that quotes the path and says why, rather than
-answered as a project with no rules. The walk examines at most 4,096 entries
-in at most 256 folders and takes at most 512 rule files and 8 MiB of them in
-all, each at most 1 MiB, with IDs relative to that folder. A bound stops the
+a folder from outside it. Each queued folder is opened and read only while
+its device and inode are the ones the walk recorded, and the path is checked
+again after the listing; each rule file is opened and refused when its device
+and inode are not the ones the walk recorded, and its bytes are read from
+that handle. The standard library cannot list a folder through an open
+handle, so a same-user process that swaps a folder and swaps it back during
+one walk is a residual race: closing it needs an fd-relative listing. A
+request whose project cannot be resolved is refused, with a message that
+quotes the path and says why, rather than answered as a project with no
+rules. The walk examines at most 4,096 entries in at most 256 folders and
+takes at most 512 rule files and 8 MiB of them in all, each at most 1 MiB,
+with IDs relative to that folder. A bound stops the
 walk with a refusal, "the project's rules folder is over …", and the rules
 found before it still load. A rule whose ID a shipped, user or integration
 rule already has is skipped, with a line saying so, so a cloned repository
@@ -631,10 +638,10 @@ with its path and reason escaped, so a rule file cannot forge a line; the
 folder is never read for models, so a project's `.chauffeur/models.json` has
 no effect. The daemon caches at most 32 projects' rules, least recently used
 evicted, each with a signature of its rule files' paths, lengths,
-modification times, inodes and change times and the epoch of the load it was
-built from. Every request re-walks that metadata and reuses an entry only
-for that load and signature, so a reload never serves rules built under
-another `projects.json`, and an edit that keeps a file's length and
+modification times, devices, inodes and change times and the epoch of the
+load it was built from. Every request re-walks that metadata and reuses an
+entry only for that load and signature, so a reload never serves rules built
+under another `projects.json`, and an edit that keeps a file's length and
 modification time is still seen when its inode or change time moves. A
 navigation matches the loaded rules in their order, then the project's in ID
 order, all under the request's admission.
@@ -695,9 +702,11 @@ Verified by:
   emptying `projects.json` stops a listed project's System Two rule on the
   next navigation.
 - A rule file or folder that is a symlink elsewhere, and a
-  `.chauffeur/rules/` that resolves outside the project, load nothing; a
-  project folder over 4,096 entries, 256 folders, 512 rule files or 8 MiB of
-  rule files is refused, in `crates/daemon/src/project.rs`'s tests.
+  `.chauffeur/rules/` that resolves outside the project, load nothing; a rule
+  file replaced after the walk, and a folder whose device or inode changed
+  before or while it is listed, are refused; a project folder over 4,096
+  entries, 256 folders, 512 rule files or 8 MiB of rule files is refused, in
+  `crates/daemon/src/project.rs`'s tests.
 - Two projects' rules with the same ID do not share a cooldown: one project's
   rule fires while the other's is cooling down, and each cools down on its
   own. A project reached through a symlink runs its rule, with the canonical

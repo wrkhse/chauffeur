@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -59,5 +59,55 @@ impl Cooldowns {
         }
         fired.insert(key, Instant::now());
         true
+    }
+}
+
+/// The keys whose run is out now. A key is held from the moment its run
+/// starts until that run returns, so an event for the same rule and session
+/// cannot stack a second run on a judge that never answers. A run gives its
+/// key back however it ends, delivered or not, so a result the caller never
+/// hears cannot leave the rule unable to run again. At most one key is held
+/// per run the router's pool can have out, so the pool bounds the set.
+pub(super) struct Flights {
+    out: Mutex<BTreeSet<Key>>,
+}
+
+impl Flights {
+    pub(super) const fn new() -> Self {
+        Self {
+            out: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Marks `key` as out, or gives `None` when a run of it is already out.
+    /// A set that cannot be locked is not consulted, so the run goes ahead.
+    pub(super) fn begin(&self, key: Key) -> Option<Flight<'_>> {
+        let Ok(mut out) = self.out.lock() else {
+            return Some(Flight { flights: None, key });
+        };
+        if !out.insert(key.clone()) {
+            return None;
+        }
+        Some(Flight {
+            flights: Some(self),
+            key,
+        })
+    }
+}
+
+/// A run's place in the in-flight set, given back when it is dropped: a
+/// normal return, an early one, and a panic all free the key.
+pub(super) struct Flight<'a> {
+    flights: Option<&'a Flights>,
+    key: Key,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        if let Some(flights) = self.flights
+            && let Ok(mut out) = flights.out.lock()
+        {
+            out.remove(&self.key);
+        }
     }
 }
