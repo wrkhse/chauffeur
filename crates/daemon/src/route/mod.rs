@@ -458,6 +458,7 @@ fn finished<T>(receive: &Receiver<(usize, T)>, wait: Duration) -> Option<(usize,
 mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -466,7 +467,7 @@ mod tests {
     use chauffeur_runtime::{Cancel, Pool, Ran, Source};
     use serde_json::{Value, json};
 
-    use super::{Ask, Report, Router, dispatch};
+    use super::{Ask, Report, Router, dispatch, finished};
 
     /// The dispatcher keeps no more jobs running than the pool has workers:
     /// every one of 16 jobs comes back, on a pool worker, with no more than
@@ -819,6 +820,34 @@ mod tests {
                 .count(),
             items.len(),
             "every finish came once: {order:?}"
+        );
+    }
+
+    /// A result sent before the wait comes back with its index, and a look
+    /// at the now-empty channel comes back with none after the short wait.
+    /// Ten ms each: enough to take what is there, too short to hold a test.
+    #[test]
+    fn a_finished_result_comes_back_within_its_wait_and_none_comes_after() {
+        let (send, receive) = mpsc::channel();
+        send.send((2_usize, "done")).unwrap();
+        let wait = Duration::from_millis(10);
+
+        let first = finished(&receive, wait);
+
+        assert_eq!(
+            first,
+            Some((2, "done")),
+            "the result sent comes back with its index"
+        );
+
+        let began = Instant::now();
+        let second = finished(&receive, wait);
+        let elapsed = began.elapsed();
+
+        assert_eq!(second, None, "the empty channel yields nothing");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the empty channel returns after its wait: {elapsed:?}"
         );
     }
 
