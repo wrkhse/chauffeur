@@ -19,6 +19,14 @@ entries win.
       "model": "jev-1",
       "key": { "env": "TYPESAFE_API_KEY" }
     },
+    "glide": {
+      "format": "systemone",
+      "endpoint": "https://api.example",
+      "model": "glide-1",
+      "key": { "env": "FASTINO_API_KEY" },
+      "timeout_ms": 3000,
+      "store": false
+    },
     "offline": { "format": "placeholder", "otherwise": { "yes": 0.5, "no": 0.5 } }
   },
   "tiers": { "system-one": ["jev", "offline"] }
@@ -37,3 +45,8 @@ assert_eq!(models.tier(Tier::SystemOne), ["jev", "offline"]);
 - A placeholder's `answers` path is made relative to the file that names it.
 - Each format's entry type lives with its format: `SystemOneEntry` in
   `tiers/system_one/`, `PlaceholderEntry` in `placeholder/`.
+- A `systemone` entry's `timeout_ms`, `store` and `ask` are optional.
+  `store` is sent with each request only when set, and `ask` is `"choice"`
+  or `"score"`, how the model is asked a question that is not yes/no:
+  [system_one](../tiers/system_one/README.md) has each field.
+- An entry with a field its format does not have is refused.

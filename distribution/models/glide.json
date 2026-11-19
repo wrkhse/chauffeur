@@ -1,0 +1,12 @@
+{
+  "models": {
+    "glide": {
+      "format": "systemone",
+      "endpoint": "https://api.fastino.ai",
+      "model": "fastino/GLiDE",
+      "key": { "env": "FASTINO_API_KEY" },
+      "timeout_ms": 3000,
+      "store": false
+    }
+  }
+}

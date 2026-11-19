@@ -33,5 +33,5 @@ pub use placeholder::{Placeholder, PlaceholderEntry};
 pub use question::{Label, Outcomes, Question, QuestionError};
 #[cfg(feature = "systemone")]
 pub use tiers::system_one::SystemOne;
-pub use tiers::system_one::SystemOneEntry;
+pub use tiers::system_one::{SystemOneAsk, SystemOneEntry};
 pub use tiers::{Fallback, Model, NamedJudge, Tier};

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use chauffeur_core::Failure;
 use chauffeur_judges::{
     AnsweredBy, Evidence, Fallback, Format, KeySource, Model, Probabilities, Question, SystemOne,
-    SystemOneEntry,
+    SystemOneAsk, SystemOneEntry,
 };
 
 const LIVE_RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.97}},"usage":{"input_tokens":397,"output_tokens":73}}"#;
@@ -188,6 +188,8 @@ fn jev(server: &Server, timeout_ms: u64) -> SystemOne {
             env: "TYPESAFE_API_KEY".into(),
         },
         timeout_ms: Some(timeout_ms),
+        store: None,
+        ask: SystemOneAsk::default(),
     };
     SystemOne::new(&entry, "test-key".into())
 }

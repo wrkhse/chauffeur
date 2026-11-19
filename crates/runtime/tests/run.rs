@@ -91,6 +91,7 @@ fn a_judge_sees_only_redacted_evidence() {
         panic!("no answer")
     };
     assert!(answer.by().placeholder);
+    assert_eq!(ran.verdict.skipped().collect::<Vec<_>>(), ["sure"]);
     assert_eq!(
         then.map(|then| then.name().to_owned()).as_deref(),
         Some("message.append")
@@ -113,6 +114,10 @@ fn with_no_model_answering_the_step_fails_and_nothing_is_returned() {
 
     assert_eq!(
         ran.verdict.get("nonconventional"),
+        Some(&Outcome::Failed(Failure::Unavailable))
+    );
+    assert_eq!(
+        ran.verdict.get("sure"),
         Some(&Outcome::Failed(Failure::Unavailable))
     );
     assert!(then.is_none());

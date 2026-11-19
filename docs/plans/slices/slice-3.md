@@ -1,8 +1,9 @@
 # Slice 3: Escalation from Jev to GLiDE
 
-**Status:** In progress: `after` and rounds in core, and lowering rules to
-plans, are built; SubQ and GLiDE, image evidence, the `student` format, the
-rest for a failing model, `chauffeur strategy` and the playground follow.
+**Status:** In progress: `after` and rounds in core, lowering rules to plans,
+and SubQ, GLiDE and richer questions are built; image evidence, the `student`
+format, the rest for a failing model, `chauffeur strategy` and the playground
+follow.
 
 **You can:** have the commit nudge and `sourcefed/triage` ask GLiDE only when
 Jev's answer is near the bar the rule acts on, or Jev fails, see each
@@ -446,35 +447,261 @@ whose semantic checks the schema cannot express.
 
 ### SubQ, GLiDE and richer questions
 
-`choice` with every outcome's probability, and GLiDE's level-valued `score`,
-in the `systemone` format; SubQ and GLiDE shipped beside Jev.
+The `systemone` format asks a yes/no question as `noul`, and any other
+question as `choice` or `score`, whichever the model's entry names with
+`ask`; `choice` is the default. SubQ and GLiDE ship beside Jev, and the
+commit nudge asks GLiDE when Jev's answer is near its bar or Jev fails. Asks
+keep their protocol shape, `instructions`, `outcomes` and `evidence`.
 
-Files: `crates/judges/src/tiers/system_one/`, `distribution/models/subq.json`,
-`glide.json`
+Files: `crates/judges/src/tiers/system_one/{mod,client,wire}.rs` and its
+`README.md`,
+`crates/judges/tests/{wire,systemone,models}.rs`,
+`distribution/models/{subq,glide}.json`,
+`distribution/rules/conventional-commits.json`
+
+An entry in `models.json` names how its model is asked, and whether the
+request carries `store`. GLiDE's entry sends `"store": false`; an entry
+without `store` leaves it out of the request. The same model registered under
+a second name with the other `ask` is asked both ways, so the two can be
+compared.
 
 ```json
 {
-  "outcomes": ["low", "medium", "high"],
-  "evidence": ["prompt"],
-  "instructions": "How hard is the user's request?"
-}
-```
-
-```json
-{
-  "answer": {
-    "outcome": "medium",
-    "p": { "low": 0.12, "medium": 0.45, "high": 0.43 },
-    "level": 1.31
+  "models": {
+    "glide": {
+      "format": "systemone",
+      "endpoint": "https://api.fastino.ai",
+      "model": "fastino/GLiDE",
+      "key": { "env": "FASTINO_API_KEY" },
+      "store": false
+    }
   }
 }
 ```
 
-Verified by:
+SubQ and GLiDE are in `distribution/models/` but not in the `system-one`
+tier's list: they are chosen by name, never by finding their key. A rule
+reaches one only with `"model": "subq"` or `"model": "glide"`. Without that
+model's key, the step falls back to the tier's order, Jev, and the answer's
+model says which answered.
 
-- `main`'s `judges/{subq,glide}/tests/wire.rs` replayed over loopback.
-- Labelled scale questions through `choice` and `score` report which agrees
-  with the labels more often.
+A `choice` sends each outcome with its description, or its value when it has
+none:
+
+```json
+{
+  "model": "subq-snap-preview",
+  "state": "prompt:\nFix the login bug today\n\n",
+  "questions": {
+    "q0": {
+      "type": "choice",
+      "instructions": "Which skill fits?",
+      "criteria": { "cli": "Use the command line", "none": "No skill" }
+    }
+  }
+}
+```
+
+```json
+{
+  "answers": {
+    "q0": {
+      "type": "choice",
+      "choice": "cli",
+      "confidence": 0.8,
+      "probabilities": { "cli": 0.9, "none": 0.1 }
+    }
+  }
+}
+```
+
+A `score` sends the outcomes as a scale, lowest first, and its reply gives a
+probability for each level by index:
+
+```json
+{
+  "model": "fastino/GLiDE",
+  "state": "prompt:\nFix the login bug today\n\n",
+  "questions": {
+    "q0": {
+      "type": "score",
+      "instructions": "How urgent is it?",
+      "criteria": ["low", "medium", "high"]
+    }
+  },
+  "store": false
+}
+```
+
+```json
+{
+  "answers": {
+    "q0": {
+      "type": "score",
+      "score": 1,
+      "expected_level": 1.01,
+      "confidence": 0.54,
+      "probabilities": { "0": 0.15, "1": 0.69, "2": 0.16 }
+    }
+  }
+}
+```
+
+This answer settles to `medium`, with p 0.15, 0.69 and 0.16 and level 1.01.
+p comes from each answer's probabilities, by value for a `choice` and by index
+for a `score`. The level is the probability-weighted position computed from
+p, 0 for the first outcome to n − 1 for the last. A reported `choice` must
+name an outcome, and `score` and `expected_level` must lie on the scale;
+neither sets the answer. A malformed answer fails only its question, as
+`invalid`; a reply without answers fails every question.
+
+The commit nudge asks Jev, then GLiDE when Jev's P is within 0.15 of the 0.7
+bar or Jev fails. It nudges on a `yes` decision, and on a failed GLiDE after
+Jev's near `yes`, as `main` does:
+
+```json
+"judges": {
+  "jev": { "tier": "system-one", "model": "jev", "confidence": 0.7 },
+  "glide": { "tier": "system-one", "model": "glide", "confidence": 0.7 }
+},
+"strategy": [
+  { "id": "nonconventional", "judge": "jev", "ask": "nonconventional" },
+  { "id": "sure", "judge": "glide", "ask": "nonconventional",
+    "after": [{ "step": "nonconventional", "near": 0.15, "when": ["failed"] }] }
+],
+"then": [
+  { "if": { "decision": "yes" }, "message.append": { … } },
+  { "if": { "sure": "failed", "nonconventional": "yes" }, "message.append": { … } }
+]
+```
+
+`sourcefed/triage`'s rule is sourcefed's own, written by its installer; the
+playground's example shows the triage escalated the same way.
+
+#### Structure
+
+An entry's `ask` is how a question that is not yes/no is asked, `choice`
+when left out. `store` is sent only when set. Any other field, or another
+`ask`, is refused when `models.json` loads.
+
+```rust
+pub enum SystemOneAsk {
+    Choice,
+    Score,
+}
+
+pub struct SystemOneEntry {
+    pub endpoint: String,
+    pub model: String,
+    pub key: KeySource,
+    pub timeout_ms: Option<u64>,
+    pub store: Option<bool>,
+    pub ask: SystemOneAsk,
+}
+```
+
+`SystemOne` asks every question of a round in one call, taking `store` and
+`ask` from its entry. A round with no question makes no call.
+
+```rust
+pub struct SystemOne {
+    agent: ureq::Agent,
+    url: String,
+    model: String,
+    key: String,
+    store: Option<bool>,
+    ask: SystemOneAsk,
+}
+
+impl SystemOne {
+    pub fn new(entry: &SystemOneEntry, key: String) -> Self;
+}
+
+impl Format for SystemOne {}
+```
+
+The wire types stay inside the format. A question's ID is its position in
+the round, `q0`, `q1` and on, and `state` holds the evidence blocks the
+round's questions name, each once. `Asked::of` asks as `noul` exactly when
+the outcomes are `yes` and `no`. `Asked::read` fails an answer as
+`invalid` when it is missing, cannot be read, has another `type`, reports a
+confidence outside 0 to 1, or fails the checks above. `Response` keeps each
+answer as JSON, so one that cannot be read fails only its question.
+
+```rust
+pub(super) struct Request<'a> {
+    pub(super) model: &'a str,
+    pub(super) state: String,
+    pub(super) questions: BTreeMap<&'a str, &'a Asked<'a>>,
+    pub(super) store: Option<bool>,
+}
+
+pub(super) enum Asked<'a> {
+    Noul {
+        instructions: &'a str,
+    },
+    Choice {
+        instructions: &'a str,
+        criteria: BTreeMap<&'a str, &'a str>,
+    },
+    Score {
+        instructions: &'a str,
+        criteria: Vec<&'a str>,
+    },
+}
+
+impl<'a> Asked<'a> {
+    pub(super) fn of(question: &'a Question, ask: SystemOneAsk) -> Self;
+
+    pub(super) fn read(
+        &self,
+        outcomes: &Outcomes,
+        answer: Option<&Value>,
+    ) -> Result<Probabilities, Failure>;
+}
+
+pub(super) struct Response {
+    pub(super) answers: BTreeMap<String, Value>,
+}
+
+pub(super) fn state(questions: &[&Question], evidence: &Evidence) -> String;
+```
+
+The level comes from p alone:
+
+```rust
+impl Probabilities {
+    pub fn level(&self) -> f64;
+}
+```
+
+Verified by, in `crates/judges/tests/wire.rs` unless named:
+
+- `jevs_live_reply_answers_a_choice_and_a_noul_in_one_request` and
+  `jevs_live_reply_answers_a_score_and_a_noul_in_one_request`: Jev's
+  captured live reply, asked each way in one request; an answer of the other
+  type fails only its question.
+- `subq_is_sent_its_model_and_each_outcomes_description_or_level` and
+  `glide_is_sent_store_false_and_its_score_is_read_from_the_probabilities`:
+  `main`'s SubQ and GLiDE replies replayed over loopback; GLiDE's p gives its
+  `expected_level`.
+- `a_score_settles_to_its_likeliest_level_at_the_level_the_reply_reports`:
+  a `score` settles to `medium` at level 1.01.
+- `a_score_off_its_scale_or_without_every_levels_probability_is_invalid`,
+  `a_score_at_either_end_of_its_scale_is_read`,
+  `a_choice_without_every_outcomes_probability_is_invalid` and
+  `a_choice_is_read_from_its_probabilities_whatever_it_names`: the range
+  checks, and p read from the probabilities alone.
+- `an_answer_that_cannot_be_read_fails_only_its_question` and
+  `invalid_and_oversized_replies_fail_every_question_and_say_nothing_else`.
+- `store_is_sent_only_when_the_entry_sets_it` and
+  `ask_and_store_in_models_json_reach_the_request`.
+- `a_slow_provider_times_out_every_question`.
+- `a_systemone_entry_loads_store_and_how_it_asks` and
+  `a_systemone_entry_with_an_unknown_field_or_way_to_ask_is_refused`, in
+  `tests/models.rs`.
+- `a_question_that_is_not_yes_or_no_is_asked_as_a_choice_and_answered`, in
+  `tests/systemone.rs`.
 
 ### Image evidence
 
@@ -577,8 +804,17 @@ Verified by:
 
 ## End to end
 
+These run at the slice's proof, with their answers recorded.
+
 - `"model": "glide"` without GLiDE configured runs on the tier's fallback
   order and reports it.
 - The escalation runs live against Jev and GLiDE and agrees with `main`'s
   escalation near the bar, `CHAUFFEUR_JUDGE_ESCALATE=glide`, on the same
   cases, reporting answers, rounds, elapsed time and model calls.
+- Labelled scale questions, asked through `choice` and through `score` by the
+  same model registered under two names, report which agrees with the labels
+  more often.
+- The live score check confirms a GLiDE `score` reply settles only when it
+  carries probabilities for every level: v1's captured GLiDE score fixture has
+  none, and any score reply that omits them fails `invalid`. The shipped commit
+  nudge asks yes/no and is unaffected.

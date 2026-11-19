@@ -3,15 +3,15 @@
 The four kinds of judge a step can name, and how a tier's models answer as
 one core `Judge`. Each tier's folder holds the API formats that tier uses.
 
-| Path          | Holds                                                                                                                                                                                                                 |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mod.rs`      | `Tier`: `facts`, `system-one`, `system-two`, `person`                                                                                                                                                                 |
-| `fallback.rs` | `Fallback`: a tier's models in order, built from `models.json` and the keys found. The next model answers only what the one before could not, and every model's work ends at the round's deadline                     |
-| `judge.rs`    | `NamedJudge`: a `Fallback`, a `Confidence`, the run's evidence and its deadline, as a core `Judge`                                                                                                                    |
-| `system_one/` | Fast classifiers. The `systemone` format: `mod.rs` holds `SystemOneEntry`, `client.rs` the HTTP client, whose call takes the shorter of the model's timeout and the time left, `wire.rs` the request and reply shapes |
-| `system_two/` | Reasoning models. The `openai` and `anthropic` formats arrive with slice 11; for now the folder holds only its README                                                                                                 |
-| `facts/`      | JavaScript facts, with no model. The `facts` format arrives with slice 4; for now the folder holds only its README                                                                                                    |
-| `person/`     | The user, through the harness. The `person` format arrives with slice 5; for now the folder holds only its README                                                                                                     |
+| Path          | Holds                                                                                                                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mod.rs`      | `Tier`: `facts`, `system-one`, `system-two`, `person`                                                                                                                                                               |
+| `fallback.rs` | `Fallback`: a tier's models in order, built from `models.json` and the keys found. The next model answers only what the one before could not, and every model's work ends at the round's deadline                   |
+| `judge.rs`    | `NamedJudge`: a `Fallback`, a `Confidence`, the run's evidence and its deadline, as a core `Judge`                                                                                                                  |
+| `system_one/` | Fast classifiers. The `systemone` format asks a yes/no question as `noul` and any other as `choice` or `score`, as the model's entry says: [system_one](system_one/README.md) has its files, its entry and its wire |
+| `system_two/` | Reasoning models. The `openai` and `anthropic` formats arrive with slice 11; for now the folder holds only its README                                                                                               |
+| `facts/`      | JavaScript facts, with no model. The `facts` format arrives with slice 4; for now the folder holds only its README                                                                                                  |
+| `person/`     | The user, through the harness. The `person` format arrives with slice 5; for now the folder holds only its README                                                                                                   |
 
 Until a tier has its own format, only a placeholder listed under that tier
 in `models.json` answers its steps. With none, they fail as unavailable.

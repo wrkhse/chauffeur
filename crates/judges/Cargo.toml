@@ -26,6 +26,10 @@ name = "systemone"
 required-features = ["systemone"]
 
 [[test]]
+name = "wire"
+required-features = ["systemone"]
+
+[[test]]
 name = "budget"
 required-features = ["systemone"]
 

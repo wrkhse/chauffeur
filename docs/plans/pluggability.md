@@ -561,15 +561,15 @@ full HTTP call, body included, by the shorter of its model timeout and the
 time left before the round's end. A model timeout allows fallback; exhausting
 the round's end fails as `deadline`.
 
-| Format        | Speaks                                                                                                                                                                                                                                |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `systemone`   | The `/v1/systemone` API that Jev, SubQ Snap and Fastino GLiDE share: its `noul` type for `["yes", "no"]`, and `choice`, which returns every outcome's probability, for the rest. GLiDE's entry sets its reading of `score` as a level |
-| `openai`      | OpenAI-compatible chat completions, with a JSON schema whose `enum` is the outcomes; covers local servers such as Ollama                                                                                                              |
-| `anthropic`   | Anthropic Messages with the same schema                                                                                                                                                                                               |
-| `facts`       | Runs a fact in `crates/facts`                                                                                                                                                                                                         |
-| `person`      | A question to the user through the adapter                                                                                                                                                                                            |
-| `student`     | A jev-distill student over its loopback server: the task's labels are the outcomes, and evidence blocks fill its `state`                                                                                                              |
-| `placeholder` | Recorded or fixed answers, standing in until the real model is configured                                                                                                                                                             |
+| Format        | Speaks                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `systemone`   | The `/v1/systemone` API that Jev, SubQ Snap and Fastino GLiDE share: its `noul` type for `["yes", "no"]`, and for other questions `choice` (the default) or `score`, whichever the entry's `ask` selects; for a noul answer p comes from the noul value; for choice and score it comes from the reply's probabilities, and the level is computed from p |
+| `openai`      | OpenAI-compatible chat completions, with a JSON schema whose `enum` is the outcomes; covers local servers such as Ollama                                                                                                                                                                                                                                |
+| `anthropic`   | Anthropic Messages with the same schema                                                                                                                                                                                                                                                                                                                 |
+| `facts`       | Runs a fact in `crates/facts`                                                                                                                                                                                                                                                                                                                           |
+| `person`      | A question to the user through the adapter                                                                                                                                                                                                                                                                                                              |
+| `student`     | A jev-distill student over its loopback server: the task's labels are the outcomes, and evidence blocks fill its `state`                                                                                                                                                                                                                                |
+| `placeholder` | Recorded or fixed answers, standing in until the real model is configured                                                                                                                                                                                                                                                                               |
 
 An outcome outside the question's list fails the step as `invalid`.
 `crates/judges` turns each tier's models into one core `Judge`, so core sees a
@@ -610,14 +610,19 @@ to use.
 - `tiers` lists models in fallback order. The next model answers only when
   one is unavailable, rate-limited or timed out, never because of what it
   answered. Escalating to another model or tier is the strategy's job.
+- The shipped `system-one` list is `jev` alone. `subq` and `glide` answer a
+  judge that names one as its `model`, or the tier once the user's `tiers`
+  lists them; a key by itself selects neither.
 - Models load only from shipped and user configuration, never from a
   project's `.chauffeur/`. A model entry is a network endpoint, so a cloned
   repository could otherwise send evidence wherever it chose.
 - A key is named, as an environment variable or a keychain entry, and is read
   only by `crates/judges`. It never reaches rule files, callers, plugins or
   audit.
-- A shipped model is used once its key is present; a System Two model also
-  needs the user to turn it on.
+- A shipped model is used once its key is present; `subq` and `glide` answer
+  only a judge that names one as its `model`, and join a tier's fallback order
+  only once the user's `tiers` lists them. A System Two model also needs the
+  user to turn it on.
 
 ### Placeholders
 

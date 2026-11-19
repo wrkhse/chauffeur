@@ -5,102 +5,20 @@
     reason = "the loopback server's helpers fail the test on a broken fixture"
 )]
 
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+mod support;
+
+use std::net::TcpListener;
+use std::time::Duration;
 
 use chauffeur_core::{Failure, Outcome, Panel, Plan, Step};
 use chauffeur_judges::{
     AnsweredBy, Confidence, Evidence, Fallback, Format, KeySource, Models, NamedJudge, Outcomes,
-    Question, Settled, SystemOne, SystemOneEntry, Tier,
+    Question, Settled, SystemOne, SystemOneAsk, SystemOneEntry, Tier,
 };
+use serde_json::json;
+use support::{serve, thousandths};
 
 const LIVE_RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.97}},"usage":{"input_tokens":397,"output_tokens":73}}"#;
-
-/// How long a server waits for its request, and on each read of it. A test
-/// whose request never comes fails when it joins the server, and cannot hang.
-const WAIT: Duration = Duration::from_secs(5);
-/// How long a server sleeps between looks for a connection.
-const POLL: Duration = Duration::from_millis(2);
-
-/// What the server received: the path, the authorization header and the body.
-struct Received {
-    path: String,
-    authorization: String,
-    body: serde_json::Value,
-}
-
-/// The one connection `listener` is sent, or a panic once `WAIT` has passed
-/// with none.
-fn accept(listener: &TcpListener) -> TcpStream {
-    listener.set_nonblocking(true).unwrap();
-    let started = Instant::now();
-
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // An accepted socket can inherit the listener's non-blocking mode.
-                stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(WAIT)).unwrap();
-                return stream;
-            }
-            Err(error) => {
-                assert_eq!(error.kind(), ErrorKind::WouldBlock, "accept: {error}");
-                assert!(started.elapsed() < WAIT, "no request within {WAIT:?}");
-                thread::sleep(POLL);
-            }
-        }
-    }
-}
-
-/// Serves one request with `status` and `body`, after `delay`.
-fn serve(
-    status: &'static str,
-    body: &'static str,
-    delay: Duration,
-) -> (String, JoinHandle<Received>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        let mut reader = BufReader::new(accept(&listener));
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-        let (mut authorization, mut length) = (String::new(), 0);
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line.trim().is_empty() {
-                break;
-            }
-            let lower = line.to_ascii_lowercase();
-            if let Some(value) = lower.strip_prefix("content-length:") {
-                length = value.trim().parse().unwrap();
-            }
-            if lower.starts_with("authorization:") {
-                line.trim().clone_into(&mut authorization);
-            }
-        }
-        let mut request = vec![0; length];
-        reader.read_exact(&mut request).unwrap();
-        thread::sleep(delay);
-        let _ = write!(
-            reader.get_mut(),
-            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        Received {
-            path: request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_owned(),
-            authorization,
-            body: serde_json::from_slice(&request).unwrap(),
-        }
-    });
-    (endpoint, server)
-}
 
 fn jev(endpoint: String, timeout_ms: u64) -> SystemOne {
     let entry = SystemOneEntry {
@@ -110,6 +28,8 @@ fn jev(endpoint: String, timeout_ms: u64) -> SystemOne {
             env: "TYPESAFE_API_KEY".into(),
         },
         timeout_ms: Some(timeout_ms),
+        store: None,
+        ask: SystemOneAsk::default(),
     };
     SystemOne::new(&entry, "test-key".into())
 }
@@ -220,6 +140,11 @@ fn provider_errors_become_failures_that_say_nothing_else() {
             r#"{"answers":{"q0":{"type":"choice","choice":"yes"}}}"#,
             Failure::Invalid,
         ),
+        (
+            "200 OK",
+            r#"{"answers":{"q0":{"type":"noul","noul":0.9,"confidence":1.1}}}"#,
+            Failure::Invalid,
+        ),
     ];
     for (status, body, expected) in cases {
         let (endpoint, server) = serve(status, body, Duration::ZERO);
@@ -261,13 +186,38 @@ fn a_reply_over_the_size_bound_is_invalid() {
 }
 
 #[test]
-fn a_question_that_is_not_yes_or_no_fails_as_invalid_without_a_call() {
-    for labels in [["act", "ignore"], ["yes", "maybe"]] {
+fn a_question_that_is_not_yes_or_no_is_asked_as_a_choice_and_answered() {
+    let cases = [
+        (
+            ["act", "ignore"],
+            r#"{"answers":{"q0":{"type":"choice","choice":"act","probabilities":{"act":0.8,"ignore":0.2}}}}"#,
+            vec![800, 200],
+        ),
+        (
+            ["yes", "maybe"],
+            r#"{"answers":{"q0":{"type":"choice","choice":"maybe","probabilities":{"maybe":0.7,"yes":0.3}}}}"#,
+            vec![300, 700],
+        ),
+    ];
+
+    for (labels, reply, expected) in cases {
+        let [first, second] = labels;
         let outcomes = Outcomes::new(labels).unwrap();
         let question = Question::new("What should the agent do?", outcomes, ["commit"]).unwrap();
+        let (endpoint, server) = serve("200 OK", reply, Duration::ZERO);
 
-        let replies = jev("http://127.0.0.1:9".into(), 1_000).answer_all(&[&question], &evidence());
+        let replies = jev(endpoint, 5_000).answer_all(&[&question], &evidence());
+        let received = server.join().unwrap();
 
-        assert_eq!(replies, [Err(Failure::Invalid)], "{labels:?}");
+        assert_eq!(
+            received.body["questions"],
+            json!({ "q0": {
+                "type": "choice",
+                "instructions": "What should the agent do?",
+                "criteria": { first: first, second: second }
+            } }),
+            "{labels:?}"
+        );
+        assert_eq!(thousandths(replies), [Ok(expected)], "{labels:?}");
     }
 }

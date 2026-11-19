@@ -56,6 +56,10 @@ impl Install {
 
     fn environment(&self, command: &mut Command) {
         command
+            // The user's keys are not the test's: without them the shipped
+            // models fall back to the stand-in the tests name.
+            .env_remove("TYPESAFE_API_KEY")
+            .env_remove("FASTINO_API_KEY")
             .env("CHAUFFEUR_SOCKET", self.socket())
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -382,7 +386,9 @@ fn audit_follow_brief_prints_each_new_run_on_one_line() {
         "starts with the local time: {line}"
     );
     assert!(
-        line.contains("conventional-commits  s1  nonconventional yes 0.94 stand-in (placeholder)"),
+        line.contains(
+            "conventional-commits  s1  nonconventional yes 0.94 stand-in (placeholder)  sure skipped"
+        ),
         "{line}"
     );
     assert!(line.ends_with("→ message.append"), "{line}");
