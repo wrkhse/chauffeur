@@ -4156,6 +4156,89 @@
       "schema": "accepts"
     },
     {
+      "name": "a blank need",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "jev",
+            "ask": "commit",
+            "after": [
+              " "
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "an object need on a blank step",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "jev",
+            "ask": "commit",
+            "after": [
+              {
+                "step": " ",
+                "when": [
+                  "yes"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
       "name": "a near need on a judge with no confidence",
       "params": {
         "protocol": 1,

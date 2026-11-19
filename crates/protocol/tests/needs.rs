@@ -930,6 +930,21 @@ fn an_inline_step_named_decision_is_invalid() {
 }
 
 #[test]
+fn a_blank_need_names_a_step_the_plan_lacks() {
+    let lacks = "rule `inline`: step `sure` waits on ` `, which the plan lacks";
+
+    for need in [json!(" "), json!({ "step": " ", "when": ["yes"] })] {
+        let params = inline(&[json!({ "id": "sure", "judge": "glide", "ask": ask(),
+            "after": [need] })]);
+
+        assert_eq!(
+            Navigate::parse(&params).unwrap_err(),
+            Rejection::Invalid(lacks.to_owned())
+        );
+    }
+}
+
+#[test]
 fn an_inline_need_error_is_invalid() {
     let params = inline(&[json!({ "id": "sure", "judge": "glide", "ask": ask(),
         "after": [{ "step": "fast", "near": 2 }] })]);

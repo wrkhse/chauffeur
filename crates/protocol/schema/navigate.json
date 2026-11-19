@@ -171,6 +171,7 @@
         {
           "type": "string",
           "maxLength": 16384,
+          "pattern": "\\S",
           "description": "An earlier step's ID: it finished, settled, failed or skipped."
         },
         {
@@ -183,7 +184,8 @@
           "properties": {
             "step": {
               "type": "string",
-              "maxLength": 16384
+              "maxLength": 16384,
+              "pattern": "\\S"
             },
             "near": {
               "$ref": "#/$defs/probability",
