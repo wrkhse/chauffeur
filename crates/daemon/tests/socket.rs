@@ -27,14 +27,17 @@ fn paths(name: &str, models: &str) -> Paths {
     let root = std::env::temp_dir().join(format!("chauffeur-daemon-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("config/rules")).unwrap();
-    fs::write(root.join("config/models.json"), models).unwrap();
+    let user = root.join("config/models.json");
+    fs::write(&user, models).unwrap();
     Paths {
         name: "chauffeur-test".into(),
         socket: root.join("run/daemon.sock"),
         config: root.join("config"),
         distribution: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../distribution"),
         state: root.join("state"),
-        models: None,
+        // The user's models in place of the shipped ones, so a test never
+        // asks the real Jev or GLiDE with a key set on the machine.
+        models: Some(user),
     }
 }
 
@@ -287,6 +290,12 @@ fn a_bad_commit_gets_the_nudge_once_per_cooldown_and_the_log_shows_why() {
     assert_eq!(first["answer"]["outcome"], "yes");
     assert_eq!(first["answer"]["model"], "stand-in");
     assert_eq!(first["answer"]["placeholder"], true);
+    assert_eq!(
+        runs[0]["steps"][1],
+        json!({ "step": "sure", "skipped": true }),
+        "a confident yes skips the sure check: {}",
+        runs[0]
+    );
     assert_eq!(runs[1]["cooldown"], true);
     assert!(
         runs[1].get("steps").is_none(),
@@ -337,6 +346,7 @@ fn with_no_model_to_ask_nothing_is_sent_and_the_log_says_unavailable() {
     );
 
     assert_eq!(runs(&paths)[0]["steps"][0]["failed"], "unavailable");
+    assert_eq!(runs(&paths)[0]["steps"][1]["failed"], "unavailable");
 }
 
 #[test]
@@ -383,7 +393,7 @@ fn files_beside_the_shipped_models_that_are_not_json_are_not_read() {
     let shipped = paths.distribution.clone();
     let distribution = paths.config.with_file_name("distribution");
     for file in [
-        "models/jev.json",
+        "models/subq.json",
         "rules/conventional-commits.json",
         "safety/redaction.json",
     ] {
@@ -397,6 +407,8 @@ fn files_beside_the_shipped_models_that_are_not_json_are_not_read() {
     )
     .unwrap();
     paths.distribution = distribution;
+    // Shipped models are read here, not replaced by the user's.
+    paths.models = None;
     start(&paths);
 
     assert_eq!(

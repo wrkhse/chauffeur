@@ -144,6 +144,7 @@ async function run(binary, name, root, expected) {
   // The installed binary must find its shipped content by itself.
   delete env.CHAUFFEUR_DISTRIBUTION
   delete env.TYPESAFE_API_KEY
+  delete env.FASTINO_API_KEY
 
   let output = ""
   const daemon = spawn(binary, ["daemon", "run"], { env, stdio: ["ignore", "pipe", "pipe"] })
