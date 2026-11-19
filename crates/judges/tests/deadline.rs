@@ -19,6 +19,16 @@ use chauffeur_judges::{
 
 type Replies = Vec<Result<Probabilities, Failure>>;
 
+/// How far off a deadline is when a test waits for it to pass. The deadline
+/// must still be open when the tier first looks at it, a few instructions
+/// after it is set, so this is the stall a loaded runner may put between the
+/// two. The test then sleeps through it, so it is also what the test costs.
+const WINDOW: Duration = Duration::from_secs(5);
+/// How far off a deadline is when no test waits for it. It only has to stay
+/// open through checks made moments after it is set, and nothing sleeps until
+/// it, so an hour costs nothing and no stall uses it up.
+const AMPLE: Duration = Duration::from_secs(3_600);
+
 /// A format with only the unbounded call: it gives `replies` and counts its
 /// calls.
 struct Unbounded {
@@ -33,12 +43,23 @@ impl Format for Unbounded {
     }
 }
 
-/// A format that records the deadline of each call, waits for it to pass
-/// when it `overruns`, then gives `replies`.
+/// A format that records the deadline of each call, sleeps until it has seen
+/// it pass when it `overruns`, then gives `replies`. The clock never goes
+/// back, so every later look at that deadline finds it passed too, with no
+/// margin to allow for.
 struct Recording {
     replies: Replies,
     overruns: bool,
     deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
+}
+
+impl Recording {
+    /// The time this call still sleeps: what is left before `deadline`, when
+    /// the format overruns and any is left.
+    fn left(&self, deadline: Option<Instant>) -> Option<Duration> {
+        let left = deadline?.saturating_duration_since(Instant::now());
+        (self.overruns && !left.is_zero()).then_some(left)
+    }
 }
 
 impl Format for Recording {
@@ -54,8 +75,8 @@ impl Format for Recording {
     ) -> Replies {
         self.deadlines.lock().unwrap().push(deadline);
 
-        while self.overruns && deadline.is_some_and(|end| Instant::now() < end) {
-            thread::sleep(Duration::from_millis(1));
+        while let Some(left) = self.left(deadline) {
+            thread::sleep(left);
         }
 
         self.replies.clone()
@@ -114,14 +135,13 @@ fn by(model: &str) -> AnsweredBy {
     }
 }
 
-/// A deadline `milliseconds` from now.
-fn within(milliseconds: u64) -> Instant {
-    Instant::now()
-        .checked_add(Duration::from_millis(milliseconds))
-        .unwrap()
+/// A deadline `wait` from now.
+fn after(wait: Duration) -> Instant {
+    Instant::now().checked_add(wait).unwrap()
 }
 
-/// A deadline that has passed.
+/// A deadline that has passed: the clock never goes back, so every later look
+/// at it finds the moment reached, whatever the runner does.
 fn passed() -> Instant {
     Instant::now()
 }
@@ -140,7 +160,7 @@ fn the_default_refuses_a_round_past_its_deadline_and_otherwise_asks_as_before() 
     assert_eq!(late, [Err(Failure::Deadline)]);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 
-    let in_time = format.answer_all_until(&[&question], &evidence, Some(within(60_000)));
+    let in_time = format.answer_all_until(&[&question], &evidence, Some(after(AMPLE)));
     let no_deadline = format.answer_all_until(&[&question], &evidence, None);
     let unbounded = format.answer_all(&[&question], &evidence);
 
@@ -160,7 +180,7 @@ fn a_placeholder_fails_a_round_past_its_deadline_and_answers_one_within_it() {
     let placeholder = Placeholder::load(&entry).unwrap();
 
     let late = placeholder.answer_all_until(&[&question], &evidence, Some(passed()));
-    let in_time = placeholder.answer_all_until(&[&question], &evidence, Some(within(60_000)));
+    let in_time = placeholder.answer_all_until(&[&question], &evidence, Some(after(AMPLE)));
     let unbounded = placeholder.answer_all(&[&question], &evidence);
 
     assert_eq!(late, [Err(Failure::Deadline)]);
@@ -203,7 +223,7 @@ fn the_deadline_passing_fails_only_the_questions_still_open() {
     let (first, deadlines) = recording("first", overrun, true);
     let (second, calls) = unbounded("second", vec![Ok(p(0.1)), Ok(p(0.1))]);
     let fallback = Fallback::new(vec![first, second]);
-    let deadline = Some(within(500));
+    let deadline = Some(after(WINDOW));
 
     let replies = fallback.answer_all_until(&[&question; 4], &evidence, deadline);
 
@@ -226,7 +246,7 @@ fn every_model_is_given_the_same_deadline_and_the_unbounded_call_gives_none() {
     let (first, first_deadlines) = recording("first", vec![Err(Failure::RateLimited)], false);
     let (second, second_deadlines) = recording("second", vec![Ok(p(0.9))], false);
     let fallback = Fallback::new(vec![first, second]);
-    let deadline = Some(within(60_000));
+    let deadline = Some(after(AMPLE));
 
     let bounded = fallback.answer_all_until(&[&question], &evidence, deadline);
     let unbounded = fallback.answer_all(&[&question], &evidence);
@@ -244,7 +264,7 @@ fn a_model_that_reports_the_deadline_is_not_followed_by_the_next() {
     let (second, calls) = unbounded("second", vec![Ok(p(0.1))]);
     let fallback = Fallback::new(vec![first, second]);
 
-    let replies = fallback.answer_all_until(&[&question], &evidence, Some(within(60_000)));
+    let replies = fallback.answer_all_until(&[&question], &evidence, Some(after(AMPLE)));
 
     assert_eq!(replies, [Err(Failure::Deadline)]);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -256,7 +276,7 @@ fn a_reply_that_is_too_short_leaves_the_rest_to_the_next_model() {
     let (first, _) = unbounded("first", vec![Ok(p(0.9))]);
     let (second, _) = unbounded("second", vec![Ok(p(0.1))]);
     let (alone, _) = unbounded("alone", vec![Ok(p(0.9))]);
-    let deadline = Some(within(60_000));
+    let deadline = Some(after(AMPLE));
 
     let both = Fallback::new(vec![first, second]).answer_all_until(
         &[&question, &question],
@@ -281,7 +301,7 @@ fn a_named_judge_gives_its_models_its_deadline_and_none_by_default() {
     let confidence = Confidence::Likeliest;
     let judge = || NamedJudge::new(&fallback, &confidence, &evidence);
     let answered = Outcome::Value(Answer::settle(&question, p(0.9), &confidence, by("only")));
-    let deadline = Some(within(60_000));
+    let deadline = Some(after(AMPLE));
 
     let unbounded = judge().judge_all(&[&question]);
     let in_time = judge().with_deadline(deadline).judge_all(&[&question]);

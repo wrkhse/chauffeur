@@ -20,10 +20,17 @@ use chauffeur_judges::{
 
 const LIVE_RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.97}},"usage":{"input_tokens":397,"output_tokens":73}}"#;
 
-/// A model timeout no call here may reach: a call that lasts this long was
-/// not ended by its deadline.
+/// The limit that ends a call, where a test has one end it: the deadline in
+/// some tests, the model's timeout in others. The request has to be sent
+/// before it runs out, or the server reads none, so this is the stall a
+/// loaded runner may put before the send.
+const SHORT_MS: u64 = 2_000;
+/// The other limit in those tests, five times `SHORT_MS`: a call that lasts
+/// this long was not ended by the short one.
 const LONG_MS: u64 = 10_000;
-/// Well past every short deadline here, and well short of `LONG_MS`.
+/// A bound on a call the short limit ends: 3 s past `SHORT_MS` for a runner
+/// late to notice, and half of `LONG_MS`, which a call that ignored the short
+/// limit would last.
 const SOON: Duration = Duration::from_secs(5);
 /// How long a server lives when its test never stops it.
 const LIFETIME: Duration = Duration::from_secs(20);
@@ -251,7 +258,8 @@ fn the_models_timeout_ends_a_call_with_time_left_as_a_timeout() {
     let server = Server::start(Reply::Nothing);
     let deadline = Some(within(LONG_MS));
 
-    let replies = jev(&server, 150).answer_all_until(&[&commit_question()], &evidence(), deadline);
+    let replies =
+        jev(&server, SHORT_MS).answer_all_until(&[&commit_question()], &evidence(), deadline);
 
     assert_eq!(replies, [Err(Failure::Timeout)]);
     assert_eq!(server.requests(), 1);
@@ -261,7 +269,7 @@ fn the_models_timeout_ends_a_call_with_time_left_as_a_timeout() {
 fn the_deadline_ends_a_call_before_the_models_timeout_as_a_deadline() {
     let server = Server::start(Reply::Nothing);
     let started = Instant::now();
-    let deadline = Some(within(400));
+    let deadline = Some(within(SHORT_MS));
 
     let replies =
         jev(&server, LONG_MS).answer_all_until(&[&commit_question()], &evidence(), deadline);
@@ -276,7 +284,7 @@ fn the_deadline_ends_a_call_before_the_models_timeout_as_a_deadline() {
 fn a_body_that_stalls_ends_at_the_deadline_as_a_deadline() {
     let server = Server::start(Reply::HalfBody);
     let started = Instant::now();
-    let deadline = Some(within(400));
+    let deadline = Some(within(SHORT_MS));
 
     let replies =
         jev(&server, LONG_MS).answer_all_until(&[&commit_question()], &evidence(), deadline);
@@ -296,8 +304,9 @@ fn a_body_that_stalls_ends_at_the_models_timeout_as_a_timeout() {
     let (question, evidence) = (commit_question(), evidence());
     let deadline = Some(within(LONG_MS));
 
-    let with_time_left = jev(&bounded, 150).answer_all_until(&[&question], &evidence, deadline);
-    let with_no_deadline = jev(&unbounded, 150).answer_all(&[&question], &evidence);
+    let with_time_left =
+        jev(&bounded, SHORT_MS).answer_all_until(&[&question], &evidence, deadline);
+    let with_no_deadline = jev(&unbounded, SHORT_MS).answer_all(&[&question], &evidence);
 
     assert_eq!(with_time_left, [Err(Failure::Timeout)]);
     assert_eq!(with_no_deadline, [Err(Failure::Timeout)]);
@@ -341,7 +350,7 @@ fn a_model_that_times_out_with_time_left_falls_back_under_the_same_deadline() {
         Server::start(Reply::Nothing),
         Server::start(Reply::Whole("200 OK", LIVE_RESPONSE)),
     );
-    let fallback = tier(jev(&first, 150), jev(&second, 5_000));
+    let fallback = tier(jev(&first, SHORT_MS), jev(&second, 5_000));
     let deadline = Some(within(LONG_MS));
 
     let replies = fallback.answer_all_until(&[&commit_question()], &evidence(), deadline);
@@ -362,7 +371,7 @@ fn a_model_ended_by_the_deadline_is_not_followed_by_the_next() {
     );
     let fallback = tier(jev(&first, LONG_MS), jev(&second, 5_000));
     let started = Instant::now();
-    let deadline = Some(within(400));
+    let deadline = Some(within(SHORT_MS));
 
     let replies = fallback.answer_all_until(&[&commit_question()], &evidence(), deadline);
     let took = started.elapsed();
@@ -376,7 +385,10 @@ fn a_model_ended_by_the_deadline_is_not_followed_by_the_next() {
 fn the_next_model_has_only_the_time_the_first_left() {
     // The first model's timeout uses 1000 ms of the 2000. The second replies
     // 1500 ms after it is asked: in time for 2000 ms counted afresh, too late
-    // for the 1000 ms that are left.
+    // for the 1000 ms that are left. No timer ends early, so that reply is
+    // at least 500 ms past the deadline however the runner stalls, and the
+    // second model is still asked while the stalls before it total under
+    // 1000 ms.
     let (first, second) = (
         Server::start(Reply::Nothing),
         Server::start(Reply::Late(Duration::from_millis(1_500))),
