@@ -1,4 +1,4 @@
-use chauffeur_core::{Outcome, Run};
+use chauffeur_core::{Event, Outcome, Run};
 use chauffeur_judges::Answer;
 use chauffeur_runtime::Ran;
 use serde_json::{Map, Value, json};
@@ -8,10 +8,7 @@ use serde_json::{Map, Value, json};
 pub(super) fn ended(entry: &mut Map<String, Value>, ran: Ran) -> Option<Run<Answer>> {
     match ran {
         Ran::Settled(run) => {
-            entry.insert(
-                "steps".into(),
-                steps(&run.verdict.iter().collect::<Vec<_>>()),
-            );
+            entry.insert("steps".into(), steps(&run));
             Some(run)
         }
         Ran::Refused(reason) => {
@@ -58,15 +55,36 @@ pub(super) const fn unsettled(ran: &Ran) -> Option<&'static str> {
     }
 }
 
-/// Each step's answer or failure, for the log.
-pub(super) fn steps(verdict: &[(&str, &Outcome<Answer>)]) -> Value {
-    let steps = verdict
+/// Each step of a settled run, in plan order, for the log: its answer, its
+/// failure, or `"skipped": true` for a step its strategy did not need. The
+/// plan order is the run's `Started` event; a step neither settled nor
+/// skipped is left out.
+fn steps(run: &Run<Answer>) -> Value {
+    let order = run
+        .events
         .iter()
-        .map(|(step, outcome)| match outcome {
-            Outcome::Value(answer) => json!({ "step": step, "answer": answer_json(answer) }),
-            Outcome::Failed(failure) => json!({ "step": step, "failed": failure.name() }),
+        .find_map(|event| match event {
+            Event::Started { steps } => Some(steps.as_slice()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let skipped: Vec<&str> = run.verdict.skipped().collect();
+
+    let steps = order
+        .iter()
+        .filter_map(|step| match run.verdict.get(step) {
+            Some(Outcome::Value(answer)) => {
+                Some(json!({ "step": step, "answer": answer_json(answer) }))
+            }
+            Some(Outcome::Failed(failure)) => {
+                Some(json!({ "step": step, "failed": failure.name() }))
+            }
+            None => skipped
+                .contains(&step.as_str())
+                .then(|| json!({ "step": step, "skipped": true })),
         })
         .collect();
+
     Value::Array(steps)
 }
 
@@ -86,6 +104,8 @@ fn answer_json(answer: &Answer) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use chauffeur_core::{Failure, Need, Outcome, Panel, Plan, Step, When};
+    use chauffeur_judges::{Answer, AnsweredBy, Confidence, Probabilities, Question};
     use chauffeur_runtime::Ran;
     use serde_json::{Map, Value, json};
 
@@ -94,9 +114,7 @@ mod tests {
     /// Each way a run can end without settling writes its own word into its
     /// log entry, and gives no run back: a refusal's reason, the pool's own
     /// words for a busy pool and a stopped worker, and a flag for the
-    /// deadline and the caller's cancellation. A settled run writes its steps
-    /// and gives its run back, which needs a verdict only core builds; the
-    /// socket's nudge test covers that line.
+    /// deadline and the caller's cancellation.
     #[test]
     fn each_unsettled_end_writes_its_own_word_and_gives_no_run_back() {
         let cases: [(Ran, Value, Option<&'static str>); 5] = [
@@ -132,5 +150,62 @@ mod tests {
             assert!(run.is_none(), "no run comes back for {logged}");
             assert_eq!(Value::Object(entry), logged);
         }
+    }
+
+    /// A settled run gives its run back and logs every step in plan order:
+    /// an answer, a failure, and `"skipped": true` for `sure`, which runs
+    /// only when `fast` fails. The step's flag is a bool, apart from a
+    /// run's `"skipped": "deadline"`.
+    #[test]
+    fn a_settled_run_logs_each_step_in_plan_order_with_its_skipped_steps() {
+        let question = Question::noul("Is this message conventional?", ["diff"]).unwrap();
+        let failed = Need::outcome("fast", None, Some(vec![When::Failed]));
+        let plan = Plan::new([
+            Step::new("fast", "jev", question.clone()),
+            Step::new("sure", "glide", question.clone()).after([failed]),
+            Step::new("last", "tail", question).after([Need::settled("fast")]),
+        ])
+        .unwrap();
+
+        let yes = |question: &Question| {
+            let p =
+                Probabilities::read(question.outcomes(), [("yes", 0.94), ("no", 0.06)]).unwrap();
+            let by = AnsweredBy {
+                model: "jev".into(),
+                placeholder: false,
+            };
+
+            Outcome::Value(Answer::settle(question, p, &Confidence::Likeliest, by))
+        };
+        let timeout = |_: &Question| Outcome::Failed(Failure::Timeout);
+        let panel = Panel::new()
+            .with("jev", &yes)
+            .with("glide", &yes)
+            .with("tail", &timeout);
+        let run = plan.run(&panel).unwrap();
+
+        let mut entry = Map::new();
+        let returned = ended(&mut entry, Ran::Settled(run.clone()));
+
+        assert_eq!(returned, Some(run));
+        assert_eq!(
+            Value::Object(entry),
+            json!({
+                "steps": [
+                    {
+                        "step": "fast",
+                        "answer": {
+                            "outcome": "yes",
+                            "p": { "yes": 0.94, "no": 0.06 },
+                            "level": 0.06,
+                            "model": "jev",
+                            "placeholder": false,
+                        },
+                    },
+                    { "step": "sure", "skipped": true },
+                    { "step": "last", "failed": "timeout" },
+                ],
+            })
+        );
     }
 }
