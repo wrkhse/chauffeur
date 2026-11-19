@@ -4,43 +4,33 @@ One binary runs the daemon and talks to it. Its name is the installation's:
 `chauffeur`, or `chauffeur-next` for a release candidate, which keeps its own
 socket, configuration and audit log beside an installed `chauffeur`.
 
-| Command                                         | Does                                                                      | Slice |
-| ----------------------------------------------- | ------------------------------------------------------------------------- | ----- |
-| [`daemon run`, `daemon status`](daemon.md)      | Runs the daemon; reports its version, loaded rules and refused rule files | 1     |
-| [`emit`](emit.md)                               | Sends one harness event and prints what the rules returned                | 1     |
-| [`audit`](audit.md)                             | Prints the runs in the audit log, and follows it                          | 1     |
-| [`version`](version.md)                         | Prints the installation's name and version                                | 1     |
-| [`navigate`](navigate.md)                       | Sends one request as a caller does and prints the messages back           | 2     |
-| [`strategy list`, `strategy show`](strategy.md) | Lists the loaded rules' strategies; draws one as a tree                   | 3     |
+| Command                                    | Does                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------- |
+| [`daemon run`, `daemon status`](daemon.md) | Runs the daemon; reports its version, loaded rules and refused rule files |
+| [`emit`](emit.md)                          | Sends one harness event and prints what the rules returned                |
+| [`audit`](audit.md)                        | Prints the runs in the audit log, and follows it                          |
+| [`navigate`](navigate.md)                  | Sends one request as a caller does and prints the messages back           |
+| [`version`](#version)                      | Prints the installation's name and version                                |
 
-## Commands from plugins
+## `version`
 
-A plugin adds its own commands under its ID, so they come and go with the
-plugin; [Writing a plugin](../plugins/writing.md#commands) shows how.
-`chauffeur --help` lists them while the daemon runs, and each needs the
-daemon, which starts the plugin if it is stopped.
+Prints the installation's name and version, from the binary itself, with no
+daemon needed. The name is the binary's file name.
 
-| Command                                      | Does                                                                         | Plugin                                                      |
-| -------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `chauffeur guard check`, `learned`, `forget` | Tries a command against the guard; lists and prunes what it learned to block | [`guard`](../plugins/guard.md#commands)                     |
-| `chauffeur skills list`, `show`, `approve`   | The harness's skills, their sources and screens; offers a withheld one       | [`skills`](../plugins/skills.md#commands)                   |
-| `chauffeur tools list`, `reveal`             | A session's tool groups, shown or hidden; reveals one                        | [`tools`](../plugins/tools.md#commands)                     |
-| `chauffeur ask-chauffeur try`                | What `ask_chauffeur` would grant for a need, without granting it             | [`ask-chauffeur`](../plugins/ask-chauffeur.md#commands)     |
-| `chauffeur context-renewal status`           | Each provider's summary model, and providers passed over                     | [`context-renewal`](../plugins/context-renewal.md#commands) |
-| `chauffeur warming status`                   | Sessions being warmed, and keep-alives left                                  | [`warming`](../plugins/warming.md#commands)                 |
-| `chauffeur model-router status`, `forget`    | Sessions moved off a model, providers at a limit; clears one                 | [`model-router`](../plugins/model-router.md#commands)       |
-| `chauffeur rulebooks list`                   | The books, and the sessions running them                                     | [`rulebooks`](../plugins/rulebooks.md#commands)             |
-| `chauffeur sourcefed monitors`               | What sourcefed follows for a session                                         | [sourcefed](../integrations/sourcefed.md#the-plugin)        |
+```sh
+chauffeur-next version   # chauffeur-next 1.0.0-rc.5
+```
 
 ## Where things are
 
-| What               | Where, for the name `chauffeur`                                                   | Set with                                                 |
-| ------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| The socket         | `$XDG_RUNTIME_DIR/chauffeur/daemon.sock`, or under `$TMPDIR`                      | `CHAUFFEUR_SOCKET`                                       |
-| Your configuration | `~/.config/chauffeur/`: `models.json`, `rules/`, `redaction.json`, `plugins.json` | `XDG_CONFIG_HOME`                                        |
-| Shipped content    | `share/chauffeur/` beside the binary's folder                                     | `CHAUFFEUR_DISTRIBUTION`, or `daemon run --distribution` |
-| The audit log      | `~/.local/state/chauffeur/audit.jsonl`                                            | `XDG_STATE_HOME`                                         |
-| Model keys         | The environment the daemon runs in, such as `TYPESAFE_API_KEY` for Jev            | Each model's `key` in `models.json`                      |
+| What               | Where, for the name `chauffeur`                                                    | Set with                                                 |
+| ------------------ | ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| The socket         | `$XDG_RUNTIME_DIR/chauffeur/daemon.sock`, or under `$TMPDIR`                       | `CHAUFFEUR_SOCKET`                                       |
+| Your configuration | `~/.config/chauffeur/`: `models.json`, `projects.json`, `rules/`, `redaction.json` | `XDG_CONFIG_HOME`                                        |
+| Shipped content    | `share/chauffeur/` beside the binary's folder: `models/`, `rules/`, `safety/`      | `CHAUFFEUR_DISTRIBUTION`, or `daemon run --distribution` |
+| OpenCode adapter   | `share/chauffeur/opencode/`, the folder OpenCode's `plugins` names                 | Where the release is unpacked                            |
+| The audit log      | `~/.local/state/chauffeur/audit.jsonl`                                             | `XDG_STATE_HOME`                                         |
+| Model keys         | The environment the daemon runs in, such as `TYPESAFE_API_KEY` for Jev             | Each model's `key` in `models.json`                      |
 
 Commands exit 0 on success and normally exit 1 on failure. The
 [`navigate`](navigate.md) command also uses exit 2 for daemon and stdout

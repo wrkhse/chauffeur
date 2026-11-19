@@ -1,472 +1,173 @@
 # Chauffeur
 
-Chauffeur judges what your coding agent is doing and steers it. It watches
-the harness's events, asks fast and careful judges the right questions, and
-acts through the harness: attaching skills, compacting a cold session,
-stopping a destructive command or holding back noise.
+Chauffeur watches what your coding agent does and steers it while it works.
+When the agent commits with a message such as `fixed stuff`, Chauffeur asks a
+fast model whether the message breaks Conventional Commits, and on a confident
+yes it asks the agent to amend the commit in the same conversation.
 
-## How it works
-
-```mermaid
-flowchart LR
-    Harness["Harness<br/>OpenCode, Pi, Claude Code, Codex"] -- "hooks" --> Adapter["Adapter<br/>standard events"]
-    Adapter -- "events" --> Daemon["Chauffeur daemon"]
-    Daemon --> Rules["Rule files<br/>data"]
-    Daemon --> Plugins["Plugins<br/>TypeScript behaviors"]
-    Rules -- "strategies" --> Engine["Engine<br/>judges, facts, models"]
-    Plugins -- "ask, strategy" --> Engine
-    Plugins -- "actions" --> Adapter
-    Rules -- "actions" --> Adapter
-    Adapter -- "compact, append, block" --> Harness
-```
-
-| Part       | Job                                                                                 |
-| ---------- | ----------------------------------------------------------------------------------- |
-| Adapter    | Translates one harness: its hooks become standard events, and actions go back to it |
-| Daemon     | The event bus: loads rules, starts plugins, routes events and actions               |
-| Rule files | Behavior as data: on this event, ask this, then do that                             |
-| Plugins    | Behavior as TypeScript, for anything a rule file can't express                      |
-| Engine     | Answers questions: runs strategies over judges, facts and models                    |
-| Callers    | Any other program, asking Chauffeur directly through `navigate`                     |
-
-### One event, end to end
-
-A user sends a message in OpenCode, and the skills plugin attaches the skills
-the request needs:
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant O as OpenCode
-    participant A as OpenCode adapter
-    participant D as Chauffeur daemon
-    participant P as skills plugin
-    U->>O: sends a message
-    O->>A: prompt hook fires
-    A->>D: event prompt.sent
-    D->>P: prompt.sent, starting the plugin if needed
-    P->>D: ask its strategy pick-skills
-    D-->>P: review-pr, rust-style
-    P->>D: edit: append skills review-pr, rust-style
-    D->>A: append skills
-    A->>O: skills attached to the prompt
-```
-
-## Features
-
-### Judges
-
-- Four tiers answer the same questions: facts (code), System One (fast
-  classifiers), System Two (reasoning models) and a person.
-- A named judge picks a tier, optionally a model, and how sure it must be.
-- Below its `confidence`, a judge's answer is `unsure`.
-
-```jsonc
-"judges": {
-  "quick":    { "tier": "system-one", "model": "jev", "confidence": 0.7 },
-  "guard":    { "tier": "system-one", "confidence": { "yes": 0.6, "no": 0.95 } },
-  "reasoner": { "tier": "system-two", "confidence": 0.6 }
-}
-```
-
-```text
-quick on "Does this commit message break Conventional Commits?"
-  "fixed stuff"       yes 0.94 → yes
-  "Update parser.rs"  yes 0.58 → unsure
-```
-
-### Questions and results
-
-- `noul` (yes or no), `choice` and `score` build questions; `question()`
-  builds your own kinds.
-- A result is an answer, with its outcome, every outcome's probability and a
-  level on the scale, or a failure with its reason. A failure never reads as
-  `no`.
-- Outcomes are typed from the question that produced them.
-
-```ts
-import { ask, choice, judge, score } from "@fdcn/chauffeur/judge"
-
-const quick = judge({ tier: "system-one", confidence: 0.7 })
-
-const next = await ask(
-  choice(
-    ["act", "ignore", "ask-user"],
-    "What should the agent do with this message?"
-  ),
-  { judge: quick, evidence }
-)
-
-if (next.ok) {
-  next.outcome // "act" | "ignore" | "ask-user" | "unsure"
-} else {
-  next.failed // "timeout" | "unavailable" | …
-}
-
-const effort = await ask(
-  score(["low", "medium", "high"], "How hard is this request?"),
-  { judge: quick, evidence }
-)
-
-if (effort.ok && effort.level >= 1) {
-  /* medium or higher */
-}
-```
-
-### Models
-
-- `models.json` registers models by API format: `systemone` (Jev, SubQ,
-  GLiDE), `openai` (including local servers such as Ollama) and `anthropic`.
-- Each tier lists its models in fallback order; a missing model falls back
-  and the run says so.
-- `placeholder` models stand in with recorded or fixed answers, for tests and
-  tuning.
-- Keys stay inside the engine; rules, plugins and logs never see them.
-
-```jsonc
-// ~/.config/chauffeur/models.json
-{
-  "models": {
-    "local-qwen": {
-      "format": "openai",
-      "endpoint": "http://127.0.0.1:11434/v1",
-      "model": "qwen3:4b"
-    },
-    "reviewer": {
-      "format": "anthropic",
-      "model": "claude-sonnet-5-5",
-      "key": { "env": "ANTHROPIC_API_KEY" }
-    }
-  },
-  "tiers": { "system-one": ["jev", "local-qwen"], "system-two": ["reviewer"] }
-}
-```
-
-### Facts
-
-- JavaScript modules that answer without a model, run in a QuickJS sandbox
-  with memory and time limits.
-- Shipped facts: `match`, `select`, `bm25` and `embedding`.
-- Your own facts in `~/.config/chauffeur/facts/` can read files, SQLite and
-  local services.
-
-```js
-// ~/.config/chauffeur/facts/notes.js
-import { query } from "chauffeur:sqlite"
-
-export function bm25({ evidence, args }) {
-  const rows = query(
-    "~/notes/index.db",
-    "SELECT id FROM notes WHERE notes MATCH ? ORDER BY bm25(notes) LIMIT ?",
-    [evidence.message, args.top ?? 10]
-  )
-
-  return { ranked: rows.map((row) => row.id) }
-}
-```
-
-```jsonc
-{ "id": "related", "judge": "facts", "ask": { "notes.bm25": { "top": 10 } } }
-```
-
-### Strategies
-
-- A strategy is a list of steps; each step asks one judge one question.
-- `after` makes a step wait for earlier steps and run only when their
-  outcomes match.
-- `for_each` asks about many candidates in one round, and `select` ranks,
-  filters or votes on the answers.
-- Every strategy has a known maximum of rounds and model calls, and is proven
-  to finish.
-
-Escalate from Jev to GLiDE to a reasoning model, only as far as needed:
-
-```jsonc
-"strategy": [
-  { "id": "fast",   "judge": "quick",    "ask": "needs-agent" },
-  { "id": "slow",   "judge": "careful",  "ask": "needs-agent",
-    "after": [{ "step": "fast", "when": ["unsure", "failed"] }] },
-  { "id": "review", "judge": "reasoner", "ask": "needs-agent",
-    "after": [{ "step": "slow", "when": ["unsure", "failed"] }] }
-]
-```
-
-### Rule files
-
-- JSON that names an event, its judges, its questions, its strategy and what
-  to do with the outcome. No code needed.
-- Rules come from Chauffeur, integrations, you and your projects.
-
-```jsonc
-// .chauffeur/rules/conventional-commits.json
-{
-  "on": "tool.after",
-  "when": { "tools": ["shell"], "input": { "contains": "git commit" } },
-  "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
-  "strategy": [
-    {
-      "id": "nonconventional",
-      "judge": "quick",
-      "ask": {
-        "outcomes": ["yes", "no"],
-        "evidence": ["tool_call"],
-        "instructions": "Does this call create a git commit whose message does not follow Conventional Commits?"
-      }
-    }
-  ],
-  "then": [
-    {
-      "if": { "nonconventional": "yes" },
-      "message.append": {
-        "label": "commit message isn't conventional; asking the agent to amend it",
-        "parts": [
-          { "text": "Chauffeur, which the user set up to check commits: …" }
-        ],
-        "delivery": "now"
-      }
-    }
-  ]
-}
-```
-
-### Strategy viewer and playground
-
-- `chauffeur strategy show` draws a rule's strategy as a tree, with the models
-  it will use and its maximum rounds and calls.
-- The playground steps through strategies in the browser.
-
-```text
-$ chauffeur strategy show recall
-recall                                         on recall
-├─ round 1  helps × candidates  system-one → jev
-└─ round 2  best               facts select   top 3, min 0.7, from helps
-then  attach best
-at most 2 rounds · 1 model call · 31 candidates at most
-```
-
-### `navigate`
-
-- Any program can send an event with its context and get back intents.
-- Available from TypeScript, the `chauffeur navigate` CLI and Rust, all over
-  JSON-RPC 2.0.
-
-```ts
-import { navigate } from "@fdcn/chauffeur/client"
-
-const { intents } = await navigate(
-  {
-    on: "opencode-history.recall",
-    evidence: { message },
-    candidates: { p1: "…", p4: "…" }
-  },
-  { signal: AbortSignal.timeout(1_500) }
-)
-// [{ rule: "opencode-history/recall", attach: ["p4"] }]
-```
-
-### Adapters
-
-- One per harness: its hooks become standard events such as `prompt.sent`
-  and `tool.before`, and actions are carried out after checking they are
-  still current.
-- Available for OpenCode, Pi and Claude Code, which run the adapter inside
-  the harness, and Codex, which runs `chauffeur hook codex` at each hook.
-
-```json
-// Codex: hooks/hooks.json in the Chauffeur plugin
-{
-  "hooks": {
-    "PreToolUse": [
-      { "hooks": [{ "type": "command", "command": "chauffeur hook codex" }] }
-    ],
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "chauffeur hook codex" }] }
-    ]
-  }
-}
-```
-
-### Plugins
-
-- TypeScript programs that hook events with `ctx.on` (never blocks) or
-  `ctx.before` (holds the harness within a budget).
-- They act through every control the harness offers, named by resource and
-  verb: `session.compact`, `session.update`, `message.append` and more.
-- They load when first needed, stop when idle, and restart if they crash.
-- Included: skills, context renewal, session warming and a guard against
-  irreversible commands.
-
-```ts
-import { Plugin } from "@fdcn/chauffeur/plugin"
-import { session } from "@fdcn/chauffeur/harness"
-
-export default Plugin.define({
-  id: "context-renewal",
-  setup(ctx) {
-    ctx.on("session.resumed", (e) => {
-      const cold = e.idle_seconds >= e.cache_seconds
-      const long = e.tokens.used >= e.tokens.window / 2
-
-      if (cold && long) {
-        session.compact(e.session, { model: ctx.options.summaryModel })
-      }
-    })
-  }
-})
-```
-
-### Guards
-
-- A `before` hook can block an action or hand it to you before it happens.
-- If the judge is slow or fails, `onTimeout: "ask"` asks you.
-
-```ts
-ctx.before(
-  "tool.before",
-  async (e) => {
-    if (e.tool !== "shell") return
-
-    const harmful = await ask(noul("Could this command cause irreversible harm?"), {
-      judge: guard,
-      evidence: { command: e.input.command }
-    })
-
-    if (!harmful.ok || harmful.outcome !== "no") {
-      e.askUser("Chauffeur isn't sure this is safe.")
-    }
-  },
-  { budget: 2_000, onTimeout: "ask" }
-)
-```
-
-### Safety
-
-- The daemon listens only on a Unix socket in a directory only you can open.
-  There are no ports and no tokens.
-- Evidence is redacted before every model call, and your harness's own
-  denials always win.
-- A project's code runs only as pure facts, with no access to files or the
-  network, and its rules use System Two only where you allow it.
-
-```js
-// .chauffeur/facts/touches-migrations.js: a project fact, with no host modules
-export default ({ evidence }) =>
-  evidence.diff.includes("migrations/")
-    ? { p: { yes: 1, no: 0 } }
-    : { p: { yes: 0, no: 1 } }
-```
+Other programs ask Chauffeur too. sourcefed asks it before each GitHub, Jira
+or Slack event reaches your agent, so noise stays out of the session. Every
+decision is a rule file you can read and edit, and every run is in an audit
+log.
 
 ## Install
 
-Release candidates install beside a running `chauffeur` as `chauffeur-next`,
-with their own socket and `~/.config/chauffeur-next/`:
+The release candidate is `1.0.0-rc.5`. It installs as `chauffeur-next`, with
+its own socket, `~/.config/chauffeur-next/` and audit log, so it runs beside
+an installed `chauffeur`. Pick your target: `darwin-arm64`, `darwin-x64`,
+`linux-arm64` or `linux-x64`.
 
 ```sh
-brew install stevenjpx2/taps/chauffeur-next
-chauffeur-next daemon run                # Jev answers with TYPESAFE_API_KEY
+version=1.0.0-rc.5
+target=darwin-arm64
+base=https://github.com/wrkhse/chauffeur/releases/download/v$version
+tarball=chauffeur-$version-$target.tar.gz
+
+curl -fLO "$base/$tarball"
+curl -fLO "$base/SHA256SUMS"
+grep "  $tarball\$" SHA256SUMS | shasum -a 256 -c
+
+prefix=~/.local/opt/chauffeur-next
+mkdir -p "$prefix"
+tar -xzf "$tarball" -C "$prefix"
+mv "$prefix/bin/chauffeur" "$prefix/bin/chauffeur-next"
+mv "$prefix/share/chauffeur" "$prefix/share/chauffeur-next"
+
+export PATH="$prefix/bin:$PATH"
+chauffeur-next version   # chauffeur-next 1.0.0-rc.5
 ```
 
-To run the daemon at login instead, put `TYPESAFE_API_KEY=…` in
-`~/.homebrew/services/chauffeur-next.env` and run
-`brew services start chauffeur-next`.
+The binary takes its name from its file and finds its shipped rules, models
+and OpenCode adapter in `share/<name>/` beside its `bin/` folder, so both
+renames matter.
 
-For OpenCode, add the adapter to `plugins` in `opencode.jsonc`:
+Start the daemon where your Jev key is set. It answers the System One
+questions:
+
+```sh
+export TYPESAFE_API_KEY=…
+chauffeur-next daemon run
+```
+
+## Set up OpenCode
+
+Add the adapter's folder to `plugins` in `opencode.jsonc`, as an absolute
+path with your own home folder:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/opt/homebrew/share/chauffeur-next/opencode"]
+  "plugins": ["/Users/you/.local/opt/chauffeur-next/share/chauffeur-next/opencode"]
 }
 ```
 
-Use your Homebrew prefix in place of `/opt/homebrew`; `brew info
-chauffeur-next` prints the line. The adapter writes any trouble, such as no
-daemon, to `~/.local/state/chauffeur-next/opencode.log`.
+OpenCode loads the folder's `server.js`. The adapter sends each finished tool
+call to the daemon and carries out what the rules return; it writes any
+trouble, such as no daemon, to `~/.local/state/chauffeur-next/opencode.log`.
 
-## Documentation
+## Example: a commit message that breaks the convention
 
-[`docs/plans/pluggability.md`](docs/plans/pluggability.md) describes the
-architecture: judges, facts, strategies, rule files, plugins, adapters and the
-`navigate` protocol. Its slice table is the roadmap.
+Ask the agent to commit a change. When its message breaks Conventional
+Commits, Jev answers yes, and OpenCode shows Chauffeur's message as one row
+after the commit:
 
-- [Integrations](docs/integrations/README.md): other projects that work with
-  Chauffeur, with or without a harness, such as sourcefed, neo and
-  opencode-history.
-- [Plugins](docs/plugins/README.md): each first-party plugin, and how to
-  write one.
-- [Tools](docs/tools/README.md): the tools agents call, with examples.
-- [CLI](docs/cli/README.md): a page for each command.
-- [Moving from v1](docs/migration/README.md): each v1 feature beside the v2
-  rule file or plugin that replaces it.
-
-Every Markdown file here, with its diagrams drawn, is also at
-[chauffeur-docs.stevenjpx2.workers.dev](https://chauffeur-docs.stevenjpx2.workers.dev),
-rebuilt on each push to `v2`.
-
-## Develop
-
-The toolchain is pinned in `rust-toolchain.toml`, with Miri and the
-WebAssembly target. The crates also build on stable Rust 1.100, their
-`rust-version`, which CI checks with `cargo +1.100.0 check`. Code in
-`chauffeur-core` and `chauffeur-judges` uses only APIs stable by Rust 1.99,
-because Kani 0.68's compiler predates 1.100. Local builds use [blaze](https://github.com/indexable-inc/blaze)
-and [bacon](https://dystroy.org/bacon/).
-
-```sh
-# Tests on every save, through blaze; also clippy and doc.
-bacon
-# Fast local rebuilds; cargo stays the final word.
-cargo blaze test
-
-cargo nextest run --workspace
-cargo test --doc --workspace
-cargo clippy --workspace --all-targets --locked
-
-cargo miri test -p chauffeur-core
-# Harnesses in each crate's src/proofs.rs.
-cargo kani -p chauffeur-judges
-# The workspace's tests must catch every changed line.
-cargo mutants -p chauffeur-core
-
-cargo shear   # no unused dependencies
+```text
+◈ Chauffeur · conventional-commits: commit message isn't conventional; asking the agent to amend it
 ```
 
-Benchmarks print Go's benchmark format; [`crates/`](crates/README.md#benchmarks)
-says what each measures:
+The agent reads the full message, which asks for `type(scope): description`,
+and amends the commit unless you chose the message. An `unsure` or failed
+answer sends nothing.
+
+![OpenCode above the audit log: the agent commits, Jev answers yes, and the agent amends the commit](docs/media/slice-1.gif)
+
+<sub>Recorded with candidate `1.0.0-rc.3`, in a scratch repository.</sub>
+
+## See what it decided
+
+The audit log keeps every run, and works with no daemon running:
 
 ```sh
-cargo bench --workspace --bench '*'   # every crate's benches/, once each second
-node scripts/bench.mjs v2~1           # v2~1 against this tree, through benchstat
+chauffeur-next audit --follow --brief
 ```
 
-The playground needs Bun and `wasm-pack`:
+```text
+13:54:43  conventional-commits  s1  nonconventional yes 0.93 jev  312 ms  → message.append
+```
+
+`chauffeur-next daemon status` lists the rules the daemon loaded and the rule
+files it refused, each with why.
+
+## Try a rule by hand
+
+`emit` sends one harness event, as the adapter does, and prints what the rules
+returned:
 
 ```sh
-cd playground
-bun install
-
-bun run dev     # rebuilds Rust on change and reloads the page
-bun run check   # release build and type check
+echo '{ "event": "tool.after", "session": "s1", "tool": "shell",
+        "input": { "command": "git commit -m \"fixed stuff\"" } }' \
+  | chauffeur-next emit
 ```
 
-Release scripts need Node; see [`scripts/`](scripts/) for how a release
-candidate is cut:
+## Write your own rule
+
+A rule is a JSON file in `~/.config/chauffeur-next/rules/`: the event it
+hooks, its judges, the question each step asks, and what to do with the
+answer. The daemon loads an edit on the next event. The shipped
+[`conventional-commits.json`](distribution/rules/conventional-commits.json) is
+a complete one; the grammar is in [`rule`](crates/protocol/src/rule/README.md).
+
+## Ask from a script or a program
+
+A script sends a request on stdin and reads the intents back:
 
 ```sh
-node --test scripts/*.test.mjs                  # packaging and formula
-node scripts/smoke.mjs dist/chauffeur-*.tar.gz  # a built tarball, installed and run
+chauffeur-next navigate <<'EOF'
+{ "protocol": 1, "deadline_ms": 3000, "on": "sourcefed.event",
+  "evidence": { "event": "thanks, looks good 👍", "monitor": "PR #42" } }
+EOF
 ```
 
-The documentation site needs Bun, and Node for deploying:
+A TypeScript program installs the client from the same release:
 
 ```sh
-cd site
-bun install
-
-bun run dev      # every Markdown file in the repository, live
-bun run deploy   # build, then cf deploy to Cloudflare
+npm install https://github.com/wrkhse/chauffeur/releases/download/v1.0.0-rc.5/fdcn-chauffeur-1.0.0-rc.5.tgz
 ```
 
-## License
+## Filter sourcefed events
 
-MIT. See [LICENSE](LICENSE).
+With sourcefed installed, `sourcefed setup chauffeur` adds the
+`sourcefed/triage` rule, and sourcefed asks Chauffeur before it queues each
+event. [sourcefed](docs/integrations/sourcefed.md) has the setup.
+
+## Roadmap
+
+What is left is tracked in
+[the v2 plan](https://github.com/wrkhse/chauffeur/issues/43).
+
+- [ ] [Plugins written in TypeScript](https://github.com/wrkhse/chauffeur/issues/44)
+- [ ] [Escalation from Jev to a second System One model, image evidence and the
+      strategy viewer](https://github.com/wrkhse/chauffeur/issues/45)
+- [ ] [Recall for opencode-history, and facts that answer without a
+      model](https://github.com/wrkhse/chauffeur/issues/46)
+- [ ] [Guards against irreversible commands, permissions and v1's steering
+      rules, with plugins](https://github.com/wrkhse/chauffeur/issues/47)
+- [ ] [Skills and tools for the agent](https://github.com/wrkhse/chauffeur/issues/48)
+- [ ] [Context renewal, session warming and model
+      failover](https://github.com/wrkhse/chauffeur/issues/49)
+- [ ] [Adapters for Pi, Claude Code and
+      Codex](https://github.com/wrkhse/chauffeur/issues/50)
+- [ ] [Review by a reasoning model](https://github.com/wrkhse/chauffeur/issues/51)
+- [ ] [Rulebooks, held for discussion](https://github.com/wrkhse/chauffeur/issues/52)
+- [ ] [Cutover from v1 to `chauffeur`](https://github.com/wrkhse/chauffeur/issues/53)
+
+## More
+
+[CLI](docs/cli/README.md) ·
+[Integrations](docs/integrations/README.md) ·
+[TypeScript client](packages/chauffeur/README.md) ·
+[Moving from v1](docs/migration/README.md) ·
+[Crates](crates/README.md) ·
+[Playground](playground/README.md) ·
+[Docs site](https://chauffeur-docs.stevenjpx2.workers.dev) ·
+MIT, see [LICENSE](LICENSE)

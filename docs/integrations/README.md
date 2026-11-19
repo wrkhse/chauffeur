@@ -1,47 +1,49 @@
 # Integrations
 
-An integration is another project that works with Chauffeur. It brings any of
-four things, each kept and installed by that project:
-
-| Brings              | Lives                                                              | Example                                       |
-| ------------------- | ------------------------------------------------------------------ | --------------------------------------------- |
-| Rule files          | `~/.config/chauffeur/rules/<project>/`, installed with the project | `sourcefed/triage`                            |
-| A plugin            | The project's repository, added to `plugins.json` by its installer | sourcefed's `sourcefed` plugin                |
-| Calls to `navigate` | The project's own code                                             | neo's screen check, opencode-history's recall |
-| A model format      | `models.json` entries pointing at the project's server             | jev-distill's `student`                       |
-
-Chauffeur answers questions for any program on the machine. A coding-agent
-harness is one caller among many: it reaches the daemon through Chauffeur's
-adapter for that harness. Any other program calls `chauffeur.navigate` itself, with
-its own event name and evidence, and acts on the intents that come back.
+An integration is another program that asks Chauffeur a question. It names
+its own event, sends its evidence, and acts on the intents that come back.
+The policy stays in a rule file the user can read and edit, so the program
+holds no thresholds or prompts.
 
 ```mermaid
 flowchart LR
-    Harness["A harness<br/>through its adapter"] --> D["Chauffeur daemon"]
-    Program["Any program<br/>@fdcn/chauffeur/client, chauffeur navigate"] --> D
-    Plugin["Plugins<br/>ctx.on, ctx.before"] --> D
-    Rules[("Rule files")] --> D
-    D -- "intents, verdicts, actions" --> Harness
-    D -- "intents, verdicts" --> Program
+    Program["A program<br/>sourcefed's daemon"] -- "chauffeur.navigate<br/>sourcefed.event" --> Daemon["Chauffeur daemon"]
+    Rule[("sourcefed/triage.json")] --> Daemon
+    Daemon -- "intents<br/>withhold: event" --> Program
 ```
 
-The interface is the same for every caller:
-
-- **One call.** `navigate(request)` in TypeScript, `chauffeur navigate`
-  on stdin, or the `crates/protocol` types in Rust.
-- **The caller names the event, keyed by its own name.** `sourcefed.event`,
-  `opencode-history.recall`, `neo.screen-check`: a rule hooks it by name in
-  `on`, as it hooks `tool.after`, and knows whose event it is.
+- **The caller names the event, under its own name.** A rule hooks
+  `sourcefed.event` in `on` and knows whose event it is.
 - **The caller defines its intents.** A rule's `then` returns them, such as
-  `withhold` or `attach`; no intent means the caller's default.
-- **Policy stays in rule files.** The caller holds no thresholds or prompts,
-  so the user tunes a decision by editing JSON.
-- **Plugins hook callers' events too.** `ctx.on("opencode-history.recall", …)`
-  works as `ctx.on("tool.after", …)` does, with no harness involved.
+  `withhold`; no intent means the caller's default.
+- **The rule ships with the caller.** Its installer writes it to
+  `~/.config/chauffeur-next/rules/<project>/`, and the daemon loads it on the
+  next event.
+- **The caller decides what no answer means.** It sets a deadline, and acts
+  on its default when the daemon is missing, refuses or runs late.
 
-| Project          | Brings                                                                                                | Slice | Page                                    |
-| ---------------- | ----------------------------------------------------------------------------------------------------- | ----- | --------------------------------------- |
-| sourcefed        | The `sourcefed/triage` rule, the `sourcefed` plugin, and `navigate` calls before each event it queues | 2, 5  | [sourcefed](sourcefed.md)               |
-| neo              | A `navigate` call and its rule, checking the iPhone screen before an irreversible tap                 | 3     | [neo](neo.md)                           |
-| jev-distill      | Its students, as System One models through the `student` format                                       | 3     | [jev-distill](jev-distill.md)           |
-| opencode-history | A `navigate` call and its rule, ranking recalled passages for each message                            | 4     | [opencode-history](opencode-history.md) |
+| Project   | Asks                                                       | Page                      |
+| --------- | ---------------------------------------------------------- | ------------------------- |
+| sourcefed | Whether each GitHub, Jira or Slack event reaches the agent | [sourcefed](sourcefed.md) |
+
+## Ask from your own program
+
+A program reaches the daemon in one of three ways, each with the same
+request:
+
+| From       | Use                                                                                             |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| TypeScript | The [`@fdcn/chauffeur`](../../packages/chauffeur/README.md) client's `navigate`                 |
+| A script   | [`chauffeur navigate`](../cli/navigate.md), with the request on stdin                           |
+| Rust       | The `crates/protocol` types, over the [wire contract](../plans/slices/slice-2.md#wire-contract) |
+
+```ts
+import { navigate } from "@fdcn/chauffeur/client"
+
+const { intents } = await navigate(
+  { on: "sourcefed.event", evidence: { event, thread, monitor } },
+  { signal: AbortSignal.timeout(3_000) }
+)
+
+const withheld = intents.some((intent) => intent.withhold === "event")
+```

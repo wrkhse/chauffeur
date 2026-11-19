@@ -1,11 +1,32 @@
 # Seeing what it decided
 
-Each command has its own page under [CLI](../cli/README.md).
+v2 keeps v1's audit command, with a log of its own, and has no validation
+command: a rule is checked when it loads. The v2 column is what
+`chauffeur-next` `1.0.0-rc.5` does, and each command has its page under
+[CLI](../cli/README.md).
 
-| v1                                                      | v2                                                                                                                                                                          | Slice |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| `chauffeur audit [N]`, `--follow`, `--brief`            | The same command, over the same kind of file: one JSON line per run in `~/.local/state/chauffeur/audit.jsonl`, moved aside once past 8 MiB, readable with no daemon running | 1     |
-| The audit log's `judges` field: who answered each round | Each step's answer names its model and whether it was a placeholder, with its probabilities and level                                                                       | 1     |
-| `chauffeur skill validate PATH`                         | A rule that does not load is refused with its path and reason, listed by `chauffeur daemon status`                                                                          | 1     |
-| `chauffeur skill validate-project WORKTREE`             | `chauffeur daemon status --project WORKTREE`: the rules a session there would load, and the refused ones                                                                    | 5     |
-| `chauffeur skills`: sources and their freshness         | `chauffeur skills list`, a command the `skills` plugin adds: the harness's skills it sees, where each comes from, and whether a third-party one passed its screen           | 6     |
+| v1                                           | v2                                                                                           |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `chauffeur audit [N]`, `--follow`, `--brief` | [`chauffeur-next audit`](../cli/audit.md), with the same arguments                           |
+| `$CHAUFFEUR_STATE_DIR/audit.jsonl`           | `~/.local/state/chauffeur-next/audit.jsonl`, moved aside past 8 MiB as v1's is               |
+| One line for each signal, with its effects   | One line for each rule's run: its `rule`, `event`, `session`, `steps` and what it `returned` |
+| A line's `judges`: who answered each round   | Each step's `answer`: its `model`, whether it was a `placeholder`, its `p` and its `level`   |
+| `chauffeur skill validate PATH`              | [`chauffeur-next daemon status`](../cli/daemon.md): `refused` lists each file and why        |
+| `chauffeur signal --file probe.json`         | [`chauffeur-next emit`](../cli/emit.md), with the event on stdin                             |
+| `chauffeur health`                           | `chauffeur-next daemon status`, which prints the daemon's version                            |
+
+The two logs are separate files, so `chauffeur audit` shows what v1 decided
+and `chauffeur-next audit` what v2 did:
+
+```sh
+chauffeur-next audit --follow --brief
+```
+
+```text
+13:54:43  conventional-commits  s1  nonconventional yes 0.93 jev  312 ms  → message.append
+```
+
+v1's `chauffeur skill validate-project` and `chauffeur skills` have no v2
+command in `1.0.0-rc.5`. Checking a project's rules is in
+[#47](https://github.com/wrkhse/chauffeur/issues/47), and the skill catalog in
+[#48](https://github.com/wrkhse/chauffeur/issues/48).

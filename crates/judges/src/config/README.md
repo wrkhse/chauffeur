@@ -43,6 +43,14 @@ assert_eq!(models.tier(Tier::SystemOne), ["jev", "offline"]);
 - A later file's model replaces an earlier one of the same name; a later
   tier list replaces the earlier list.
 - A placeholder's `answers` path is made relative to the file that names it.
+- Models load only from shipped and user configuration, never from a
+  project's `.chauffeur/`: a model entry is a network endpoint, so a cloned
+  repository could otherwise send evidence wherever it chose.
+- A key is named by its environment variable and read only by
+  `crates/judges`; it never appears in a rule file, an event, an error or a
+  verdict.
+- `systemone` and `placeholder` are the formats there are; a model entry
+  with any other `format` does not load.
 - Each format's entry type lives with its format: `SystemOneEntry` in
   `tiers/system_one/`, `PlaceholderEntry` in `placeholder/`.
 - A `systemone` entry's `timeout_ms`, `store` and `ask` are optional.

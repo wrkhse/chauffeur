@@ -1,53 +1,43 @@
-# sourcefed events and monitors
+# sourcefed events
 
-v1 decided which sourcefed events reach the agent, and started sourcefed
-monitors for the PR, Jira issue or Slack thread the agent was working on.
-In v2 the first is the `sourcefed/triage` rule that sourcefed calls through
-`navigate`, in slice 2, and the second is the `sourcefed` plugin, kept in
-sourcefed's repository, in slice 5 with the other first plugins.
+v1 decides which sourcefed events reach the agent when sourcefed's OpenCode
+plugin asks it. In v2, sourcefed's daemon asks before it queues each event,
+so OpenCode, Pi, MCP and the CLI receive the same filtered stream. The
+question is the `sourcefed/triage` rule, a file sourcefed installs.
+[sourcefed](../integrations/sourcefed.md) has the setup, a request to try and
+the rule itself; the v2 column is what `chauffeur-next` `1.0.0-rc.5` does.
 
-## The event gate
+| v1                                                            | v2                                                                                        |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| sourcefed's OpenCode plugin calls the `chauffeur.gate` RPC    | sourcefed's daemon navigates `sourcefed.event` before it queues the event, for every host |
+| The question in `skills/config/event-gate.json`               | The `screen` step of `~/.config/chauffeur-next/rules/sourcefed/triage.json`               |
+| One situation text, told what the monitor watches             | The `event`, `thread` and `monitor` evidence blocks                                       |
+| Withholds only on a confident no (P ≤ 0.3)                    | `confidence: 0.7`, and `then` withholds on `no`; `yes`, `unsure` and a failure deliver    |
+| `withhold_bodies`: `[message without text]`, withheld unasked | The rule's instructions call it noise, and the judge answers                              |
+| `POST /integrations/sourcefed`, for other programs            | [`chauffeur-next navigate`](../cli/navigate.md) or the client, with the same event        |
+| sourcefed delivers when Chauffeur fails or takes over 3 s     | The same                                                                                  |
 
-| v1                                                                         | v2                                                                                                            |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| sourcefed's OpenCode plugin calls the adapter's `chauffeur.gate` RPC       | sourcefed's daemon navigates `sourcefed.event`, for every host; see [sourcefed](../integrations/sourcefed.md) |
-| "Should the agent be shown this event now?", told what the monitor watches | The `needs-agent` question, with `event`, `thread` and `monitor` evidence                                     |
-| Withhold only on a confident no (P ≤ 0.3); everything else delivers        | `confidence: 0.7` and `then` withholds on `no`                                                                |
-| `withhold_bodies`: `[message without text]` withheld without asking        | A `match` fact step on `event.body`, from slice 4; until then the screen judges it                            |
-| `POST /integrations/sourcefed` for other integrations                      | `navigate` with the same event, from any program                                                              |
-| sourcefed delivers when Chauffeur fails or takes over 3 s                  | The same                                                                                                      |
+## Moving over
 
-v1's question, abridged, becomes the rule's `needs-agent` ask:
-
-```json
-{
-  "on": "sourcefed.event",
-  "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
-  "strategy": [
-    {
-      "id": "screen",
-      "judge": "quick",
-      "ask": {
-        "outcomes": ["yes", "no"],
-        "evidence": ["event", "thread", "monitor"],
-        "instructions": "Should the agent be shown this event now? Show events that need the agent to do something: … Withhold noise: …"
-      }
-    }
-  ],
-  "then": [{ "if": { "screen": "no" }, "withhold": "event" }]
-}
+```sh
+sourcefed setup chauffeur        # writes rules/sourcefed/triage.json
+chauffeur-next daemon status     # "rules" lists "sourcefed/triage"
 ```
+
+`sourcefed setup chauffeur` never replaces a rule file that is there, so a
+`confidence` or `instructions` you change in it stays. A question you
+override in `~/.config/chauffeur/event-gate.json` moves into the `screen`
+step's `instructions` by hand.
+
+v1 and v2 run side by side. sourcefed marks each event v2 triaged, and its
+OpenCode bridge skips v1's `chauffeur.gate` for a marked event and asks it
+for an unmarked one, so no event is judged by both. With no v2 daemon
+answering, every event bound for OpenCode goes to v1's gate.
+[sourcefed's Chauffeur v2 triage](https://github.com/wrkhse/sourcefed/blob/main/packages/daemon/src/triage/README.md)
+has the marking, and [slice 2](../plans/slices/slice-2.md) the wire contract.
 
 ## Monitors
 
-The [`sourcefed` plugin](../integrations/sourcefed.md#the-plugin), in sourcefed's
-`adapters/chauffeur/`:
-
-| v1                                                                                                               | v2                                                                       |
-| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| After a tool result, exact facts name candidates: a PR link from `gh pr create`, a Jira key, a Slack thread link | `ctx.on("tool.after")` in the `sourcefed` plugin, with the same patterns |
-| A candidate a monitor already watches is dropped                                                                 | The plugin asks sourcefed's daemon first                                 |
-| "Is this the session's own work to keep following?" at P ≥ 0.7                                                   | The same yes/no, `confidence: 0.7`                                       |
-| Creates the monitor, then steers: "sourcefed now watches …"                                                      | sourcefed's RPC, then `message.append` with `now`                        |
-| Each candidate judged once per agent; unreachable sourcefed creates nothing                                      | The same, in the plugin's state                                          |
-| `SOURCEFED_DAEMON_URL`, `SOURCEFED_DAEMON_TOKEN`, `CHAUFFEUR_SOURCEFED=off`                                      | The plugin's options; leaving it out of `plugins.json` turns it off      |
+v1 also has sourcefed follow the pull request, Jira issue or Slack thread a
+session works on. `1.0.0-rc.5` has no part that does, so monitors stay with
+v1; [#47](https://github.com/wrkhse/chauffeur/issues/47) brings them.

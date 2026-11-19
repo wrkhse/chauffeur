@@ -1,7 +1,7 @@
 # `tiers`
 
 The four kinds of judge a step can name, and how a tier's models answer as
-one core `Judge`. Each tier's folder holds the API formats that tier uses.
+one core `Judge`. A tier's API formats live in its folder, such as `system_one/`.
 
 | Path          | Holds                                                                                                                                                                                                               |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -9,12 +9,19 @@ one core `Judge`. Each tier's folder holds the API formats that tier uses.
 | `fallback.rs` | `Fallback`: a tier's models in order, built from `models.json` and the keys found. The next model answers only what the one before could not, and every model's work ends at the round's deadline                   |
 | `judge.rs`    | `NamedJudge`: a `Fallback`, a `Confidence`, the run's evidence and its deadline, as a core `Judge`                                                                                                                  |
 | `system_one/` | Fast classifiers. The `systemone` format asks a yes/no question as `noul` and any other as `choice` or `score`, as the model's entry says: [system_one](system_one/README.md) has its files, its entry and its wire |
-| `system_two/` | Reasoning models. The `openai` and `anthropic` formats arrive with slice 11; for now the folder holds only its README                                                                                               |
-| `facts/`      | JavaScript facts, with no model. The `facts` format arrives with slice 4; for now the folder holds only its README                                                                                                  |
-| `person/`     | The user, through the harness. The `person` format arrives with slice 5; for now the folder holds only its README                                                                                                   |
 
-Until a tier has its own format, only a placeholder listed under that tier
-in `models.json` answers its steps. With none, they fail as unavailable.
+`system-one` is the one tier with a format of its own. A step on
+`system-two`, `facts` or `person` is answered only by a placeholder listed
+under that tier in `models.json`, and with none it fails as unavailable. Their
+formats are planned in
+[#51](https://github.com/wrkhse/chauffeur/issues/51) (`system-two`),
+[#46](https://github.com/wrkhse/chauffeur/issues/46) (`facts`) and
+[#47](https://github.com/wrkhse/chauffeur/issues/47) (`person`).
+
+A step reaches a model through four layers, each knowing only the one below:
+the rule's named judge, such as `"quick": { "tier": "system-one" }`; the
+tier's models in `models.json`'s `tiers`; each model's entry in its `models`;
+and the entry's format, which turns questions into probabilities.
 
 ```mermaid
 flowchart LR
@@ -45,6 +52,9 @@ let judge = NamedJudge::new(&models, &confidence, &evidence)
 let run = plan.run(&Panel::new().with("quick", &judge))?;
 ```
 
+- A judge that names a `model` asks it first, then the tier's models in
+  order, each once. A model that is not registered is passed over, so a rule
+  shared with someone who lacks it runs on their tier.
 - A model whose key is missing is left out, so a shipped model starts
   answering once its key is set.
 - An invalid reply does not fall back: the model answered badly, and asking

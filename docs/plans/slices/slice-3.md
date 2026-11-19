@@ -1,21 +1,20 @@
 # Slice 3: Escalation from Jev to GLiDE
 
 **Status:** In progress: `after` and rounds in core, lowering rules to plans,
-and SubQ, GLiDE and richer questions are built; image evidence, the `student`
-format, the rest for a failing model, `chauffeur strategy` and the playground
-follow.
+and SubQ, GLiDE and richer questions are on the `v2` branch, in no release yet.
+Image evidence, the `student` format, the rest for a failing model,
+`chauffeur strategy`, the playground's Strategy tab and the end-to-end proof
+are designed in [#45](https://github.com/wrkhse/chauffeur/issues/45).
 
-**You can:** have the commit nudge and `sourcefed/triage` ask GLiDE only when
-Jev's answer is near the bar the rule acts on, or Jev fails, see each
-strategy as a tree with `chauffeur strategy show`, and step through it in the
-playground's Strategy tab. An iPhone screen check reaches Jev with its
-screenshot, and a jev-distill student answers before Jev.
+**You can:** have the commit nudge ask GLiDE only when Jev's answer is near the
+bar the rule acts on, or Jev fails, and ask SubQ or GLiDE a question that is not
+yes/no as a `choice` or a `score`.
 
 This slice adds strategies with more than one step: a step's `after` names
 the earlier steps it waits for and the outcomes it needs. The step machine
 underneath is [rungs](https://github.com/wrkhse/rungs/issues/1), shared
-with atelier. It also adds image evidence, the `student` format, and a tier
-that rests a failed model for 60 seconds before asking it again.
+with atelier. It also adds SubQ and GLiDE beside Jev, and questions richer than
+yes/no.
 
 ## What it builds
 
@@ -48,8 +47,8 @@ run is over. Core keeps what rungs knows nothing about:
 
 Core records skipped steps. `navigate` remains on protocol 1 and omits skipped
 steps from both wire events and the verdict: rc.5 clients reject unknown
-events. A separate design covers future wire skips; audit and `strategy show`
-report skips in this slice.
+events. A separate design covers future wire skips; the audit log reports
+skips in this slice.
 
 A string need is `Need::settled`, an object need `Need::outcome`, and `all`
 and `any` are a step's `after` and `after_any`. Every step has one attempt.
@@ -703,118 +702,14 @@ Verified by, in `crates/judges/tests/wire.rs` unless named:
 - `a_question_that_is_not_yes_or_no_is_asked_as_a_choice_and_answered`, in
   `tests/systemone.rs`.
 
-### Image evidence
+## Next
 
-Evidence blocks are text or images. An image goes only to a format that
-accepts images, and only when a step names it.
+The rest of the slice is designed in
+[#45](https://github.com/wrkhse/chauffeur/issues/45):
 
-Files: `crates/judges/src/evidence/`
-
-```json
-{
-  "on": "neo.screen-check",
-  "evidence": {
-    "screenshot": { "image": "iVBORw0KGgo…", "media_type": "image/png" },
-    "ocr_text": "Pay ₹250 to Ravi",
-    "question": "Is this the payment confirmation for ₹250 to Ravi?"
-  }
-}
-```
-
-Verified by:
-
-- neo's screen check, with a recorded screenshot, reaches Jev with its opt-in
-  and reaches no text-only format.
-
-Follow-up: neo asks Jev itself; moving neo's screen check onto Chauffeur is
-neo's own change and follows this slice.
-
-### The `student` format
-
-jev-distill's students over its loopback server: the task's labels are the
-outcomes, and evidence blocks fill its `state`.
-
-Files: `crates/judges/src/tiers/system_one/student.rs`
-
-```json
-{
-  "models": {
-    "routing-student": {
-      "format": "student",
-      "endpoint": "http://127.0.0.1:8787",
-      "task": "routing"
-    }
-  }
-}
-```
-
-Verified by:
-
-- A question whose outcomes differ from the task's labels fails as `invalid`
-  with no call; a student's `unsure` hands the step to Jev.
-
-### A rest for a failing model
-
-A model that fails rests for 60 seconds, then is tried again.
-
-Files: `crates/judges/src/tiers/fallback.rs`
-
-```text
-13:54:43  jev timed out        → subq answers; jev rests until 13:55:43
-13:55:10  jev skipped          → subq answers
-13:55:50  jev asked again      → jev answers
-```
-
-Verified by:
-
-- A failing first model is skipped until its rest is over, then asked again.
-
-### `chauffeur strategy`
-
-`strategy list`: each loaded rule with its event, steps, and most rounds and
-model calls. `strategy show <rule>` and `--file`: the tree, rounds, resolved
-models, `after`, confidence, and the maximum rounds and model calls.
-
-Files: `crates/cli/src/strategy.rs`
-
-```text
-$ chauffeur strategy show conventional-commits
-conventional-commits  on tool.after
-└─ fast    system-one:jev    confidence 0.7
-   └─ sure system-one:glide  confidence 0.7   after fast is unsure or failed
-at most 2 rounds · 2 model calls
-```
-
-Verified by:
-
-- `"model": "glide"` without GLiDE configured shows the tier's fallback
-  order.
-- Kani: `strategy_show_bounds_every_lowered_plan`, a lowered plan has at most
-  the rounds `strategy show` reports.
-
-### The playground
-
-The Strategy tab steps through the same tree.
-
-Files: `playground/src/features/strategy.ts`
-
-Verified by:
-
-- The tab steps through each shipped rule's tree in a real browser.
-
-## End to end
-
-These run at the slice's proof, with their answers recorded.
-
-- `"model": "glide"` without GLiDE configured runs on the tier's fallback
-  order and reports it.
-- The escalation runs live against Jev and GLiDE and agrees with `main`'s
-  escalation near the bar, `CHAUFFEUR_JUDGE_ESCALATE=glide`, on the same
-  cases, reporting answers, rounds, elapsed time and model calls.
-- Labelled scale questions, asked through `choice` and through `score` by the
-  same model registered under two names, report which agrees with the labels
-  more often.
-- The live score check confirms a GLiDE `score` reply settles only when it
-  carries probabilities for every level: v1's captured GLiDE score fixture has
-  none, and any score reply that omits them fails `invalid`. The shipped commit
-  nudge asks yes/no and is unaffected.
+- Image evidence
+- The `student` format
+- A rest for a failing model
+- `chauffeur strategy`
+- The playground's Strategy tab
+- End to end
