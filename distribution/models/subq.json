@@ -1,0 +1,11 @@
+{
+  "models": {
+    "subq": {
+      "format": "systemone",
+      "endpoint": "https://api.subq.ai",
+      "model": "subq-snap-preview",
+      "key": { "env": "SUBQ_API_KEY" },
+      "timeout_ms": 3000
+    }
+  }
+}
