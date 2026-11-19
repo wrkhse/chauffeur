@@ -142,7 +142,7 @@ fn a_run_whose_worker_stops_ends_at_once_not_late() {
 }
 
 #[test]
-fn a_judge_slower_than_the_end_fails_as_deadline() {
+fn a_judge_slower_than_the_deadline_returns_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -154,7 +154,7 @@ fn a_judge_slower_than_the_end_fails_as_deadline() {
             .set_write_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let sent = request(&mut stream);
-        thread::sleep(Duration::from_millis(800));
+        thread::sleep(Duration::from_millis(1_600));
         let reply = r#"{"answers":{"q0":{"type":"noul","noul":0.9}}}"#;
         let _ = write!(
             stream,
@@ -163,7 +163,7 @@ fn a_judge_slower_than_the_end_fails_as_deadline() {
         );
         sent
     });
-    let context = context("deadline", &http_models(&endpoint, 2_000), &[]);
+    let context = context("deadline", &http_models(&endpoint, 5_000), &[]);
     let started = Instant::now();
 
     let ran = run(
@@ -175,9 +175,9 @@ fn a_judge_slower_than_the_end_fails_as_deadline() {
     let elapsed = started.elapsed();
     let sent = server.join().unwrap();
 
-    assert_deadline(ran);
+    assert!(matches!(ran, Ran::Deadline), "{ran:?}");
     assert!(
-        (Duration::from_millis(100)..Duration::from_millis(750)).contains(&elapsed),
+        (Duration::from_millis(1_200)..Duration::from_millis(2_000)).contains(&elapsed),
         "{elapsed:?}"
     );
     assert_eq!(
@@ -196,13 +196,24 @@ fn a_judge_slower_than_the_end_fails_as_deadline() {
     );
 }
 
+/// A 200 ms budget still asks the model, on one connection. The caller's
+/// wait answers `Deadline` at 200 ms; the model's call, whose budget ends
+/// 100 ms after that, then stops. A call held to the model's own 5 s timeout
+/// would close the connection seconds later.
 #[test]
-fn a_budget_inside_the_reserve_settles_without_an_http_connection() {
+fn a_short_budget_asks_the_model_once_and_its_call_stops_just_after() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let context = context("short-deadline", &http_models(&endpoint, 2_000), &[]);
     let started = Instant::now();
+    let server = thread::spawn(move || {
+        let mut stream = accept(&listener, Duration::from_secs(2)).unwrap();
+        let _ = request(&mut stream);
+        let closed = closed(&mut stream, Duration::from_secs(4));
+        let again = accept(&listener, Duration::from_millis(200));
+
+        (closed, again.is_some())
+    });
+    let context = context("short-deadline", &http_models(&endpoint, 5_000), &[]);
 
     let ran = run(
         &context,
@@ -210,30 +221,133 @@ fn a_budget_inside_the_reserve_settles_without_an_http_connection() {
         &commit("fixed stuff"),
         Duration::from_millis(200),
     );
+    let elapsed = started.elapsed();
+    let (closed, again) = server.join().unwrap();
+    let closed = closed.duration_since(started);
 
-    assert_deadline(ran);
-    assert!(started.elapsed() < Duration::from_millis(200));
+    assert!(matches!(ran, Ran::Deadline), "{ran:?}");
+    assert!(
+        (Duration::from_millis(200)..Duration::from_millis(1_000)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(
+        (Duration::from_millis(250)..Duration::from_millis(2_500)).contains(&closed),
+        "{closed:?}"
+    );
+    assert!(!again, "the model was asked on a second connection");
+}
+
+/// Round 1's stand-in answers at once; round 2's model never answers. Round 2
+/// ends a second before the 2.5 s deadline, so its step fails as `Deadline`
+/// and the run returns settled, with round 1's answer, before the caller's
+/// wait would cut it.
+#[test]
+fn a_later_round_ends_a_second_before_the_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let started = Instant::now();
+    let server = thread::spawn(move || {
+        let mut stream = accept(&listener, Duration::from_secs(2)).unwrap();
+        let _ = request(&mut stream);
+
+        closed(&mut stream, Duration::from_secs(4))
+    });
+    let (strategy, evidence) = two_rounds();
+    let context = context("later-round", &stand_in_then_http(&endpoint), &[]);
+
+    let ran = run_strategy(
+        &context,
+        &strategy,
+        &evidence,
+        in_ms(2_500),
+        &Cancel::new(Source::Harness),
+    );
+    let elapsed = started.elapsed();
+    let closed = server.join().unwrap().duration_since(started);
+
+    let Ran::Settled(ran) = ran else {
+        panic!("expected a settled run, got {ran:?}");
+    };
+    let Some(Outcome::Value(first)) = ran.verdict.get("first") else {
+        panic!("round 1 has no answer: {:?}", ran.verdict);
+    };
     assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
+        (first.outcome().to_string(), first.by().model.as_str()),
+        ("yes".to_owned(), "stand-in")
+    );
+    assert_eq!(
+        ran.verdict.iter().map(|(step, _)| step).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(
+        ran.verdict.get("second"),
+        Some(&Outcome::Failed(Failure::Deadline))
+    );
+    assert_eq!(
+        ran.verdict.skipped().collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    assert!(
+        (Duration::from_millis(1_400)..Duration::from_millis(2_500)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(
+        (Duration::from_millis(1_400)..Duration::from_millis(2_500)).contains(&closed),
+        "{closed:?}"
     );
 }
 
-#[expect(clippy::panic, reason = "a missing settled result fails the test")]
-fn assert_deadline(ran: Ran) {
-    let Ran::Settled(run) = ran else {
-        panic!("expected a settled deadline failure, got {ran:?}");
+/// Two rounds: `first` asks the stand-in, then `second` asks Jev.
+#[expect(
+    clippy::panic,
+    reason = "a fixture that is not a strategy fails the test"
+)]
+fn two_rounds() -> (Arc<Strategy>, Vec<(String, String)>) {
+    let ask = serde_json::json!({ "outcomes": ["yes", "no"], "evidence": ["log"],
+                                  "instructions": "Is the migration finished?" });
+    let navigate = Navigate::parse(&serde_json::json!({
+        "protocol": 1,
+        "judges": { "quick": { "tier": "system-one", "model": "stand-in" },
+                    "careful": { "tier": "system-one", "model": "jev" } },
+        "strategy": [{ "id": "first", "judge": "quick", "ask": ask },
+                     { "id": "second", "judge": "careful", "ask": ask, "after": ["first"] }],
+        "evidence": { "log": "migrated 42 of 42 tables" }
+    }))
+    .unwrap();
+    let evidence = navigate.evidence().to_vec();
+    let Target::Strategy(strategy) = navigate.into_target() else {
+        panic!("an inline strategy is a strategy");
     };
-    let failed = Outcome::Failed(Failure::Deadline);
 
-    assert_eq!(
-        run.verdict.iter().collect::<Vec<_>>(),
-        [("nonconventional", &failed)]
-    );
-    assert_eq!(
-        run.verdict.skipped().collect::<Vec<_>>(),
-        Vec::<&str>::new()
-    );
+    (Arc::new(strategy), evidence)
+}
+
+/// A stand-in answering yes, and Jev at `endpoint` with a 5 s timeout.
+fn stand_in_then_http(endpoint: &str) -> String {
+    format!(
+        r#"{{ "models": {{ "stand-in": {{ "format": "placeholder", "otherwise": {{ "yes": 0.9, "no": 0.1 }} }},
+                        "jev": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "jev-latest",
+                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": 5000 }} }},
+             "tiers": {{ "system-one": ["stand-in", "jev"] }} }}"#
+    )
+}
+
+/// When the client closed `stream`, read until it does, for at most `wait`.
+#[expect(clippy::panic, reason = "a client that never closes fails the test")]
+fn closed(stream: &mut std::net::TcpStream, wait: Duration) -> Instant {
+    stream.set_read_timeout(Some(wait)).unwrap();
+    let mut buffer = [0; 256];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Instant::now(),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                return Instant::now();
+            }
+            Err(error) => panic!("the client did not close within {wait:?}: {error}"),
+        }
+    }
 }
 
 fn http_models(endpoint: &str, timeout_ms: u64) -> String {

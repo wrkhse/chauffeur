@@ -1,17 +1,29 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use chauffeur_core::{Failure, Outcome, Panel, Running};
+use chauffeur_core::{Failure, Outcome, Round, Running};
 use chauffeur_judges::{Answer, Question};
 
 use super::{Cancel, Ran};
 
+/// How long the first round's judges keep working past the caller's
+/// deadline. The caller's wait answers `Deadline` at the deadline itself,
+/// so a judge slower than the deadline is cut by that wait first; its model
+/// call then stops just after and frees the worker.
+pub(super) const GRACE: Duration = Duration::from_millis(100);
+
+/// One round's answers from judges whose model work ends at the given
+/// moment, or never for `None`.
+pub(super) type Ask<'a> =
+    dyn Fn(&Round<'_, Question>, Option<Instant>) -> Vec<(String, Outcome<Answer>)> + 'a;
+
 /// Drives the core rounds. Each turn checks cancellation, then asks core for
 /// the next round; the caller's deadline is checked only when there is a
 /// round left to ask. Answers that arrive after the deadline still settle
-/// their steps, so a run whose last round answered late is `Settled`.
+/// their steps, so a run whose last round answered late is `Settled`. Each
+/// round is asked through `ask` with the end `judges_end` gives it.
 pub(super) fn run(
     mut running: Running<'_, Question, Answer>,
-    panel: &Panel<'_, Question, Answer>,
+    ask: &Ask<'_>,
     deadline: Instant,
     cancel: &Cancel,
 ) -> Ran {
@@ -28,10 +40,27 @@ pub(super) fn run(
             return Ran::Deadline;
         }
 
-        let reply = round.ask(panel);
+        let end = judges_end(&round, &running, deadline);
+        let reply = ask(&round, end);
 
         answer(&mut running, reply);
     }
+}
+
+/// When a round's judges end. The first round ends `GRACE` after the
+/// caller's deadline, so a slow judge is cut by the caller's wait. A later
+/// round ends at core's end, before the deadline, so the answers already in
+/// hand return in time.
+fn judges_end(
+    round: &Round<'_, Question>,
+    running: &Running<'_, Question, Answer>,
+    deadline: Instant,
+) -> Option<Instant> {
+    if round.number() == 1 {
+        return Some(deadline.checked_add(GRACE).unwrap_or(deadline));
+    }
+
+    running.end()
 }
 
 /// A refused batch leaves the round open; settle it as invalid, not timed out.
@@ -47,11 +76,18 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use chauffeur_core::{Event, Failure, Need, Outcome, Panel, Plan, Run, Step};
+    use chauffeur_core::{Event, Failure, Need, Outcome, Panel, Plan, Round, Run, Step};
     use chauffeur_judges::{Answer, AnsweredBy, Confidence, Probabilities, Question};
 
     use super::{answer, run};
     use crate::{Cancel, Ran, Source};
+
+    /// Asks each round of `panel`, ignoring the end the round is given.
+    fn asking<'a>(
+        panel: &'a Panel<'_, Question, Answer>,
+    ) -> impl Fn(&Round<'_, Question>, Option<Instant>) -> Vec<(String, Outcome<Answer>)> + 'a {
+        move |round, _| round.ask(panel)
+    }
 
     fn plan() -> Plan<Question> {
         let question = Question::noul("Ship it?", ["diff"]).unwrap();
@@ -102,7 +138,7 @@ mod tests {
 
         let ran = settled(run(
             plan.start(Some(deadline)),
-            &panel,
+            &asking(&panel),
             deadline,
             &Cancel::new(Source::Harness),
         ));
@@ -145,6 +181,35 @@ mod tests {
     }
 
     #[test]
+    fn the_first_round_ends_after_the_deadline_and_a_later_one_before_it() {
+        let plan = plan();
+        let deadline = deadline();
+        let judge = |question: &Question| yes(question);
+        let panel = Panel::new().with("quick", &judge).with("careful", &judge);
+        let ends = RefCell::new(Vec::new());
+        let ask = |round: &Round<'_, Question>, end: Option<Instant>| {
+            ends.borrow_mut().push((round.number(), end));
+            round.ask(&panel)
+        };
+
+        let ran = run(
+            plan.start(Some(deadline)),
+            &ask,
+            deadline,
+            &Cancel::new(Source::Harness),
+        );
+
+        assert!(matches!(ran, Ran::Settled(_)), "{ran:?}");
+        assert_eq!(
+            *ends.borrow(),
+            [
+                (1, deadline.checked_add(Duration::from_millis(100))),
+                (2, deadline.checked_sub(Duration::from_secs(1))),
+            ]
+        );
+    }
+
+    #[test]
     fn cancellation_from_the_first_judge_prevents_the_second_round() {
         let plan = plan();
         let cancel = Cancel::new(Source::Harness);
@@ -161,7 +226,12 @@ mod tests {
         let panel = Panel::new().with("quick", &quick).with("careful", &careful);
         let deadline = deadline();
 
-        let ran = run(plan.start(Some(deadline)), &panel, deadline, &cancel);
+        let ran = run(
+            plan.start(Some(deadline)),
+            &asking(&panel),
+            deadline,
+            &cancel,
+        );
 
         assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
         assert_eq!(*calls.borrow(), ["quick"]);
@@ -180,7 +250,12 @@ mod tests {
         let panel = Panel::new().with("quick", &judge).with("careful", &judge);
         let deadline = Instant::now();
 
-        let ran = run(plan.start(Some(deadline)), &panel, deadline, &cancel);
+        let ran = run(
+            plan.start(Some(deadline)),
+            &asking(&panel),
+            deadline,
+            &cancel,
+        );
 
         assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
         assert_eq!(*calls.borrow(), Vec::<&str>::new());
@@ -213,7 +288,7 @@ mod tests {
 
         let ran = settled(run(
             plan.start(Some(deadline)),
-            &panel,
+            &asking(&panel),
             deadline,
             &Cancel::new(Source::Harness),
         ));
@@ -262,7 +337,7 @@ mod tests {
 
         let ran = settled(run(
             plan.start(Some(deadline)),
-            &panel,
+            &asking(&panel),
             deadline,
             &Cancel::new(Source::Harness),
         ));
@@ -309,7 +384,7 @@ mod tests {
 
         let ran = run(
             plan.start(Some(deadline)),
-            &panel,
+            &asking(&panel),
             deadline,
             &Cancel::new(Source::Harness),
         );
@@ -335,7 +410,7 @@ mod tests {
         let panel = Panel::new().with("careful", &judge);
         let ran = settled(run(
             running,
-            &panel,
+            &asking(&panel),
             deadline,
             &Cancel::new(Source::Harness),
         ));
