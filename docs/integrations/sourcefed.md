@@ -1,86 +1,103 @@
 # sourcefed
 
-sourcefed watches GitHub pull requests, Jira issues and Slack threads and
-delivers their events to agent sessions. It brings two things to Chauffeur,
-both kept and installed by sourcefed:
+[sourcefed](https://github.com/wrkhse/sourcefed) watches GitHub pull
+requests, Jira issues and Slack threads, and delivers their events to agent
+sessions in OpenCode, Pi, MCP and its CLI. With Chauffeur, sourcefed asks
+before it queues each event, so approvals, thanks and bot comments stay out of
+the session while CI failures and requested changes still arrive, on every
+host at once.
 
-| Piece                                                        | What it does                                                               | Slice |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------- | ----- |
-| The `sourcefed/triage` rule                                  | Decides which events reach the agent, for every host sourcefed delivers to | 2     |
-| The `sourcefed` plugin, in sourcefed's `adapters/chauffeur/` | Has sourcefed follow the session's own work                                | 5     |
-
-## Triage
-
-The rule is in the plan's [event triage](../plans/pluggability.md#event-triage);
-the flow is in
-[sourcefed: one triage for every host](../plans/pluggability.md#sourcefed-one-triage-for-every-host).
-
-sourcefed's daemon asks before it queues each event for a target, over one
-connection it keeps for its lifetime:
-
-```ts
-import { connect } from "@fdcn/chauffeur/client"
-
-const chauffeur = connect() // at startup; chauffeur.close() at shutdown
-
-const { intents } = await chauffeur.navigate(
-  { on: "sourcefed.event", evidence: { event, thread, monitor } },
-  { signal: AbortSignal.timeout(3_000) }
-)
-if (!intents.some((intent) => intent.withhold === "event")) queue(target, event)
+```mermaid
+flowchart LR
+    Source["GitHub, Jira, Slack"] -- "event" --> Sourcefed["sourcefed daemon"]
+    Sourcefed -- "navigate sourcefed.event<br/>event, thread, monitor" --> Daemon["Chauffeur daemon<br/>sourcefed/triage"]
+    Daemon -- "screen" --> Jev["Jev"]
+    Daemon -- "withhold: event, or none" --> Sourcefed
+    Sourcefed -- "queued events" --> Hosts["OpenCode, Pi, MCP, CLI"]
 ```
 
-With no Chauffeur, an error, or no answer within 3 seconds, sourcefed
-delivers.
+## Set it up
 
-## The plugin
+1. Install `chauffeur-next` and start its daemon, as in the
+   [README](../../README.md#install).
+2. Install sourcefed, as in
+   [its README](https://github.com/wrkhse/sourcefed#install).
+3. Add the rule:
 
-The `sourcefed` plugin follows the session's own work: the pull request the
-agent opened, the Jira issue it is working on, the Slack thread it is in. New
-reviews, CI results and comments then reach the agent. It lives in sourcefed's
-repository, beside the daemon whose RPC it calls, and sourcefed's installer
-adds it to `~/.config/chauffeur/plugins.json`. Its ID gives it the
-`sourcefed.*` events, which no other plugin can send.
+   ```sh
+   sourcefed setup chauffeur
+   ```
 
-| Hook                   | Does                                                                                                        |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ctx.on("tool.after")` | Finds candidates in the call and its result: a PR link from `gh pr create`, a Jira key, a Slack thread link |
+   It writes `~/.config/chauffeur-next/rules/sourcefed/triage.json` and never
+   replaces a rule file that is already there. `sourcefed setup` writes it
+   too when `~/.config/chauffeur-next/` exists.
 
-For each candidate no monitor watches yet, once per session, it asks:
+4. Check that the daemon loaded it:
 
-| Question                                                          | Confidence | `yes`                                                                                                                              |
-| ----------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| "Is this the session's own work, which it should keep following?" | 0.7        | sourcefed's RPC creates the monitor, then `message.append` `now`: "sourcefed now watches …; do not create another monitor for it." |
+   ```sh
+   chauffeur-next daemon status   # "rules" lists "sourcefed/triage"
+   ```
 
-An unreachable sourcefed daemon, a `no`, `unsure` or a failure creates
-nothing. The candidates already judged are kept in the plugin's storage, per
-session.
+sourcefed's daemon finds Chauffeur by itself: `$CHAUFFEUR_SOCKET` when it is
+set, or else the `chauffeur` and then the `chauffeur-next` socket in the
+runtime folder.
+
+## Try it
+
+Send the rule an event by hand, as sourcefed does:
+
+```sh
+chauffeur-next navigate <<'EOF'
+{ "protocol": 1, "deadline_ms": 3000, "on": "sourcefed.event",
+  "evidence": { "event": "thanks, looks good 👍", "monitor": "PR #42" } }
+EOF
+```
+
+The last line is the answer. A `no` from Jev withholds the event:
 
 ```json
 {
-  "sourcefed": {
-    "path": "~/.local/share/sourcefed/chauffeur",
-    "options": {
-      "daemon": {
-        "url": "http://127.0.0.1:18787",
-        "token": { "env": "SOURCEFED_DAEMON_TOKEN" }
-      },
-      "follow": { "confidence": 0.7 }
-    }
-  }
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": { "intents": [{ "rule": "sourcefed/triage", "withhold": "event" }] }
 }
 ```
 
-Its command:
+## Tune it
 
-```sh
-# What sourcefed follows for the session, and why.
-chauffeur sourcefed monitors --session ses_42
+The rule asks System One one question, `screen`: "Should the agent be shown
+this event now?", with the `event`, `thread` and `monitor` evidence, at
+confidence 0.7. Only a `no` withholds; `yes`, `unsure` and a failure
+deliver. Edit the file's `confidence` or `instructions`, and the daemon
+uses the edit on the next event.
+
+```json
+{
+  "on": "sourcefed.event",
+  "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
+  "strategy": [
+    {
+      "id": "screen",
+      "judge": "quick",
+      "ask": {
+        "outcomes": ["yes", "no"],
+        "evidence": ["event", "thread", "monitor"],
+        "instructions": "A sourcefed event arrived for the coding agent's session. … Should the agent be shown this event now? …"
+      }
+    }
+  ],
+  "then": [{ "if": { "screen": "no" }, "withhold": "event" }]
+}
 ```
 
-## What it needs
+## When Chauffeur cannot answer
 
-| Piece                                                       | Slice |
-| ----------------------------------------------------------- | ----- |
-| `navigate`, intents and the TypeScript client               | 2     |
-| Plugins, and `plugins.json` entries an integration installs | 5     |
+With no Chauffeur, an error, or no answer within 3 seconds, sourcefed
+delivers the event. A withheld event reaches no host, so sourcefed's log has
+one line for each, naming the event, the monitor and the rule.
+
+How sourcefed builds the evidence, keeps its connection and marks what
+Chauffeur triaged is in
+[sourcefed's Chauffeur v2 triage](https://github.com/wrkhse/sourcefed/blob/main/packages/daemon/src/triage/README.md).
+Moving from v1's event gate is in
+[sourcefed events](../migration/sourcefed.md).

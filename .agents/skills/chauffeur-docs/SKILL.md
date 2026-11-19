@@ -1,6 +1,6 @@
 ---
 name: chauffeur-docs
-description: MUST use when writing or editing any Markdown in the Chauffeur repository, including the slice pages in docs/plans/slices/, the plan, plugin, integration, CLI, tools and migration pages, and module READMEs, and when a slice is complete and its end-to-end recording is due. Adds Chauffeur's names, page layout, docs site checks and slice recordings to the spec-docs skill.
+description: MUST use when writing or editing any Markdown in the Chauffeur repository, including the slice pages in docs/plans/slices/, the plan, plugin, integration, CLI and migration pages, and module READMEs, and when a slice is complete and its end-to-end recording is due. Adds Chauffeur's names, page layout, docs site checks and slice recordings to the spec-docs skill.
 ---
 
 # Chauffeur docs
@@ -32,30 +32,38 @@ Watch it to the end.
 ## Names
 
 - Describe Chauffeur as if it exists. No sibling project is presented as
-  something it depends on: the integrations (sourcefed, neo, jev-distill,
-  opencode-history) are their own projects that call Chauffeur.
-- Events are named by their owner, such as `sourcefed.event` or
-  `neo.screen-check`. `tool`, `prompt`, `permission`, `response`,
+  something it depends on: an integration is its own project that calls
+  Chauffeur. sourcefed is the one documented in `docs/integrations/`.
+- Events are named by their owner, `<project>.<event>`, such as
+  `sourcefed.event`. `tool`, `prompt`, `permission`, `response`,
   `session` and `compaction` belong to harnesses.
 - The commands section is titled "CLI". A plugin's commands go under its ID,
   such as `chauffeur skills list`, in a Commands section on its page and in
-  `docs/cli/README.md`'s Commands from plugins.
+  `docs/cli/README.md`'s Commands from plugins, a section that appears once
+  a plugin ships.
 
 ## Pages
 
-- **Slices**: `docs/plans/slices/slice-N.md`, listed in its `README.md`.
-  The page opens with its status, what you can do, and the diagram; a
-  complete slice's Recording follows, a few sentences on what the recording
-  shows and then its GIF, so a reader sees the feature work before any detail.
-  What it builds and End to end come after. Each part has `Files:`, a code
-  example, `Structure:` when the slice is In progress or Implemented,
-  `Commands:` when a plugin adds any, and `Verified by:`.
-- **Plugins**: one page per plugin in `docs/plugins/`, with its hooks as
-  code, its Commands and its Options. Integrations are in
-  `docs/integrations/`.
-- **Migration**: one page per v1 feature in `docs/migration/`. Rule files
-  move by a prompt an agent follows to rewrite them, given in the migration
-  guide; there is no `migrate` command.
+- **What ships**: pages describe only what ships. Planned design lives in an
+  RFC sub-issue of [#43](https://github.com/wrkhse/chauffeur/issues/43),
+  which opens with `**Status: RFC.** Sub-issue of #43.` A page that would
+  describe unbuilt work links its issue instead.
+- **Slices**: an implemented or in-progress slice has its page,
+  `docs/plans/slices/slice-N.md`, listed in its `README.md`. A planned
+  slice is its issue. The page opens with its status, what you can do, and
+  the diagram; a complete slice's Recording follows, a few sentences on what
+  the recording shows and then its GIF, so a reader sees the feature work
+  before any detail. What it builds and End to end come after. Each part
+  has `Files:`, a code example, `Structure:` when the slice is In progress
+  or Implemented, `Commands:` when a plugin adds any, and `Verified by:`.
+- **Plugins**: a plugin gets its page in `docs/plugins/` once it ships,
+  with its hooks as code, its Commands and its Options. Until then its
+  design is in its RFC. Integrations are in `docs/integrations/`.
+- **Migration**: one page in `docs/migration/` per v1 feature that v2
+  ships. Rule files move by a prompt an agent follows to rewrite them; until
+  cutover that prompt is part of the cutover RFC,
+  [#53](https://github.com/wrkhse/chauffeur/issues/53). There is no
+  `migrate` command.
 - **Module READMEs**: each Rust module folder has a `README.md` saying what
   its files hold, with one example of its use.
 - A rule's `instructions` and `text` are long JSON strings; they may run

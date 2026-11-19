@@ -88,3 +88,12 @@ Need::outcome("fast", Some(Near::new(150, [bar])), Some(vec![When::Failed]))
 - A step may name a tier, such as `system-one`, without declaring it in
   `judges`; it then settles on the likeliest outcome.
 - A per-outcome confidence must cover exactly the step's outcomes.
+- A judge's `model` is asked before its tier's models, which answer if it
+  is not registered or cannot answer; see
+  [`tiers`](../../../judges/src/tiers/README.md).
+- A rule file is held to the limits a `chauffeur.navigate` request is, used
+  or not: a strategy over its steps, judges or asks, a question over 64
+  outcomes, or a text over 16 KiB is `RuleError::Limit`. A blank step ID is
+  `RuleError::BlankStep`.
+- A `then` entry holds exactly one action or intent beside `if`, and none
+  may be named `rule`, which names the rule on the wire.

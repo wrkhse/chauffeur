@@ -32,7 +32,7 @@ function link(page: string): string {
   return `/${rewrite(page).replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "")}`
 }
 
-/** `crates/judges/src/tiers/facts/README.md` reads as `judges · tiers · facts`. */
+/** `crates/judges/src/tiers/README.md` reads as `judges · tiers`. */
 function moduleName(page: string): string {
   const [crate, , ...module] = dirname(page).split("/").slice(1)
   return [crate, ...module].join(" · ")
@@ -45,8 +45,7 @@ function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
   const section = (
     text: string,
     folder: string,
-    label = (page: string) => title(page),
-    except: string[] = []
+    label = (page: string) => title(page)
   ) => {
     const index = `${folder}README.md`
     // In the order the README links them; pages it does not link come last.
@@ -56,18 +55,15 @@ function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
       return found === -1 ? Number.MAX_SAFE_INTEGER : found
     }
     const pages = under(folder)
-      .filter((page) => page !== index && !except.some((other) => page.startsWith(other)))
+      .filter((page) => page !== index)
       .toSorted((a, b) => at(a) - at(b))
     const items = pages.map((page) => item(page, label(page)))
     return all.includes(index) ? { text, link: link(index), items } : { text, items }
   }
   return [
     { text: "Chauffeur", link: "/" },
-    section("Plans", "docs/plans/", undefined, ["docs/plans/slices/"]),
     section("Slices", "docs/plans/slices/"),
     section("Integrations", "docs/integrations/"),
-    section("Plugins", "docs/plugins/"),
-    section("Tools", "docs/tools/"),
     section("CLI", "docs/cli/"),
     section("Moving from v1", "docs/migration/"),
     section("Audits", "docs/audits/"),
@@ -111,11 +107,9 @@ export default defineConfig({
   lastUpdated: true,
   themeConfig: {
     nav: [
-      { text: "Roadmap", link: "/docs/plans/pluggability#goal" },
+      { text: "Roadmap", link: `${REPOSITORY}/issues/43` },
       { text: "Slices", link: "/docs/plans/slices/" },
       { text: "Integrations", link: "/docs/integrations/" },
-      { text: "Plugins", link: "/docs/plugins/" },
-      { text: "Tools", link: "/docs/tools/" },
       { text: "CLI", link: "/docs/cli/" },
       { text: "Migration", link: "/docs/migration/" },
       { text: "Crates", link: "/crates/" },

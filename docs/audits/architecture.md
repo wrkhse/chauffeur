@@ -210,4 +210,6 @@ Unmeasured:
 - external-plugin compatibility
 - any other host adapter
 
-The [restructure plan](../plans/pluggability.md) defines the target and its gates.
+The [restructure plan](https://github.com/wrkhse/chauffeur/blob/8c755bd/docs/plans/pluggability.md)
+defines the target and its gates. See [issue 43](https://github.com/wrkhse/chauffeur/issues/43)
+for current planning.
