@@ -779,11 +779,11 @@ pub fn format(entry: &SystemOneEntry, key: String) -> Option<Box<dyn Format>>;
 
 The client posts to `{endpoint}/v1/systemone` with the key as a bearer token,
 waits 3 seconds by default and reads at most 256 KiB. Its configured timeout
-or the remaining shared end, whichever is shorter, bounds the entire HTTP
-call including the body. Exhausting the shared end fails as `Deadline`; a
-model timeout fails as `Timeout` and allows fallback. `limit` picks which of
-the two ends a call. It reads the clock only when there is a shared end, and
-with no time left it fails as `Deadline` before any connection.
+or the time left before the end its judge is given, whichever is shorter,
+bounds the entire HTTP call including the body. Exhausting that end fails as
+`Deadline`; a model timeout fails as `Timeout` and allows fallback. `limit`
+picks which of the two ends a call. It reads the clock only when there is an
+end, and with no time left it fails as `Deadline` before any connection.
 
 A 429 or 529 fails as `RateLimited`, a 408 as `Timeout`, and any other status
 outside 200 to 299 as `Unavailable`. A reply over 256 KiB, or one that is not

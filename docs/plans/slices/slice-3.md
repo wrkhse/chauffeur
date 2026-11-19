@@ -61,7 +61,8 @@ or rule file with 17 or more steps is refused with `limit_exceeded` naming
 Files: `crates/core/src/plan/need.rs`, `crates/core/src/plan/near.rs`,
 `crates/core/src/plan/run.rs`, `crates/core/src/plan/reply.rs`,
 `crates/core/src/proofs.rs`, `crates/core/tests/scenarios.rs`,
-`crates/protocol/src/limits.rs`, `deny.toml`
+`crates/protocol/src/limits.rs`, `crates/runtime/src/run/{mod,rounds}.rs`,
+`crates/runtime/tests/run.rs`, `deny.toml`
 
 ```toml
 # crates/core/Cargo.toml
@@ -82,12 +83,16 @@ The commit nudge acts on `yes` at 0.7, so Jev's `yes` at 0.8 goes to GLiDE,
 and its `no` at 0.75, a P(yes) of 0.25, does not. `when` adds the outcomes
 that also match, here a failure.
 
-The steps share the caller's deadline and end 1 s before it, so the answers
-in hand return in time; a step that escalates starts only with 500 ms left
-before that. Runtime drives each round and passes this end to its judges.
-Between rounds it checks cancellation, then the caller's deadline. Cancellation
-does not interrupt an HTTP call already in progress; an admitted run holds
-its place until the worker finishes.
+Runtime drives each round and gives its judges that round's end. Round 1's
+judges end at the caller's deadline plus 100 ms grace: the caller's wait
+answers `Deadline` first, and the worker's HTTP call stops just after, freeing
+its slot. A single-round run with a short deadline still asks its models. A
+round after the first ends 1 s before the deadline, so the answers in hand
+return in time; core starts such a round only with 500 ms left before that
+end, and skips its steps otherwise. Between rounds runtime checks
+cancellation, then the caller's deadline. Cancellation does not interrupt an
+HTTP call already in progress; an admitted run holds its place until the
+worker finishes.
 
 The caller's request type implements `Request`, how many values its answer
 can settle to, and its answer type implements `Reply`, which value it settled
@@ -111,9 +116,23 @@ Verified by scenario tests:
 - Escalation, with recorded answers at every tier: `near` asks GLiDE for
   Jev's P(yes) of 0.55 to 0.85 on a 0.7 bar and not for 0.25, and a failure
   listed in `when` asks it too.
-- The deadline: the steps end 1 s before it, and an escalation with less
-  than 500 ms left before that is not started. Only a run with a deadline
+- The deadline: core's end is 1 s before it, and an escalation with less
+  than 500 ms left before that end is skipped
+  (`the_steps_end_one_second_before_the_deadline`,
+  `an_escalation_with_less_than_500_ms_left_is_not_started`,
+  `an_escalation_with_500_ms_left_starts`). Only a run with a deadline
   reads the clock, and only before a round after the first.
+- Runtime's round ends, in `crates/runtime/tests/run.rs` and
+  `crates/runtime/src/run/rounds.rs`:
+  `a_judge_slower_than_the_deadline_returns_deadline` and
+  `a_short_budget_asks_the_model_once_and_its_call_stops_just_after` show
+  round 1 asked under a short deadline, the caller answered `Deadline`, and
+  the HTTP call stopped just after;
+  `the_first_round_ends_after_the_deadline_and_a_later_one_before_it` checks
+  both ends; `a_later_round_ends_a_second_before_the_deadline` settles with
+  the later step failed as `Deadline`; and
+  `a_last_round_answered_after_the_caller_deadline_still_settles` keeps a
+  late last answer.
 - `after` alone: a string need waits for a skipped step and then runs; an
   object need never matches a skipped step; `Failed` matches only when listed;
   a step with both `all` and `any` runs only when both hold.
