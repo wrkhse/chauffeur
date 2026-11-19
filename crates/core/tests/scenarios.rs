@@ -3,8 +3,8 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use chauffeur_core::{
-    Bar, Event, Failure, Judge, Near, Need, Outcome, Panel, Plan, PlanError, Reply, ReplyError,
-    Request, Run, Running, Step, When,
+    Bar, DECISION, Event, Failure, Judge, Near, Need, Outcome, Panel, Plan, PlanError, Reply,
+    ReplyError, Request, Run, Running, Step, When,
 };
 
 /// A yes/no request, named by its text.
@@ -407,6 +407,198 @@ fn jev_failing_asks_glide_when_the_need_lists_failed() {
 }
 
 #[test]
+fn a_confident_fast_answer_decides_when_sure_is_skipped() {
+    let (run, calls) = escalate(Outcome::Value(yes(1000))).unwrap();
+
+    assert_eq!(calls, 0);
+    assert_eq!(
+        run.verdict.decision(),
+        Some(("fast", &Outcome::Value(yes(1000))))
+    );
+    assert_eq!(run.verdict.get(DECISION), run.verdict.get("fast"));
+    assert_eq!(skips(&run), ["sure"]);
+}
+
+#[test]
+fn sure_decides_when_fast_is_near_the_bar() {
+    let plan = Plan::new(escalation()).unwrap();
+    let jev = |_: &Question| Outcome::Value(yes(600));
+    let glide = |_: &Question| Outcome::Value(yes(100));
+    let panel = Panel::new().with("jev", &jev).with("glide", &glide);
+
+    let run = plan.run(&panel).unwrap();
+
+    assert_eq!(
+        run.verdict.decision(),
+        Some(("sure", &Outcome::Value(yes(100))))
+    );
+    assert_eq!(run.verdict.get(DECISION), Some(&Outcome::Value(yes(100))));
+}
+
+#[test]
+fn a_failed_sure_is_the_decision_for_every_failure_path() {
+    for path in 0..4 {
+        let plan = Plan::new(escalation()).unwrap();
+        let mut running = plan.start(None);
+        assert_eq!(
+            open(&mut running, Instant::now()),
+            Some((1, ids(&["fast"])))
+        );
+        running
+            .answer([("fast".to_owned(), Outcome::Value(yes(600)))])
+            .unwrap();
+        assert_eq!(
+            open(&mut running, Instant::now()),
+            Some((2, ids(&["sure"])))
+        );
+
+        let failure = match path {
+            0 => {
+                running
+                    .answer([("sure".to_owned(), Outcome::Failed(Failure::Timeout))])
+                    .unwrap();
+                Failure::Timeout
+            }
+            1 => {
+                running.fail("sure", Failure::Unavailable).unwrap();
+                Failure::Unavailable
+            }
+            2 => {
+                running.fail_round(Failure::Invalid);
+                Failure::Invalid
+            }
+            _ => Failure::Deadline,
+        };
+        let run = running.finish();
+
+        assert_eq!(
+            run.verdict.decision(),
+            Some(("sure", &Outcome::Failed(failure)))
+        );
+        assert_eq!(run.verdict.get(DECISION), Some(&Outcome::Failed(failure)));
+    }
+}
+
+#[test]
+fn a_later_round_decides_before_a_higher_plan_index() {
+    let plan = Plan::new([
+        Step::new("first", "j", YES_NO),
+        Step::new("later", "j", YES_NO).after([Need::settled("first")]),
+        Step::new("root", "j", YES_NO),
+    ])
+    .unwrap();
+    let mut running = plan.start(None);
+
+    assert_eq!(
+        open(&mut running, Instant::now()),
+        Some((1, ids(&["first", "root"])))
+    );
+    running.answer(reply(&[("root", 2), ("first", 0)])).unwrap();
+    assert_eq!(
+        open(&mut running, Instant::now()),
+        Some((2, ids(&["later"])))
+    );
+    running.answer(reply(&[("later", 1)])).unwrap();
+
+    let run = running.finish();
+
+    assert_eq!(
+        run.verdict.decision(),
+        Some(("later", &Outcome::Value(said(1))))
+    );
+    assert_eq!(run.verdict.get(DECISION), Some(&Outcome::Value(said(1))));
+}
+
+#[test]
+fn the_higher_plan_index_decides_despite_reversed_replies() {
+    let plan = Plan::new([
+        Step::new("first", "j", YES_NO),
+        Step::new("last", "j", YES_NO),
+    ])
+    .unwrap();
+    let mut running = plan.start(None);
+
+    assert_eq!(
+        open(&mut running, Instant::now()),
+        Some((1, ids(&["first", "last"])))
+    );
+    running.answer(reply(&[("last", 1), ("first", 0)])).unwrap();
+
+    let run = running.finish();
+
+    assert_eq!(
+        run.verdict.decision(),
+        Some(("last", &Outcome::Value(said(1))))
+    );
+    assert_eq!(run.verdict.get(DECISION), Some(&Outcome::Value(said(1))));
+    assert_eq!(
+        run.verdict.iter().collect::<Vec<_>>(),
+        [
+            ("first", &Outcome::Value(said(0))),
+            ("last", &Outcome::Value(said(1)))
+        ]
+    );
+}
+
+#[test]
+fn failure_settlement_order_does_not_change_the_decision() {
+    for reverse in [false, true] {
+        let plan = Plan::new([
+            Step::new("first", "j", YES_NO),
+            Step::new("last", "j", YES_NO),
+        ])
+        .unwrap();
+        let mut running = plan.start::<Answer>(None);
+        open(&mut running, Instant::now());
+        let failures = [("first", Failure::Timeout), ("last", Failure::Invalid)];
+        let order = if reverse { [1, 0] } else { [0, 1] };
+
+        for index in order {
+            let (step, failure) = failures[index];
+            running.fail(step, failure).unwrap();
+        }
+
+        let run = running.finish();
+
+        assert_eq!(
+            run.verdict.decision(),
+            Some(("last", &Outcome::Failed(Failure::Invalid)))
+        );
+        assert_eq!(
+            run.verdict.get(DECISION),
+            Some(&Outcome::Failed(Failure::Invalid))
+        );
+    }
+}
+
+#[test]
+fn a_trailing_skipped_step_does_not_decide() {
+    let [fast, sure] = escalation();
+    let plan = Plan::new([
+        fast,
+        sure,
+        Step::new("tail", "tail", YES_NO).after([is("sure", 0)]),
+    ])
+    .unwrap();
+    let jev = |_: &Question| Outcome::Value(yes(600));
+    let glide = |_: &Question| Outcome::Value(yes(100));
+    let tail = |_: &Question| Outcome::Value(said(2));
+    let panel = Panel::new()
+        .with("jev", &jev)
+        .with("glide", &glide)
+        .with("tail", &tail);
+
+    let run = plan.run(&panel).unwrap();
+
+    assert_eq!(
+        run.verdict.decision(),
+        Some(("sure", &Outcome::Value(yes(100))))
+    );
+    assert_eq!(run.verdict.get(DECISION), Some(&Outcome::Value(yes(100))));
+    assert_eq!(skips(&run), ["tail"]);
+}
+
+#[test]
 fn a_value_in_when_matches_even_far_from_the_bar() {
     let plan = Plan::new([
         Step::new("fast", "jev", YES_NO),
@@ -794,6 +986,13 @@ fn an_empty_plan_too_many_steps_or_a_duplicate_is_refused() {
     );
     assert_eq!(refusal(numbered(16)), None);
     assert_eq!(
+        refusal([Step::new("decision", "j", YES_NO)]),
+        Some((
+            PlanError::ReservedStep("decision".into()),
+            "step ID `decision` is reserved for the step that decides the run".into()
+        ))
+    );
+    assert_eq!(
         refusal([
             Step::new("a", "j", YES_NO),
             Step::new("b", "j", YES_NO),
@@ -804,6 +1003,19 @@ fn an_empty_plan_too_many_steps_or_a_duplicate_is_refused() {
             "two steps are named `a`".into()
         ))
     );
+}
+
+#[test]
+fn the_decision_step_id_is_reserved() {
+    assert_eq!(
+        Plan::new([Step::new("decision", "j", YES_NO)]),
+        Err(PlanError::ReservedStep("decision".into()))
+    );
+    assert_eq!(
+        PlanError::ReservedStep("decision".into()).to_string(),
+        "step ID `decision` is reserved for the step that decides the run"
+    );
+    assert_eq!(refusal([Step::new("Decision", "j", YES_NO)]), None);
 }
 
 #[test]
@@ -1193,6 +1405,8 @@ fn finishing_before_any_round_skips_every_step() {
         ]
     );
     assert_eq!(run.verdict.iter().count(), 0);
+    assert_eq!(run.verdict.decision(), None);
+    assert_eq!(run.verdict.get(DECISION), None);
 }
 
 #[test]

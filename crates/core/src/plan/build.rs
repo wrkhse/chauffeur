@@ -4,7 +4,7 @@
 use super::near::{self, codes};
 use super::need::{Near, Need, Wants, When};
 use super::reply::Request;
-use super::{MAX_STEPS, PlanError, Shape, Step};
+use super::{DECISION, MAX_STEPS, PlanError, Shape, Step};
 
 /// Each step's needs' bits among their targets' near needs, all then any;
 /// none for a need without bars.
@@ -26,6 +26,10 @@ pub(super) const fn check_count<Q>(steps: &[Step<Q>]) -> Result<(), PlanError> {
 
 pub(super) fn check_ids<Q>(steps: &[Step<Q>]) -> Result<(), PlanError> {
     for (index, step) in steps.iter().enumerate() {
+        if step.id() == DECISION {
+            return Err(PlanError::ReservedStep(step.id().to_owned()));
+        }
+
         if steps
             .iter()
             .take(index)

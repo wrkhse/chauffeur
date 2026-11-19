@@ -22,6 +22,9 @@ use crate::judge::Panel;
 /// The most steps a plan has, as many as the step machine holds.
 pub const MAX_STEPS: usize = rungs::MAX_STEPS;
 
+/// The virtual step naming the last opened step's outcome in a verdict.
+pub const DECISION: &str = "decision";
+
 /// An ordered list of uniquely named steps, each waiting only on earlier
 /// ones. Each round asks every step whose needs have come to hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +57,8 @@ impl<Q: Request> Plan<Q> {
     ///
     /// [`PlanError::Empty`] with no steps, [`PlanError::TooManySteps`] past
     /// [`MAX_STEPS`], [`PlanError::DuplicateStep`] when two steps share an
-    /// ID, a need error when a step waits on what no earlier step can give,
+    /// ID, [`PlanError::ReservedStep`] for the [`DECISION`] ID,
+    /// a need error when a step waits on what no earlier step can give,
     /// and [`PlanError::Outcomes`] when a step's codes do not fit.
     pub fn new(steps: impl IntoIterator<Item = Step<Q>>) -> Result<Self, PlanError> {
         let steps: Vec<Step<Q>> = steps.into_iter().collect();

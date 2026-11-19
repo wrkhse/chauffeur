@@ -11,6 +11,8 @@ pub enum PlanError {
     TooManySteps(usize),
     /// Two steps share this ID.
     DuplicateStep(String),
+    /// This ID is reserved for the step that decides the run.
+    ReservedStep(String),
     /// A step names a judge the panel lacks.
     UnknownJudge {
         /// The step's ID.
@@ -78,6 +80,10 @@ impl fmt::Display for PlanError {
                 write!(f, "a plan has at most {MAX_STEPS} steps, not {count}")
             }
             Self::DuplicateStep(id) => write!(f, "two steps are named `{id}`"),
+            Self::ReservedStep(id) => write!(
+                f,
+                "step ID `{id}` is reserved for the step that decides the run"
+            ),
             Self::UnknownJudge { step, judge } => {
                 write!(
                     f,

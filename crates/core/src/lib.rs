@@ -52,6 +52,6 @@ mod proofs;
 pub use event::{Event, Run, Verdict};
 pub use judge::{Judge, Panel};
 pub use plan::{
-    Bar, Failure, MAX_STEPS, MIN_ESCALATION, Near, Need, Outcome, Plan, PlanError, RESERVE, Reply,
-    ReplyError, Request, Round, Running, Step, Wants, When,
+    Bar, DECISION, Failure, MAX_STEPS, MIN_ESCALATION, Near, Need, Outcome, Plan, PlanError,
+    RESERVE, Reply, ReplyError, Request, Round, Running, Step, Wants, When,
 };
