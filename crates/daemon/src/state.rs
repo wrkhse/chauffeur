@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chauffeur_judges::Models;
 use chauffeur_protocol::Rule;
-use chauffeur_runtime::{Context, Redactor};
+use chauffeur_runtime::{Context, Redactor, Rests};
 
 use crate::DaemonError;
 use crate::paths::Paths;
@@ -88,6 +88,7 @@ pub fn load(paths: &Paths, previous: Option<&Loaded>) -> Result<Loaded, DaemonEr
             models,
             redactor,
             keys,
+            rests: Rests::new(),
         }),
         files: BTreeMap::new(),
     };
