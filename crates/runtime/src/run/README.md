@@ -22,8 +22,10 @@ sequenceDiagram
     W->>W: start core with the caller's deadline
     W->>W: assemble judges with core's effective end, validate the panel
     loop each core round
-        W->>W: cancelled? stop, caller deadline passed? stop
-        W->>W: questions, ask the panel, answer
+        W->>W: cancelled? stop
+        W->>W: next round from core, none left? finish
+        W->>W: caller deadline passed? stop
+        W->>W: ask the panel, answer
     end
     W-->>C: Settled or Refused, unless the deadline or a cancel came first
     W->>P: wait for the next run, if fewer than 8 wait
@@ -44,11 +46,15 @@ without sending an HTTP request. Model assembly checks the caller's deadline;
 core reads its round clock only when advancing needs it.
 
 Before any judge is asked, every step's rule-local judge ID must be present in
-the panel. Each round checks cancellation first, then the caller's deadline,
-before asking core for its questions. Core groups each judge's requests into
-one batch. The driver gives the answers back together; a refused batch fails
-the open round as `Invalid`. When core has no questions, `finish` produces the
-events and verdict. Cancellation between rounds prevents later requests.
+the panel. Each turn checks cancellation first, then asks core for the next
+round. When core has no round left, `finish` produces the events and verdict,
+so answers that came after the caller's deadline still settle their steps. The
+caller's deadline is checked only before a round that would still be asked.
+Core skips a later round's pending steps once less than `RESERVE` and
+`MIN_ESCALATION` remain, so a run whose deadline passes during a round
+settles with those steps skipped. Core groups each judge's requests into one
+batch. The driver gives the answers back together; a refused batch fails the
+open round as `Invalid`. Cancellation between rounds prevents later requests.
 
 Workers are kept between runs. A run that outlives its deadline keeps its worker
 busy until its models time out; the next run takes another worker, or starts one,

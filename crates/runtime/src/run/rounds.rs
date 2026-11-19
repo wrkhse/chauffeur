@@ -5,7 +5,10 @@ use chauffeur_judges::{Answer, Question};
 
 use super::{Cancel, Ran};
 
-/// Drives the core rounds, checking the caller before each advance or ask.
+/// Drives the core rounds. Each turn checks cancellation, then asks core for
+/// the next round; the caller's deadline is checked only when there is a
+/// round left to ask. Answers that arrive after the deadline still settle
+/// their steps, so a run whose last round answered late is `Settled`.
 pub(super) fn run(
     mut running: Running<'_, Question, Answer>,
     panel: &Panel<'_, Question, Answer>,
@@ -16,13 +19,15 @@ pub(super) fn run(
         if cancel.is_cancelled() {
             return Ran::Cancelled;
         }
-        if Instant::now() >= deadline {
-            return Ran::Deadline;
-        }
 
         let Some(round) = running.questions(Instant::now) else {
             return Ran::Settled(running.finish());
         };
+
+        if Instant::now() >= deadline {
+            return Ran::Deadline;
+        }
+
         let reply = round.ask(panel);
 
         answer(&mut running, reply);
@@ -181,16 +186,72 @@ mod tests {
         assert_eq!(*calls.borrow(), Vec::<&str>::new());
     }
 
+    /// A caller deadline this far away is not reached before the first round
+    /// opens, however slowly the test thread is scheduled: reaching that check
+    /// takes microseconds, so a loaded runner would need a whole second's stall.
+    fn caller_deadline() -> Instant {
+        Instant::now().checked_add(Duration::from_secs(1)).unwrap()
+    }
+
+    /// Sleeps until `deadline` has certainly passed: a sleep never ends early.
+    fn sleep_past(deadline: Instant) {
+        let left = deadline.saturating_duration_since(Instant::now());
+
+        thread::sleep(left.saturating_add(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn a_last_round_answered_after_the_caller_deadline_still_settles() {
+        let question = Question::noul("Ship it?", ["diff"]).unwrap();
+        let plan = Plan::new([Step::new("only", "quick", question)]).unwrap();
+        let deadline = caller_deadline();
+        let quick = |question: &Question| {
+            sleep_past(deadline);
+            yes(question)
+        };
+        let panel = Panel::new().with("quick", &quick);
+
+        let ran = settled(run(
+            plan.start(Some(deadline)),
+            &panel,
+            deadline,
+            &Cancel::new(Source::Harness),
+        ));
+        let outcome = yes(plan.steps()[0].request());
+
+        assert!(Instant::now() > deadline);
+        assert_eq!(
+            ran.events,
+            [
+                Event::Started {
+                    steps: vec!["only".into()]
+                },
+                Event::RoundReady {
+                    round: 1,
+                    steps: vec!["only".into()]
+                },
+                Event::StepSettled {
+                    step: "only".into(),
+                    outcome: outcome.clone()
+                },
+                Event::Finished,
+            ]
+        );
+        assert_eq!(ran.verdict.iter().collect::<Vec<_>>(), [("only", &outcome)]);
+        assert_eq!(
+            ran.verdict.skipped().collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+    }
+
     #[test]
     fn the_caller_deadline_prevents_the_second_round() {
         let plan = plan();
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(200))
-            .unwrap();
+        let deadline = caller_deadline();
         let calls = RefCell::new(Vec::new());
         let quick = |question: &Question| {
             calls.borrow_mut().push("quick");
-            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            sleep_past(deadline);
             yes(question)
         };
         let careful = |question: &Question| {
@@ -198,6 +259,53 @@ mod tests {
             yes(question)
         };
         let panel = Panel::new().with("quick", &quick).with("careful", &careful);
+
+        let ran = settled(run(
+            plan.start(Some(deadline)),
+            &panel,
+            deadline,
+            &Cancel::new(Source::Harness),
+        ));
+        let outcome = yes(plan.steps()[0].request());
+
+        assert_eq!(*calls.borrow(), ["quick"]);
+        assert_eq!(
+            ran.events,
+            [
+                Event::Started {
+                    steps: vec!["first".into(), "second".into()]
+                },
+                Event::RoundReady {
+                    round: 1,
+                    steps: vec!["first".into()]
+                },
+                Event::StepSettled {
+                    step: "first".into(),
+                    outcome: outcome.clone()
+                },
+                Event::StepSkipped {
+                    step: "second".into()
+                },
+                Event::Finished,
+            ]
+        );
+        assert_eq!(
+            ran.verdict.iter().collect::<Vec<_>>(),
+            [("first", &outcome)]
+        );
+        assert_eq!(ran.verdict.skipped().collect::<Vec<_>>(), ["second"]);
+    }
+
+    #[test]
+    fn a_caller_deadline_passed_before_the_first_round_asks_nothing() {
+        let plan = plan();
+        let calls = RefCell::new(Vec::new());
+        let judge = |question: &Question| {
+            calls.borrow_mut().push("asked");
+            yes(question)
+        };
+        let panel = Panel::new().with("quick", &judge).with("careful", &judge);
+        let deadline = Instant::now();
 
         let ran = run(
             plan.start(Some(deadline)),
@@ -207,7 +315,7 @@ mod tests {
         );
 
         assert!(matches!(ran, Ran::Deadline), "{ran:?}");
-        assert_eq!(*calls.borrow(), ["quick"]);
+        assert_eq!(*calls.borrow(), Vec::<&str>::new());
     }
 
     #[test]
