@@ -47,14 +47,18 @@ The same run with `--brief`, in local time:
 13:54:43  conventional-commits  s1  nonconventional yes 0.93 jev  312 ms  → message.append
 ```
 
-| A run that                                                        | Has                                                        |
-| ----------------------------------------------------------------- | ---------------------------------------------------------- |
-| Answered                                                          | `steps`: each step's `answer`, or `failed` with the reason |
-| Was cooling down                                                  | `"cooldown": true`, and no steps                           |
-| Could not run, such as a placeholder whose answers would not load | `refused` with the reason                                  |
-| Started, and its deadline came first                              | `"deadline": true`                                         |
-| Never started, as the deadline came first                         | `"skipped": "deadline"`, and no `elapsed_ms` or `returned` |
-| Returned something                                                | `returned`: the action or intent                           |
+A step its strategy did not need, such as a second model asked only when the
+first is unsure, is `{ "step": "sure", "skipped": true }` in `steps`, and
+`sure skipped` on the brief line.
+
+| A run that                                                        | Has                                                                                                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Answered                                                          | `steps`: each step's `answer`, `failed` with the reason, or `"skipped": true` for a step its strategy did not need |
+| Was cooling down                                                  | `"cooldown": true`, and no steps                                                                                   |
+| Could not run, such as a placeholder whose answers would not load | `refused` with the reason                                                                                          |
+| Started, and its deadline came first                              | `"deadline": true`                                                                                                 |
+| Never started, as the deadline came first                         | `"skipped": "deadline"`, and no `elapsed_ms` or `returned`                                                         |
+| Returned something                                                | `returned`: the action or intent                                                                                   |
 
 The log is `audit.jsonl` in `~/.local/state/<name>/`, a folder only you can
 open. Past 8 MiB it moves to `audit.1.jsonl`, replacing the one there, so

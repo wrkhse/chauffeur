@@ -3914,6 +3914,41 @@
       }
     },
     {
+      "name": "a step named decision",
+      "params": {
+        "protocol": 1,
+        "deadline_ms": 3000,
+        "judges": {
+          "quick": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "strategy": [
+          {
+            "id": "decision",
+            "judge": "quick",
+            "ask": {
+              "outcomes": [
+                "yes",
+                "no"
+              ],
+              "evidence": [
+                "log"
+              ],
+              "instructions": "Is the migration finished?"
+            }
+          }
+        ],
+        "evidence": {
+          "log": "migrated 42 of 42 tables"
+        }
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
       "name": "an empty strategy",
       "params": {
         "protocol": 1,
@@ -3995,6 +4030,667 @@
       "reject": {
         "reason": "invalid"
       }
+    },
+    {
+      "name": "a step waiting on earlier steps",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?",
+            "evidence": [
+              "log"
+            ]
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "near": 0.15,
+                "outcome": "yes",
+                "when": [
+                  "failed"
+                ]
+              }
+            ]
+          },
+          {
+            "id": "tidy",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              "fast"
+            ],
+            "after_any": [
+              {
+                "step": "fast",
+                "when": [
+                  "no"
+                ]
+              },
+              {
+                "step": "sure",
+                "when": [
+                  "no",
+                  "unsure"
+                ]
+              }
+            ]
+          }
+        ],
+        "evidence": {
+          "log": "fixed stuff"
+        }
+      },
+      "expect": "strategy"
+    },
+    {
+      "name": "a near need with no outcome to bar",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "near": 0.15
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "a blank need",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "jev",
+            "ask": "commit",
+            "after": [
+              " "
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "an object need on a blank step",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "jev",
+            "ask": "commit",
+            "after": [
+              {
+                "step": " ",
+                "when": [
+                  "yes"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "a near need on a judge with no confidence",
+      "params": {
+        "protocol": 1,
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "system-one",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "system-one",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "near": 0.15,
+                "outcome": "yes"
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "a when naming an outcome its step lacks",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "when": [
+                  "maybe"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "a need on a later step",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit",
+            "after": [
+              "sure"
+            ]
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit"
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      },
+      "schema": "accepts"
+    },
+    {
+      "name": "an outcome without near",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "outcome": "yes",
+                "when": [
+                  "no"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "65 needs in after",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast",
+              "fast"
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "needs"
+      }
+    },
+    {
+      "name": "67 values in a need's when",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              {
+                "step": "fast",
+                "when": [
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed",
+                  "failed"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "when_outcomes"
+      }
+    },
+    {
+      "name": "a need's step over 16 KiB",
+      "params": {
+        "protocol": 1,
+        "judges": {
+          "jev": {
+            "tier": "system-one",
+            "confidence": 0.7
+          },
+          "glide": {
+            "tier": "system-one",
+            "confidence": 0.7
+          }
+        },
+        "asks": {
+          "commit": {
+            "outcomes": [
+              "yes",
+              "no"
+            ],
+            "instructions": "Does this commit message break Conventional Commits?"
+          }
+        },
+        "strategy": [
+          {
+            "id": "fast",
+            "judge": "jev",
+            "ask": "commit"
+          },
+          {
+            "id": "sure",
+            "judge": "glide",
+            "ask": "commit",
+            "after": [
+              "fast"
+            ]
+          }
+        ]
+      },
+      "reject": {
+        "reason": "limit_exceeded",
+        "limit": "text_bytes"
+      },
+      "fill": [
+        {
+          "at": "/strategy/1/after/0",
+          "text": "x",
+          "times": 16385
+        }
+      ]
     }
   ]
 }

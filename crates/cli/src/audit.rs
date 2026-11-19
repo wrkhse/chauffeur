@@ -76,11 +76,15 @@ fn summary(line: &str) -> String {
     parts.join("  ")
 }
 
-/// `nonconventional yes 0.94 jev`, or `nonconventional failed: timeout`.
+/// `nonconventional yes 0.94 jev`, `nonconventional failed: timeout`, or
+/// `sure skipped` for a step its strategy did not need.
 fn step(step: &Value) -> String {
     let id = step.get("step").and_then(Value::as_str).unwrap_or_default();
     if let Some(failed) = step.get("failed").and_then(Value::as_str) {
         return format!("{id} failed: {failed}");
+    }
+    if step.get("skipped") == Some(&Value::Bool(true)) {
+        return format!("{id} skipped");
     }
     let answer = step.get("answer").unwrap_or(&Value::Null);
     let outcome = answer
@@ -177,6 +181,38 @@ mod tests {
                 .to_string()
             ),
             "12:00:00  conventional-commits  s1  skipped before it ran: deadline"
+        );
+    }
+
+    /// A step its strategy did not need shows as skipped beside the step
+    /// that answered.
+    #[test]
+    fn a_brief_line_shows_a_skipped_step_beside_an_answered_one() {
+        assert_eq!(
+            summary(
+                &json!({
+                    "at": "12:00:00",
+                    "rule": "conventional-commits",
+                    "event": "tool.after",
+                    "session": "s1",
+                    "steps": [
+                        {
+                            "step": "fast",
+                            "answer": {
+                                "outcome": "yes",
+                                "p": { "yes": 0.94, "no": 0.06 },
+                                "level": 0.06,
+                                "model": "jev",
+                                "placeholder": false,
+                            },
+                        },
+                        { "step": "sure", "skipped": true },
+                    ],
+                    "elapsed_ms": 312,
+                })
+                .to_string()
+            ),
+            "12:00:00  conventional-commits  s1  fast yes 0.94 jev  sure skipped  312 ms"
         );
     }
 }

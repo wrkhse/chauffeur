@@ -70,7 +70,9 @@ impl Then {
         &self.payload
     }
 
-    /// The first entry whose needs `verdict` meets, if any.
+    /// The first entry whose needs `verdict` meets, if any. A need on
+    /// [`DECISION`](chauffeur_core::DECISION) reads the verdict's decision,
+    /// the last step that opened.
     #[must_use]
     pub fn first_met<'a>(entries: &'a [Self], verdict: &Verdict<Answer>) -> Option<&'a Self> {
         entries.iter().find(|entry| {

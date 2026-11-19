@@ -22,6 +22,7 @@ pub struct Running<'p, Q, O> {
     end: Option<Instant>,
     round: u32,
     open: Vec<usize>,
+    opened: Vec<Option<u32>>,
     outcomes: Vec<Option<Outcome<O>>>,
     skipped: Vec<bool>,
     events: Vec<Event<O>>,
@@ -39,6 +40,7 @@ impl<Q> Plan<Q> {
             end: deadline.map(|deadline| deadline.checked_sub(RESERVE).unwrap_or(deadline)),
             round: 0,
             open: Vec::new(),
+            opened: vec![None; self.steps.len()],
             outcomes: std::iter::repeat_with(|| None)
                 .take(self.steps.len())
                 .collect(),
@@ -90,6 +92,13 @@ impl<'p, Q, O: Reply + Clone> Running<'p, Q, O> {
 
         self.round = self.round.saturating_add(1);
         self.open = started.iter().collect();
+
+        for index in &self.open {
+            if let Some(opened) = self.opened.get_mut(*index) {
+                *opened = Some(self.round);
+            }
+        }
+
         self.events.push(Event::RoundReady {
             round: self.round,
             steps: self.open_ids(),
@@ -194,6 +203,14 @@ impl<'p, Q, O: Reply + Clone> Running<'p, Q, O> {
         }
         self.events.push(Event::Finished);
 
+        let decision = self
+            .opened
+            .iter()
+            .enumerate()
+            .filter_map(|(index, round)| round.map(|round| (round, index)))
+            .max()
+            .and_then(|(_, index)| self.id(index))
+            .map(str::to_owned);
         let ids = self.plan.steps.iter().map(|step| step.id().to_owned());
         let settled = ids
             .clone()
@@ -207,7 +224,7 @@ impl<'p, Q, O: Reply + Clone> Running<'p, Q, O> {
 
         Run {
             events: self.events,
-            verdict: Verdict::new(settled, skipped),
+            verdict: Verdict::new(settled, skipped, decision),
         }
     }
 

@@ -193,15 +193,15 @@ Test: `a_reload_thread_that_cannot_start_says_so`.
 
 ### Seen, not fixed
 
-| #   | What                                                                                                                            | Reached                                                                                                           | Why it stays for now                                                                                 |
-| --- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| O1  | A cooldown starts when the daemon returns an action, even when the adapter has stopped waiting or OpenCode refuses the message. | Only when delivery fails; the adapter logs it.                                                                    | The daemon learns nothing about delivery; reporting it back is a protocol change.                    |
-| O2  | A run past its deadline keeps its worker until its models' timeouts end, and new runs start new threads with no cap.            | Each late job ends within its tier's timeouts, 3 seconds a model by default; 64 connections limit how many start. | Bounded in practice. Slice 3 ends each step 1 second before the caller's deadline.                   |
-| O5  | A poisoned lock turns cooldowns off and makes `emit` return nothing.                                                            | Unreachable: nothing done under these locks can panic.                                                            | Nothing to reproduce.                                                                                |
-| O6  | Events with no session share one cooldown, under the session `""`.                                                              | Only through `chauffeur emit` without `session`; the adapter always sends one.                                    | No caller depends on it.                                                                             |
-| O7  | An idle connection holds its slot with no time limit.                                                                           | Only a client that connects and stays silent; the adapter and the CLI close theirs.                               | Programs that keep a connection open are planned with `connect()` in slice 2; a limit belongs there. |
-| O8  | A rule the deadline cuts short sends `failed: "deadline"` for each step, but a `then` entry for `failed` does not run.          | Yes: its run returns nothing.                                                                                     | Slice 3 ends steps before the deadline, so they fail as `deadline` in time.                          |
-| O9  | Two daemons sharing one state folder can interleave moving the log aside.                                                       | Only with two sockets set by `CHAUFFEUR_SOCKET` and one `XDG_STATE_HOME`.                                         | One daemon per installation is the supported setup.                                                  |
+| #   | What                                                                                                                            | Reached                                                                                             | Why it stays for now                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| O1  | A cooldown starts when the daemon returns an action, even when the adapter has stopped waiting or OpenCode refuses the message. | Only when delivery fails; the adapter logs it.                                                      | The daemon learns nothing about delivery; reporting it back is a protocol change.                                   |
+| O2  | A cancelled run can retain its worker while an HTTP call completes.                                                             | Cancellation during a call does not interrupt it; admission remains held until the worker finishes. | Pools are bounded; System One uses the round's end to bound HTTP work. Interrupting an in-flight call remains open. |
+| O5  | A poisoned lock turns cooldowns off and makes `emit` return nothing.                                                            | Unreachable: nothing done under these locks can panic.                                              | Nothing to reproduce.                                                                                               |
+| O6  | Events with no session share one cooldown, under the session `""`.                                                              | Only through `chauffeur emit` without `session`; the adapter always sends one.                      | No caller depends on it.                                                                                            |
+| O7  | An idle connection holds its slot with no time limit.                                                                           | Only a client that connects and stays silent; the adapter and the CLI close theirs.                 | Programs that keep a connection open are planned with `connect()` in slice 2; a limit belongs there.                |
+| O8  | A rule the deadline cuts short sends `failed: "deadline"` for each step, but a `then` entry for `failed` does not run.          | Yes: its run returns nothing.                                                                       | Slice 3 ends a later round 1 s before the deadline, so its steps fail as `deadline` in time.                        |
+| O9  | Two daemons sharing one state folder can interleave moving the log aside.                                                       | Only with two sockets set by `CHAUFFEUR_SOCKET` and one `XDG_STATE_HOME`.                           | One daemon per installation is the supported setup.                                                                 |
 
 ## The machines
 
@@ -435,7 +435,8 @@ Logged --> [_]
   - A rule cooling down asks no judge.
   - At most one action per rule and session within its cooldown, however
     events interleave. Before S4, runs that settled at once each returned it.
-  - A late result is dropped; its job runs on to its models' timeouts (O2).
+  - A late result is dropped. Cancellation does not interrupt a model call
+    in flight; an admitted run holds its place until the worker finishes (O2).
 
 | From    | On                                     | To       | Logged as                        |
 | ------- | -------------------------------------- | -------- | -------------------------------- |
@@ -483,8 +484,8 @@ Waiting --> [*] : the pool is gone
 ```
 
 - **Invariants**
-  - At most 8 workers wait. Any number may work: a job never waits for a
-    worker (O2).
+  - Each source's pool keeps at most 8 workers waiting and 32 alive. A job
+    is refused as busy when its pool has no place.
   - A job's result reaches its run through a channel that holds one; after
     the deadline nothing reads it.
   - A worker that stops drops that channel, and its run is refused at once,
@@ -510,9 +511,12 @@ Open --> Failed : no model left
   - A failure is never an answer.
   - A model whose key is not set is left out; with no model, the question
     fails as `unavailable`.
-  - Each model is asked once, with only the questions still open, within its
-    own timeout, 3 seconds by default. With several models, their timeouts
-    can add up past the run's deadline (O2).
+  - Each model is asked once with only the questions still open. System One
+    bounds the complete call by its model timeout, 3 seconds by default, or
+    the round's end, whichever is sooner. Round 1 ends 100 ms after the
+    caller's deadline; a round after the first ends 1 s before it. A model
+    timeout allows fallback; exhausting the round's end fails open questions
+    as `deadline`.
 
 ### The audit log
 

@@ -5,10 +5,10 @@
     reason = "the loopback server's helpers fail the test on a broken fixture"
 )]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chauffeur_core::{Failure, Outcome, Panel, Plan, Step};
 use chauffeur_judges::{
@@ -18,11 +18,40 @@ use chauffeur_judges::{
 
 const LIVE_RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"q0":{"type":"noul","noul":0.97}},"usage":{"input_tokens":397,"output_tokens":73}}"#;
 
+/// How long a server waits for its request, and on each read of it. A test
+/// whose request never comes fails when it joins the server, and cannot hang.
+const WAIT: Duration = Duration::from_secs(5);
+/// How long a server sleeps between looks for a connection.
+const POLL: Duration = Duration::from_millis(2);
+
 /// What the server received: the path, the authorization header and the body.
 struct Received {
     path: String,
     authorization: String,
     body: serde_json::Value,
+}
+
+/// The one connection `listener` is sent, or a panic once `WAIT` has passed
+/// with none.
+fn accept(listener: &TcpListener) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let started = Instant::now();
+
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // An accepted socket can inherit the listener's non-blocking mode.
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(WAIT)).unwrap();
+                return stream;
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::WouldBlock, "accept: {error}");
+                assert!(started.elapsed() < WAIT, "no request within {WAIT:?}");
+                thread::sleep(POLL);
+            }
+        }
+    }
 }
 
 /// Serves one request with `status` and `body`, after `delay`.
@@ -34,8 +63,7 @@ fn serve(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream);
+        let mut reader = BufReader::new(accept(&listener));
         let mut request_line = String::new();
         reader.read_line(&mut request_line).unwrap();
         let (mut authorization, mut length) = (String::new(), 0);

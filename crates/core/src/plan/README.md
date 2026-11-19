@@ -37,6 +37,22 @@ over. `Plan::start` begins a run. `questions` returns the round to ask,
 the verdict. `Plan::run` is that loop for a caller with nothing to do between
 rounds: it refuses a judge the panel lacks before anyone is asked.
 
+`Plan::new` reserves the exact ID `decision` for the virtual step and refuses
+it as a real step ID with `PlanError::ReservedStep`, alongside duplicate-ID
+checks. Core exports `DECISION`, the string `"decision"`, from its crate root.
+
+`Running` records the round in which each step opens. `finish` chooses the
+decision by the greatest pair of opening round and plan index: a later round
+wins, then the higher plan index within that round, regardless of reply or
+failure settlement order. Skipped steps never decide. A step that opens and
+fails, including one failed by `finish` at the deadline, can decide with
+`Outcome::Failed`. If no step opens, there is no decision.
+
+`Verdict::decision()` returns the deciding step's real ID and outcome, and
+`get(DECISION)` returns that outcome. `get` of a real ID is its own outcome;
+`iter()` and `skipped()` list only real steps in plan order. `Plan::run` uses
+the same `Running` path, and the events contain only real steps.
+
 The caller's request says how many values its answer settles to, and its
 answer says which one it settled to, with its probability for each outcome in
 thousandths:
@@ -98,6 +114,11 @@ let run = running.finish();
 
 assert_eq!(run.verdict.get("fast"), Some(&Outcome::Value(Said(800))));
 assert_eq!(run.verdict.get("sure"), Some(&Outcome::Value(Said(940))));
+assert_eq!(run.verdict.get(DECISION), run.verdict.get("sure"));
+assert_eq!(
+    run.verdict.decision(),
+    Some(("sure", &Outcome::Value(Said(940))))
+);
 ```
 
 Round 1 asks `fast`; its 800 lies within 150 of 700, so round 2 asks `sure`.

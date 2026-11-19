@@ -1,13 +1,14 @@
 mod log;
 mod pool;
+mod rounds;
 mod wait;
 
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use chauffeur_core::{Panel, Run};
-use chauffeur_judges::{Answer, Evidence, Fallback, Models, NamedJudge};
-use chauffeur_protocol::{Event, Rule, Strategy, Then};
+use chauffeur_core::{Outcome, Panel, PlanError, Round, Run, Step};
+use chauffeur_judges::{Answer, Evidence, Fallback, Models, NamedJudge, Question};
+use chauffeur_protocol::{Event, JudgeSpec, Rule, Strategy, Then};
 
 use crate::Source;
 use crate::redact::{Masking, Redactor};
@@ -139,7 +140,10 @@ fn run_now(
     if Instant::now() >= deadline {
         return Ran::Deadline;
     }
+
+    let running = strategy.plan().start(Some(deadline));
     let mut fallbacks = Vec::with_capacity(strategy.judges().len());
+
     for (name, spec) in strategy.judges() {
         match Fallback::build(
             &context.models,
@@ -151,17 +155,50 @@ fn run_now(
             Err(error) => return Ran::Refused(error.to_string()),
         }
     }
-    let judges: Vec<(&String, NamedJudge<'_>)> = fallbacks
+
+    let missing = |step: &&Step<Question>| {
+        !fallbacks
+            .iter()
+            .any(|(name, ..)| name.as_str() == step.judge())
+    };
+
+    if let Some(step) = strategy.plan().steps().iter().find(missing) {
+        return Ran::Refused(
+            PlanError::UnknownJudge {
+                step: step.id().to_owned(),
+                judge: step.judge().to_owned(),
+            }
+            .to_string(),
+        );
+    }
+
+    let ask = |round: &Round<'_, Question>, end: Option<Instant>| {
+        ask_until(&fallbacks, evidence, round, end)
+    };
+
+    rounds::run(running, &ask, deadline, cancel)
+}
+
+/// Asks `round` of the strategy's judges, their model work ending at `end`.
+/// The panel is built for this round alone, so each round's end is the one
+/// its judges hold.
+fn ask_until(
+    fallbacks: &[(&String, &JudgeSpec, Fallback)],
+    evidence: &Evidence,
+    round: &Round<'_, Question>,
+    end: Option<Instant>,
+) -> Vec<(String, Outcome<Answer>)> {
+    let judges: Vec<(&str, NamedJudge<'_>)> = fallbacks
         .iter()
         .map(|(name, spec, fallback)| {
-            (*name, NamedJudge::new(fallback, &spec.confidence, evidence))
+            let judge = NamedJudge::new(fallback, &spec.confidence, evidence);
+
+            (name.as_str(), judge.with_deadline(end))
         })
         .collect();
     let panel = judges.iter().fold(Panel::new(), |panel, (name, judge)| {
-        panel.with(name.as_str(), judge)
+        panel.with(*name, judge)
     });
-    match strategy.plan().run(&panel) {
-        Ok(run) => Ran::Settled(run),
-        Err(error) => Ran::Refused(error.to_string()),
-    }
+
+    round.ask(&panel)
 }

@@ -31,8 +31,8 @@ pub fn run_events(rule: Option<&str>, events: &[RunEvent<Answer>]) -> Vec<Value>
                     }
                     settled
                 }
-                // TODO(slice 3, PR 2): report a skipped step as `step_skipped` once
-                // rules lower `after`; no rule's plan skips a step yet.
+                // Protocol 1 has no `step_skipped` event and rc.5 clients refuse
+                // unknown events; the audit log shows skips.
                 RunEvent::Started { .. } | RunEvent::Finished | RunEvent::StepSkipped { .. } => {
                     return None;
                 }

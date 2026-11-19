@@ -70,6 +70,18 @@ pub enum RuleError {
         /// Which limit, and by how much.
         source: Exceeded,
     },
+    /// A step's need on an earlier step names what that step cannot give.
+    #[error("rule `{rule}`: step `{step}` waits on `{need}`: {reason}")]
+    Need {
+        /// The rule's ID.
+        rule: String,
+        /// The step that waits.
+        step: String,
+        /// The step it waits on.
+        need: String,
+        /// Why.
+        reason: String,
+    },
     /// The strategy is not a valid plan.
     #[error("rule `{rule}`: {source}")]
     Plan {

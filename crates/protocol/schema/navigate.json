@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/wrkhse/chauffeur/blob/v2/crates/protocol/schema/navigate.json",
   "title": "chauffeur.navigate",
-  "description": "The params of a chauffeur.navigate request, the chauffeur.event notifications it streams, and its result or error. Messages are JSON-RPC 2.0, one per line, each at most 1 MiB. The daemon checks what JSON Schema cannot express: the byte limits on evidence and candidates (256 KiB, names included), a 16 KiB limit on every text a strategy names (instructions, descriptions, outcome values, step IDs, judge and ask names, evidence names, models and an outcome key in a per-outcome confidence), project at most 4096 bytes, unique step IDs, that steps name known judges and asks, that an inline step's evidence is sent, and that a per-outcome confidence covers exactly its step's outcomes. Fixtures it cannot see as rejected carry \"schema\": \"accepts\". A fixture that Navigate::parse accepts and the daemon refuses later carries \"parsed\": \"accepts\".",
+  "description": "The params of a chauffeur.navigate request, the chauffeur.event notifications it streams, and its result or error. Messages are JSON-RPC 2.0, one per line, each at most 1 MiB. The daemon checks what JSON Schema cannot express: the byte limits on evidence and candidates (256 KiB, names included), a 16 KiB limit on every text a strategy names (instructions, descriptions, outcome values, step IDs, judge and ask names, evidence names, models, an outcome key in a per-outcome confidence, and a need's step, when values and outcome), project at most 4096 bytes, unique step IDs none of which is decision, that steps name known judges and asks, that an inline step's evidence is sent, that a per-outcome confidence covers exactly its step's outcomes, that a need names an earlier step and outcomes it has, that a near need has an outcome to bar and a judge with a confidence, and that a step's outcomes and the near needs on it fit 126 codes. Fixtures it cannot see as rejected carry \"schema\": \"accepts\". A fixture that Navigate::parse accepts and the daemon refuses later carries \"parsed\": \"accepts\".",
   "$ref": "#/$defs/request",
   "$defs": {
     "request": {
@@ -126,7 +126,11 @@
         "id": {
           "type": "string",
           "maxLength": 16384,
-          "pattern": "\\S"
+          "pattern": "\\S",
+          "not": {
+            "const": "decision"
+          },
+          "description": "Unique among the steps. decision is reserved: a then entry's if names by it the last step that opened."
         },
         "judge": {
           "type": "string",
@@ -143,8 +147,85 @@
               "$ref": "#/$defs/ask"
             }
           ]
+        },
+        "after": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Needs on earlier steps that must all hold before the step is asked.",
+          "items": {
+            "$ref": "#/$defs/need"
+          }
+        },
+        "after_any": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Needs on earlier steps of which at least one must hold; with after, both must.",
+          "items": {
+            "$ref": "#/$defs/need"
+          }
         }
       }
+    },
+    "need": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 16384,
+          "pattern": "\\S",
+          "description": "An earlier step's ID: it finished, settled, failed or skipped."
+        },
+        {
+          "type": "object",
+          "required": [
+            "step"
+          ],
+          "additionalProperties": false,
+          "description": "An earlier step's answer: near the bars its judge sets on the outcomes the rule acts on, or one of when. It never holds for a skipped step.",
+          "properties": {
+            "step": {
+              "type": "string",
+              "maxLength": 16384,
+              "pattern": "\\S"
+            },
+            "near": {
+              "$ref": "#/$defs/probability",
+              "description": "The margin around each bar. The bars are the step's judge's confidence on the outcome named by outcome or, without it, on each outcome a then entry expects of the step or of decision, or a when on the step lists; the judge must set a confidence."
+            },
+            "when": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 66,
+              "description": "The step's outcomes, unsure and failed that also hold.",
+              "items": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            },
+            "outcome": {
+              "type": "string",
+              "maxLength": 16384,
+              "description": "The one outcome near bars."
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "near"
+              ]
+            },
+            {
+              "required": [
+                "when"
+              ]
+            }
+          ],
+          "dependentRequired": {
+            "outcome": [
+              "near"
+            ]
+          }
+        }
+      ]
     },
     "judge": {
       "type": "object",
@@ -457,6 +538,8 @@
             "deadline_ms",
             "judges",
             "asks",
+            "needs",
+            "when_outcomes",
             "text_bytes",
             "project_bytes"
           ]

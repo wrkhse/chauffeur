@@ -25,6 +25,10 @@ systemone = ["dep:ureq"]
 name = "systemone"
 required-features = ["systemone"]
 
+[[test]]
+name = "budget"
+required-features = ["systemone"]
+
 [dev-dependencies]
 benchfmt = { workspace = true }
 

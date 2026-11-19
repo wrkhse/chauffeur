@@ -577,7 +577,8 @@ pub enum ConfigError {
 
 A format speaks one model API: it asks a round's questions in one call, with the
 redacted evidence blocks they name, and gives probabilities or a failure for
-each.
+each. The default deadline-aware call checks for expiry before calling
+`answer_all`; a blocking format must override it to bound its work.
 
 ```rust
 pub trait Format: Send + Sync {
@@ -585,6 +586,13 @@ pub trait Format: Send + Sync {
         &self,
         questions: &[&Question],
         evidence: &Evidence,
+    ) -> Vec<Result<Probabilities, Failure>>;
+
+    fn answer_all_until(
+        &self,
+        questions: &[&Question],
+        evidence: &Evidence,
+        deadline: Option<Instant>,
     ) -> Vec<Result<Probabilities, Failure>>;
 
     fn is_placeholder(&self) -> bool;
@@ -695,7 +703,8 @@ impl Tier {
 A fallback is a tier's models in order: `preferred` first, then the tier's
 order, each once, leaving out a model whose key is missing. Each model answers
 only the questions still open after a failure that falls back, and a question no
-model answered fails as `Unavailable`.
+model answered fails as `Unavailable`. Models share an optional absolute
+end; open questions fail as `Deadline` if it passes before the next model.
 
 ```rust
 pub struct Model {
@@ -720,17 +729,25 @@ impl Fallback {
         questions: &[&Question],
         evidence: &Evidence,
     ) -> Vec<Result<(Probabilities, AnsweredBy), Failure>>;
+
+    pub fn answer_all_until(
+        &self,
+        questions: &[&Question],
+        evidence: &Evidence,
+        deadline: Option<Instant>,
+    ) -> Vec<Result<(Probabilities, AnsweredBy), Failure>>;
 }
 ```
 
 A named judge is what core sees. It asks the fallback once per round and settles
-each reply with `Answer::settle`.
+each reply with `Answer::settle`. It has no deadline unless one is supplied.
 
 ```rust
 pub struct NamedJudge<'a> {
     models: &'a Fallback,
     confidence: &'a Confidence,
     evidence: &'a Evidence,
+    deadline: Option<Instant>,
 }
 
 impl<'a> NamedJudge<'a> {
@@ -739,6 +756,8 @@ impl<'a> NamedJudge<'a> {
         confidence: &'a Confidence,
         evidence: &'a Evidence,
     ) -> Self;
+
+    pub const fn with_deadline(self, deadline: Option<Instant>) -> Self;
 }
 
 impl Judge<Question, Answer> for NamedJudge<'_> {}
@@ -759,13 +778,27 @@ pub fn format(entry: &SystemOneEntry, key: String) -> Option<Box<dyn Format>>;
 ```
 
 The client posts to `{endpoint}/v1/systemone` with the key as a bearer token,
-waits 3 seconds by default and reads at most 256 KiB. A 429 or 529 fails as
-`RateLimited`, a 408 or a transport timeout as `Timeout`, and anything else as
-`Unavailable`, its text dropped. It sends a round's yes and no questions as
-`noul` in one request, with the evidence they name as `state`, and reads each
-`noul` as the chance of `yes`; any other question fails as `Invalid`.
+waits 3 seconds by default and reads at most 256 KiB. Its configured timeout
+or the time left before the end its judge is given, whichever is shorter,
+bounds the entire HTTP call including the body. Exhausting that end fails as
+`Deadline`; a model timeout fails as `Timeout` and allows fallback. `limit`
+picks which of the two ends a call. It reads the clock only when there is an
+end, and with no time left it fails as `Deadline` before any connection.
+
+A 429 or 529 fails as `RateLimited`, a 408 as `Timeout`, and any other status
+outside 200 to 299 as `Unavailable`. A reply over 256 KiB, or one that is not
+the expected JSON, fails as `Invalid`; any other transport error fails as
+`Unavailable`, its text dropped. The client sends a round's yes and no
+questions as `noul` in one request, with the evidence they name as `state`,
+and reads each `noul` as the chance of `yes`; any other question fails as
+`Invalid`.
 
 ```rust
+enum Limit {
+    Model,
+    Run(Duration),
+}
+
 pub struct SystemOne {
     agent: ureq::Agent,
     url: String,
@@ -775,7 +808,14 @@ pub struct SystemOne {
 
 impl SystemOne {
     pub fn new(entry: &SystemOneEntry, key: String) -> Self;
-    fn call(&self, body: &Value) -> Result<Response, Failure>;
+
+    fn limit(&self, deadline: Option<Instant>) -> Result<Limit, Failure>;
+
+    fn call(
+        &self,
+        body: &Value,
+        deadline: Option<Instant>,
+    ) -> Result<Response, Failure>;
 }
 
 impl Format for SystemOne {}

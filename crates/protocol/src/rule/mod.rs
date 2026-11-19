@@ -3,6 +3,7 @@ mod ask;
 mod error;
 mod file;
 mod judge;
+mod need;
 mod strategy;
 mod then;
 
@@ -20,6 +21,7 @@ use crate::event::Event;
 use crate::then::Then;
 use crate::when::When;
 use file::RuleFile;
+use need::ActedOn;
 
 /// A loaded rule: when it runs, the strategy it runs, and what it returns.
 #[derive(Debug)]
@@ -49,7 +51,10 @@ impl Rule {
             rule: id.to_owned(),
             source,
         })?;
-        let strategy = Strategy::build(id, file.judges, &file.asks, file.strategy)?;
+        // What `then` acts on gives a `near` need its bars, so it is read
+        // before the plan is built and the entries are checked after.
+        let acted_on = ActedOn::read(&file.then);
+        let strategy = Strategy::lower(id, file.judges, &file.asks, file.strategy, &acted_on)?;
         let then = file
             .then
             .into_iter()

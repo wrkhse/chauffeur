@@ -1,9 +1,11 @@
+use std::time::Instant;
+
 use chauffeur_core::Failure;
 
 use super::{Tier, system_one};
 use crate::confidence::{AnsweredBy, Probabilities};
 use crate::config::{ConfigError, ModelEntry, Models};
-use crate::format::{Evidence, Format};
+use crate::format::{Evidence, Format, expired};
 use crate::placeholder::Placeholder;
 use crate::question::Question;
 
@@ -86,33 +88,64 @@ impl Fallback {
         questions: &[&Question],
         evidence: &Evidence,
     ) -> Vec<Result<(Probabilities, AnsweredBy), Failure>> {
+        self.answer_all_until(questions, evidence, None)
+    }
+
+    /// One result per question, in order, with every model's work ending at
+    /// `deadline`: the models share the one moment, so a slow model leaves
+    /// the next only what is left. Once it passes, the questions still open
+    /// fail as [`Failure::Deadline`] and no further model is asked; answers
+    /// and failures already final stand. `None` is no deadline, and never
+    /// reads the clock.
+    #[must_use]
+    pub fn answer_all_until(
+        &self,
+        questions: &[&Question],
+        evidence: &Evidence,
+        deadline: Option<Instant>,
+    ) -> Vec<Result<(Probabilities, AnsweredBy), Failure>> {
         let mut results: Vec<Result<(Probabilities, AnsweredBy), Failure>> = questions
             .iter()
             .map(|_| Err(Failure::Unavailable))
             .collect();
         let mut open: Vec<usize> = (0..questions.len()).collect();
+
         for model in &self.models {
             if open.is_empty() {
                 break;
             }
+
+            if expired(deadline) {
+                for index in &open {
+                    if let Some(slot) = results.get_mut(*index) {
+                        *slot = Err(Failure::Deadline);
+                    }
+                }
+
+                break;
+            }
+
             let asked: Vec<&Question> = open
                 .iter()
                 .filter_map(|index| questions.get(*index).copied())
                 .collect();
-            let replies = model.format.answer_all(&asked, evidence);
+            let replies = model.format.answer_all_until(&asked, evidence, deadline);
             let by = AnsweredBy {
                 model: model.name.clone(),
                 placeholder: model.format.is_placeholder(),
             };
+
             for (index, reply) in open.iter().zip(replies) {
                 if let Some(slot) = results.get_mut(*index) {
                     *slot = reply.map(|p| (p, by.clone()));
                 }
             }
+
             open.retain(
                 |index| matches!(results.get(*index), Some(Err(failure)) if failure.falls_back()),
             );
         }
+
         results
     }
 }

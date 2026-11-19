@@ -142,73 +142,281 @@ fn a_run_whose_worker_stops_ends_at_once_not_late() {
 }
 
 #[test]
-fn a_judge_slower_than_the_deadline_is_dropped() {
+fn a_judge_slower_than_the_deadline_returns_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream);
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                length = value.trim().parse().unwrap();
-            }
-            if line.trim().is_empty() {
-                break;
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        thread::sleep(Duration::from_millis(800));
+        let mut stream = accept(&listener, Duration::from_secs(2)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let sent = request(&mut stream);
+        thread::sleep(Duration::from_millis(1_600));
         let reply = r#"{"answers":{"q0":{"type":"noul","noul":0.9}}}"#;
         let _ = write!(
-            reader.get_mut(),
+            stream,
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{reply}",
             reply.len()
         );
-        String::from_utf8(body).unwrap()
+        sent
     });
-    let models = format!(
-        r#"{{ "models": {{ "jev": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "jev-latest",
-                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": 2000 }} }},
-             "tiers": {{ "system-one": ["jev"] }} }}"#
-    );
-
+    let context = context("deadline", &http_models(&endpoint, 5_000), &[]);
     let started = Instant::now();
+
     let ran = run(
-        &context("deadline", &models, &[]),
+        &context,
         &commit_rule(),
         &commit("fixed AKIAABCDEFGHIJKLMNOP"),
-        Duration::from_millis(200),
+        Duration::from_millis(1_200),
     );
+    let elapsed = started.elapsed();
+    let sent = server.join().unwrap();
 
     assert!(matches!(ran, Ran::Deadline), "{ran:?}");
-    assert!(started.elapsed() < Duration::from_millis(600));
-    let sent = server.join().unwrap();
     assert!(
-        sent.contains("[REDACTED]") && !sent.contains("AKIA"),
-        "{sent}"
+        (Duration::from_millis(1_200)..Duration::from_millis(2_000)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        sent,
+        serde_json::json!({
+            "model": "jev-latest",
+            "questions": {
+                "q0": {
+                    "type": "noul",
+                    "instructions":
+                        "Does this call create a git commit whose message does not follow Conventional Commits?"
+                }
+            },
+            "state": "tool_call:\ntool: shell\ncommand: git commit -m 'fixed [REDACTED]'\n\n\n"
+        })
     );
 }
 
-/// A stand-in for Jev on loopback that answers once, after `delay`.
-fn slow_jev(delay: Duration) -> String {
+/// A 200 ms budget still asks the model, on one connection. The caller's
+/// wait answers `Deadline` at 200 ms; the model's call, whose budget ends
+/// 100 ms after that, then stops. A call held to the model's own 5 s timeout
+/// would close the connection seconds later.
+#[test]
+fn a_short_budget_asks_the_model_once_and_its_call_stops_just_after() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    thread::spawn(move || {
-        let Ok((stream, _)) = listener.accept() else {
-            return;
-        };
-        thread::sleep(delay);
-        drop(stream);
+    let started = Instant::now();
+    let server = thread::spawn(move || {
+        let mut stream = accept(&listener, Duration::from_secs(2)).unwrap();
+        let _ = request(&mut stream);
+        let closed = closed(&mut stream, Duration::from_secs(4));
+        let again = accept(&listener, Duration::from_millis(200));
+
+        (closed, again.is_some())
     });
+    let context = context("short-deadline", &http_models(&endpoint, 5_000), &[]);
+
+    let ran = run(
+        &context,
+        &commit_rule(),
+        &commit("fixed stuff"),
+        Duration::from_millis(200),
+    );
+    let elapsed = started.elapsed();
+    let (closed, again) = server.join().unwrap();
+    let closed = closed.duration_since(started);
+
+    assert!(matches!(ran, Ran::Deadline), "{ran:?}");
+    assert!(
+        (Duration::from_millis(200)..Duration::from_millis(1_000)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(
+        (Duration::from_millis(250)..Duration::from_millis(2_500)).contains(&closed),
+        "{closed:?}"
+    );
+    assert!(!again, "the model was asked on a second connection");
+}
+
+/// Round 1's stand-in answers at once; round 2's model never answers. Round 2
+/// ends a second before the 2.5 s deadline, so its step fails as `Deadline`
+/// and the run returns settled, with round 1's answer, before the caller's
+/// wait would cut it.
+#[test]
+fn a_later_round_ends_a_second_before_the_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let started = Instant::now();
+    let server = thread::spawn(move || {
+        let mut stream = accept(&listener, Duration::from_secs(2)).unwrap();
+        let _ = request(&mut stream);
+
+        closed(&mut stream, Duration::from_secs(4))
+    });
+    let (strategy, evidence) = two_rounds();
+    let context = context("later-round", &stand_in_then_http(&endpoint), &[]);
+
+    let ran = run_strategy(
+        &context,
+        &strategy,
+        &evidence,
+        in_ms(2_500),
+        &Cancel::new(Source::Harness),
+    );
+    let elapsed = started.elapsed();
+    let closed = server.join().unwrap().duration_since(started);
+
+    let Ran::Settled(ran) = ran else {
+        panic!("expected a settled run, got {ran:?}");
+    };
+    let Some(Outcome::Value(first)) = ran.verdict.get("first") else {
+        panic!("round 1 has no answer: {:?}", ran.verdict);
+    };
+    assert_eq!(
+        (first.outcome().to_string(), first.by().model.as_str()),
+        ("yes".to_owned(), "stand-in")
+    );
+    assert_eq!(
+        ran.verdict.iter().map(|(step, _)| step).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(
+        ran.verdict.get("second"),
+        Some(&Outcome::Failed(Failure::Deadline))
+    );
+    assert_eq!(
+        ran.verdict.skipped().collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    assert!(
+        (Duration::from_millis(1_400)..Duration::from_millis(2_500)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(
+        (Duration::from_millis(1_400)..Duration::from_millis(2_500)).contains(&closed),
+        "{closed:?}"
+    );
+}
+
+/// Two rounds: `first` asks the stand-in, then `second` asks Jev.
+#[expect(
+    clippy::panic,
+    reason = "a fixture that is not a strategy fails the test"
+)]
+fn two_rounds() -> (Arc<Strategy>, Vec<(String, String)>) {
+    let ask = serde_json::json!({ "outcomes": ["yes", "no"], "evidence": ["log"],
+                                  "instructions": "Is the migration finished?" });
+    let navigate = Navigate::parse(&serde_json::json!({
+        "protocol": 1,
+        "judges": { "quick": { "tier": "system-one", "model": "stand-in" },
+                    "careful": { "tier": "system-one", "model": "jev" } },
+        "strategy": [{ "id": "first", "judge": "quick", "ask": ask },
+                     { "id": "second", "judge": "careful", "ask": ask, "after": ["first"] }],
+        "evidence": { "log": "migrated 42 of 42 tables" }
+    }))
+    .unwrap();
+    let evidence = navigate.evidence().to_vec();
+    let Target::Strategy(strategy) = navigate.into_target() else {
+        panic!("an inline strategy is a strategy");
+    };
+
+    (Arc::new(strategy), evidence)
+}
+
+/// A stand-in answering yes, and Jev at `endpoint` with a 5 s timeout.
+fn stand_in_then_http(endpoint: &str) -> String {
+    format!(
+        r#"{{ "models": {{ "stand-in": {{ "format": "placeholder", "otherwise": {{ "yes": 0.9, "no": 0.1 }} }},
+                        "jev": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "jev-latest",
+                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": 5000 }} }},
+             "tiers": {{ "system-one": ["stand-in", "jev"] }} }}"#
+    )
+}
+
+/// When the client closed `stream`, read until it does, for at most `wait`.
+#[expect(clippy::panic, reason = "a client that never closes fails the test")]
+fn closed(stream: &mut std::net::TcpStream, wait: Duration) -> Instant {
+    stream.set_read_timeout(Some(wait)).unwrap();
+    let mut buffer = [0; 256];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Instant::now(),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                return Instant::now();
+            }
+            Err(error) => panic!("the client did not close within {wait:?}: {error}"),
+        }
+    }
+}
+
+fn http_models(endpoint: &str, timeout_ms: u64) -> String {
     format!(
         r#"{{ "models": {{ "jev": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "jev-latest",
-                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": 5000 }} }},
+                                  "key": {{ "env": "TYPESAFE_API_KEY" }}, "timeout_ms": {timeout_ms} }} }},
              "tiers": {{ "system-one": ["jev"] }} }}"#
     )
+}
+
+/// Accepts at most one connection, with a bounded listener lifetime.
+#[expect(clippy::panic, reason = "a broken loopback listener fails the test")]
+fn accept(listener: &TcpListener, wait: Duration) -> Option<std::net::TcpStream> {
+    listener.set_nonblocking(true).unwrap();
+    let started = Instant::now();
+
+    while started.elapsed() < wait {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+
+                return Some(stream);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+
+    None
+}
+
+#[expect(clippy::panic, reason = "an oversized fixture request fails the test")]
+fn request(stream: &mut std::net::TcpStream) -> serde_json::Value {
+    let mut reader = BufReader::new(stream);
+    let mut length = 0;
+
+    for _ in 0..64 {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+        if line.trim().is_empty() {
+            assert!(length <= 65_536);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+
+            return serde_json::from_slice(&body).unwrap();
+        }
+    }
+
+    panic!("too many request headers");
+}
+
+/// A stand-in for Jev on loopback that answers once, after `delay`.
+fn slow_jev(delay: Duration) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        if let Some(stream) = accept(&listener, Duration::from_secs(1)) {
+            thread::sleep(delay);
+            drop(stream);
+        }
+    });
+
+    (http_models(&endpoint, 5_000), server)
 }
 
 fn inline(evidence: &str) -> (Arc<chauffeur_protocol::Strategy>, Vec<(String, String)>) {
@@ -292,19 +500,23 @@ fn an_inline_strategy_settles_over_the_requests_evidence() {
 #[test]
 fn a_cancelled_run_returns_at_once_while_its_judge_is_still_asked() {
     let (strategy, evidence) = inline("migrated 41 of 42 tables");
-    let context = context("cancelled", &slow_jev(Duration::from_secs(2)), &[]);
+    let (models, server) = slow_jev(Duration::from_secs(2));
+    let context = context("cancelled", &models, &[]);
     let cancel = Cancel::new(Source::Harness);
     let canceller = cancel.clone();
-    thread::spawn(move || {
+    let cancelling = thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
         canceller.cancel();
     });
 
     let started = Instant::now();
     let ran = run_strategy(&context, &strategy, &evidence, in_ms(4_000), &cancel);
+    let elapsed = started.elapsed();
+    cancelling.join().unwrap();
+    server.join().unwrap();
 
     assert!(matches!(ran, Ran::Cancelled), "{ran:?}");
-    assert!(started.elapsed() < Duration::from_millis(1_000));
+    assert!(elapsed < Duration::from_millis(1_000));
 }
 
 #[test]

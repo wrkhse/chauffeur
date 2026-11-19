@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use chauffeur_core::Failure;
 
@@ -56,8 +57,35 @@ pub trait Format: Send + Sync {
         evidence: &Evidence,
     ) -> Vec<Result<Probabilities, Failure>>;
 
+    /// One result per question, in order, for a round whose model work ends
+    /// at `deadline`. A question still unanswered then fails as
+    /// [`Failure::Deadline`]. `None` is no deadline, and never reads the clock.
+    ///
+    /// The default refuses a round whose deadline has passed and otherwise
+    /// calls [`Format::answer_all`], which it cannot interrupt. A format that
+    /// blocks, as on a network call, overrides this to end that work at
+    /// `deadline`.
+    fn answer_all_until(
+        &self,
+        questions: &[&Question],
+        evidence: &Evidence,
+        deadline: Option<Instant>,
+    ) -> Vec<Result<Probabilities, Failure>> {
+        if expired(deadline) {
+            return questions.iter().map(|_| Err(Failure::Deadline)).collect();
+        }
+
+        self.answer_all(questions, evidence)
+    }
+
     /// Whether its answers only stand in for a real model's.
     fn is_placeholder(&self) -> bool {
         false
     }
+}
+
+/// Whether `deadline` has passed. With none, the clock is not read: it is
+/// missing where there is no deadline to give, as in the browser.
+pub fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|end| Instant::now() >= end)
 }

@@ -21,9 +21,16 @@ pub enum Limit {
     Judges,
     /// Named asks in one strategy.
     Asks,
+    /// Needs in one of a step's lists, `after` or `after_any`, each
+    /// counted on its own.
+    Needs,
+    /// Values in one need's `when`: every outcome of a question, `unsure`
+    /// and `failed`.
+    WhenOutcomes,
     /// Bytes in any one text a strategy names: instructions, a description,
     /// an outcome value, a step ID, a judge or ask name, an evidence name, a
-    /// model, or an outcome key in a per-outcome confidence.
+    /// model, an outcome key in a per-outcome confidence, or a need's step,
+    /// `when` value or `outcome`.
     TextBytes,
     /// Bytes in a request's `project` path.
     ProjectBytes,
@@ -32,7 +39,7 @@ pub enum Limit {
 impl Limit {
     /// Every limit a request or strategy is checked against, in the order the
     /// docs list them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Steps,
         Self::Outcomes,
         Self::EvidenceBlocks,
@@ -41,6 +48,8 @@ impl Limit {
         Self::Deadline,
         Self::Judges,
         Self::Asks,
+        Self::Needs,
+        Self::WhenOutcomes,
         Self::TextBytes,
         Self::ProjectBytes,
     ];
@@ -57,6 +66,8 @@ impl Limit {
             Self::Deadline => "deadline_ms",
             Self::Judges => "judges",
             Self::Asks => "asks",
+            Self::Needs => "needs",
+            Self::WhenOutcomes => "when_outcomes",
             Self::TextBytes => "text_bytes",
             Self::ProjectBytes => "project_bytes",
         }
@@ -68,7 +79,8 @@ impl Limit {
         match self {
             Self::Steps => 16,
             Self::Judges | Self::Asks => 32,
-            Self::Outcomes | Self::EvidenceBlocks | Self::Candidates => 64,
+            Self::Outcomes | Self::EvidenceBlocks | Self::Candidates | Self::Needs => 64,
+            Self::WhenOutcomes => 66,
             Self::EvidenceBytes => 256 * 1024,
             Self::TextBytes => 16 * 1024,
             Self::ProjectBytes => 4096,
@@ -110,6 +122,8 @@ impl fmt::Display for Exceeded {
             Limit::Deadline => write!(f, "deadline_ms {count} is over {max}"),
             Limit::Judges => write!(f, "the strategy names {count} judges, over {max}"),
             Limit::Asks => write!(f, "the strategy names {count} asks, over {max}"),
+            Limit::Needs => write!(f, "a step's needs list has {count} needs, over {max}"),
+            Limit::WhenOutcomes => write!(f, "a need's `when` lists {count} values, over {max}"),
             Limit::TextBytes => write!(f, "a strategy's text is over {} KiB", max / 1024),
             Limit::ProjectBytes => write!(f, "`project` is over {max} bytes"),
         }
