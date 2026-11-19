@@ -409,6 +409,47 @@ fn an_inline_near_bars_what_a_later_when_acts_on() {
 }
 
 #[test]
+fn an_inline_near_bars_only_what_a_when_on_its_own_step_lists() {
+    let step = |id: &str, after: Value| json!({ "id": id, "judge": "glide", "ask": ask(), "after": after });
+    // `c`'s `when` is on `a`, so it gives `b`, which shares `a`'s
+    // outcomes, nothing to bar.
+    let steps = |also: &[Value]| {
+        let mut steps = vec![
+            step("a", json!([])),
+            step("b", json!([])),
+            step("c", json!([{ "step": "a", "when": ["no"] }])),
+            step("d", json!([{ "step": "b", "near": 0.1 }])),
+        ];
+        steps.extend(also.iter().cloned());
+
+        json!({ "protocol": 1, "judges": bars(), "strategy": steps })
+    };
+
+    assert_eq!(
+        Navigate::parse(&steps(&[])).unwrap_err(),
+        Rejection::Invalid(
+            "rule `inline`: step `d` waits on `b`: `near` has no outcome to bar: name one in `outcome`, or act on one in `then` or a later `when`".to_owned()
+        )
+    );
+
+    let on_b = strategy(&steps(&[step(
+        "e",
+        json!([{ "step": "b", "when": ["yes"] }]),
+    )]));
+    assert_eq!(
+        needs(&on_b, 3),
+        (
+            vec![Need::outcome(
+                "b",
+                Some(Near::new(100, [yes_at(700)])),
+                None
+            )],
+            vec![]
+        )
+    );
+}
+
+#[test]
 fn an_inline_near_bars_the_outcome_it_names() {
     let params = inline(&[json!({ "id": "sure", "judge": "glide", "ask": ask(),
         "after": [{ "step": "fast", "near": 0.15, "outcome": "yes" }] })]);
