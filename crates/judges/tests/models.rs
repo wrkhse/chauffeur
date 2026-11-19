@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use chauffeur_core::{Failure, Outcome, Panel, Plan, Step};
 use chauffeur_judges::{
-    Answer, Confidence, ConfigError, Evidence, Fallback, Milli, Models, NamedJudge, Question,
-    Settled, Tier,
+    Answer, Confidence, ConfigError, Evidence, Fallback, KeySource, Milli, ModelEntry, Models,
+    NamedJudge, Question, Settled, SystemOneAsk, SystemOneEntry, Tier,
 };
 
 /// A fresh folder for one test's files.
@@ -199,4 +199,69 @@ fn unknown_fields_and_formats_are_refused() {
         Models::load(&[format]),
         Err(ConfigError::Parse { .. })
     ));
+}
+
+/// A `models.json` whose one model, `m`, is a `systemone` entry with
+/// `fields` beside its endpoint, model and key.
+fn systemone(folder: &Path, fields: &str) -> PathBuf {
+    let text = format!(
+        r#"{{ "models": {{ "m": {{ "format": "systemone", "endpoint": "https://api.example", {fields}
+                                "model": "m-1", "key": {{ "env": "M_KEY" }} }} }} }}"#
+    );
+    write(folder, "models.json", &text)
+}
+
+#[test]
+fn a_systemone_entry_loads_store_and_how_it_asks() {
+    let folder = folder("systemone-fields");
+    let cases = [
+        ("", None, SystemOneAsk::Choice),
+        (r#""ask": "choice","#, None, SystemOneAsk::Choice),
+        (
+            r#""ask": "score", "store": false,"#,
+            Some(false),
+            SystemOneAsk::Score,
+        ),
+        (r#""store": true,"#, Some(true), SystemOneAsk::Choice),
+    ];
+
+    for (fields, store, ask) in cases {
+        let models = Models::load(&[systemone(&folder, fields)]).unwrap();
+
+        let expected = ModelEntry::Systemone(SystemOneEntry {
+            endpoint: "https://api.example".into(),
+            model: "m-1".into(),
+            key: KeySource {
+                env: "M_KEY".into(),
+            },
+            timeout_ms: None,
+            store,
+            ask,
+        });
+        assert_eq!(models.model("m"), Some(&expected), "{fields}");
+    }
+
+    let _ = fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn a_systemone_entry_with_an_unknown_field_or_way_to_ask_is_refused() {
+    let folder = folder("systemone-refused");
+
+    for fields in [
+        r#""stored": false,"#,
+        r#""ask": "bogus","#,
+        r#""ask": "Score","#,
+        r#""ask": null,"#,
+        r#""store": "no","#,
+    ] {
+        let refused = Models::load(&[systemone(&folder, fields)]);
+
+        assert!(
+            matches!(refused, Err(ConfigError::Parse { .. })),
+            "{fields}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&folder);
 }

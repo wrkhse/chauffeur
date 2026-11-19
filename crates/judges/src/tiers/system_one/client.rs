@@ -1,10 +1,9 @@
 use std::time::{Duration, Instant};
 
 use chauffeur_core::Failure;
-use serde_json::{Map, Value, json};
 
-use super::SystemOneEntry;
-use super::wire::{Response, is_noul, read_noul, state};
+use super::wire::{Asked, Request, Response, state};
+use super::{SystemOneAsk, SystemOneEntry};
 use crate::confidence::Probabilities;
 use crate::format::{Evidence, Format};
 use crate::question::Question;
@@ -34,8 +33,9 @@ impl Limit {
     }
 }
 
-/// The `/v1/systemone` API that Jev speaks. It asks yes/no questions with
-/// `noul`; any other question fails as invalid.
+/// The `/v1/systemone` API that Jev and other classifiers serve. It asks a
+/// yes/no question as `noul`, and any other as `choice` or `score`, whichever
+/// the model's entry names.
 ///
 /// One call, from connecting to reading the whole reply, takes no longer
 /// than the model's timeout or the time left before the round's deadline,
@@ -45,6 +45,8 @@ pub struct SystemOne {
     url: String,
     model: String,
     key: String,
+    store: Option<bool>,
+    ask: SystemOneAsk,
 }
 
 impl SystemOne {
@@ -65,6 +67,8 @@ impl SystemOne {
             url,
             model: entry.model.clone(),
             key,
+            store: entry.store,
+            ask: entry.ask,
         }
     }
 
@@ -86,8 +90,8 @@ impl SystemOne {
         }
     }
 
-    fn call(&self, body: &Value, deadline: Option<Instant>) -> Result<Response, Failure> {
-        let body = serde_json::to_vec(body).map_err(|_| Failure::Unavailable)?;
+    fn call(&self, round: &Request<'_>, deadline: Option<Instant>) -> Result<Response, Failure> {
+        let body = serde_json::to_vec(round).map_err(|_| Failure::Unavailable)?;
         let request = self
             .agent
             .post(&self.url)
@@ -149,37 +153,32 @@ impl Format for SystemOne {
         evidence: &Evidence,
         deadline: Option<Instant>,
     ) -> Vec<Result<Probabilities, Failure>> {
+        // A round with no question makes no call.
+        if questions.is_empty() {
+            return Vec::new();
+        }
+
         let ids: Vec<String> = (0..questions.len())
             .map(|index| format!("q{index}"))
             .collect();
-        let mut asked = Map::new();
+        let asked: Vec<Asked<'_>> = questions
+            .iter()
+            .map(|question| Asked::of(question, self.ask))
+            .collect();
+        let request = Request {
+            model: &self.model,
+            state: state(questions, evidence),
+            questions: ids.iter().map(String::as_str).zip(&asked).collect(),
+            store: self.store,
+        };
 
-        for (id, question) in ids.iter().zip(questions) {
-            if is_noul(question) {
-                asked.insert(
-                    id.clone(),
-                    json!({ "type": "noul", "instructions": question.instructions() }),
-                );
-            }
-        }
-
-        if asked.is_empty() {
-            return questions.iter().map(|_| Err(Failure::Invalid)).collect();
-        }
-
-        let body =
-            json!({ "model": self.model, "state": state(questions, evidence), "questions": asked });
-
-        match self.call(&body, deadline) {
+        match self.call(&request, deadline) {
             Ok(response) => ids
                 .iter()
+                .zip(&asked)
                 .zip(questions)
-                .map(|(id, question)| {
-                    if is_noul(question) {
-                        read_noul(question, response.answers.get(id))
-                    } else {
-                        Err(Failure::Invalid)
-                    }
+                .map(|((id, asked), question)| {
+                    asked.read(question.outcomes(), response.answers.get(id))
                 })
                 .collect(),
             Err(failure) => questions.iter().map(|_| Err(failure)).collect(),

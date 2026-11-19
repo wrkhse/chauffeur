@@ -1,5 +1,5 @@
 //! The System One tier: fast classifiers. Its `systemone` format speaks the
-//! `/v1/systemone` API that Jev serves.
+//! `/v1/systemone` API that Jev and other classifiers serve.
 
 #[cfg(feature = "systemone")]
 mod client;
@@ -13,6 +13,18 @@ use serde::Deserialize;
 use crate::config::KeySource;
 use crate::format::Format;
 
+/// How a model is asked a question whose outcomes are not exactly `yes` and
+/// `no`. A yes/no question is always asked as `noul`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemOneAsk {
+    /// As `choice`: the outcomes are options, each with its description.
+    #[default]
+    Choice,
+    /// As `score`: the outcomes are a scale's levels, lowest first.
+    Score,
+}
+
 /// A model that speaks the `/v1/systemone` API.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +37,12 @@ pub struct SystemOneEntry {
     pub key: KeySource,
     /// How long one call may take, in milliseconds.
     pub timeout_ms: Option<u64>,
+    /// Sent as the request's top-level `store` when set, and left out when
+    /// not: a provider may refuse a top-level key it does not know.
+    pub store: Option<bool>,
+    /// How a question that is not yes/no is asked.
+    #[serde(default)]
+    pub ask: SystemOneAsk,
 }
 
 /// A client for `entry` that sends `key`.
