@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chauffeur_core::{Failure, Judge, Outcome};
 use chauffeur_judges::{
     Answer, AnsweredBy, Confidence, Evidence, Fallback, Format, Model, NamedJudge, Placeholder,
-    PlaceholderEntry, Probabilities, Question,
+    PlaceholderEntry, Probabilities, Question, Rests,
 };
 
 type Replies = Vec<Result<Probabilities, Failure>>;
@@ -245,10 +245,14 @@ fn every_model_is_given_the_same_deadline_and_the_unbounded_call_gives_none() {
     let (question, evidence) = (question(), evidence());
     let (first, first_deadlines) = recording("first", vec![Err(Failure::RateLimited)], false);
     let (second, second_deadlines) = recording("second", vec![Ok(p(0.9))], false);
-    let fallback = Fallback::new(vec![first, second]);
+    let rests = Rests::new();
+    let fallback = Fallback::new(vec![first, second]).with_rests(rests.clone());
     let deadline = Some(after(AMPLE));
 
     let bounded = fallback.answer_all_until(&[&question], &evidence, deadline);
+
+    rests.reset();
+
     let unbounded = fallback.answer_all(&[&question], &evidence);
 
     assert_eq!(bounded, [Ok((p(0.9), by("second")))]);

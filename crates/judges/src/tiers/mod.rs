@@ -1,9 +1,11 @@
 mod fallback;
 mod judge;
+mod rest;
 pub mod system_one;
 
 pub use fallback::{Fallback, Model};
 pub use judge::NamedJudge;
+pub use rest::{REST, Rests};
 use serde::Deserialize;
 
 /// The four tiers a step's judge can name.
