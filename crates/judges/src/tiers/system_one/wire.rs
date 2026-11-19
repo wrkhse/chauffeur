@@ -128,12 +128,9 @@ struct Answered {
 impl Answered {
     /// A `noul` answer's probabilities, from the chance of `yes`.
     fn noul(&self, outcomes: &Outcomes) -> Result<Probabilities, Failure> {
-        match self.noul {
-            Some(yes) if is_probability(yes) => {
-                Probabilities::read(outcomes, [("yes", yes), ("no", 1.0 - yes)])
-            }
-            _ => Err(Failure::Invalid),
-        }
+        self.noul.map_or(Err(Failure::Invalid), |yes| {
+            Probabilities::read(outcomes, [("yes", yes), ("no", 1.0 - yes)])
+        })
     }
 
     /// A `choice` answer's probabilities, keyed by outcome value.

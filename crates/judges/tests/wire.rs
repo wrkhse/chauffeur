@@ -385,6 +385,31 @@ fn a_choice_is_read_from_its_probabilities_whatever_it_names() {
 }
 
 #[test]
+fn a_noul_outside_zero_to_one_or_without_noul_is_invalid() {
+    let cases = [
+        r#"{"type":"noul","noul":1.5}"#,
+        r#"{"type":"noul","noul":-0.5}"#,
+        r#"{"type":"noul"}"#,
+    ];
+    let needed = Question::noul("Needed?", ["log"]).unwrap();
+
+    for answer in cases {
+        let (request, replies) = ask(("m", None, SystemOneAsk::Choice), only(answer), &[&needed]);
+
+        assert_eq!(
+            request,
+            json!({
+                "model": "m",
+                "state": format!("log:\n{STATE}\n\n"),
+                "questions": { "q0": { "type": "noul", "instructions": "Needed?" } }
+            }),
+            "{answer}"
+        );
+        assert_eq!(replies, [Err(Failure::Invalid)], "{answer}");
+    }
+}
+
+#[test]
 fn an_answer_that_cannot_be_read_fails_only_its_question() {
     let reply = r#"{"answers":{
         "q0":{"type":"noul","noul":0.9},
