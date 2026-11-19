@@ -10,6 +10,70 @@ or Slack event reaches your agent, so noise stays out of the session. Every
 decision is a rule file you can read and edit, and every run is in an audit
 log.
 
+## Design
+
+Chauffeur is a judgment engine with a small Rust core and plugins around it.
+A harness or a program sends an event in, the engine runs the rules that match
+it, and the actions it returns go back to the caller. Three rings hold the
+design.
+
+```mermaid
+flowchart LR
+    subgraph Connections["Connections"]
+        C["Harness or program"]
+        A["tack adapter, CLI,<br/>chauffeur.navigate"]
+    end
+    subgraph Core["Core: Rust engine"]
+        S["Bounded strategies"]
+        J["Four judge tiers"]
+        S -- "questions" --> J
+        J -- "answers" --> S
+    end
+    subgraph Extensions["Extensions"]
+        R["Rule files + distribution/"]
+        P["TypeScript plugins"]
+    end
+    C -- "events, requests" --> A
+    A -- "events in, actions out" --> S
+    R -- "decisions" --> S
+    P -- "hooks, actions" --> S
+```
+
+**Core** is the engine in Rust. It runs bounded strategies: named steps that
+each ask one judge one question, in rounds that end at a deadline. Evidence
+is redacted before a judge sees it, and a failed judge stays a failure, not
+an answer.
+
+**Extensions** are rule files and the content shipped in `distribution/`.
+A rule file names the event it hooks, the question it asks and what to do with
+the answer. A TypeScript plugin holds what a rule file cannot — state, work
+over time, tools and commands — and acts through generic actions that carry
+the session's revision.
+
+**Connections** are one adapter per harness, the CLI, and
+`chauffeur.navigate` for any program. tack builds one adapter into each
+harness's native form, turning native hooks into Chauffeur's standard events
+and its actions back into native calls; sourcefed's triage is a caller of
+`navigate`.
+
+A step names one of four judge tiers:
+
+| Tier       | Answers with                                 |
+| ---------- | -------------------------------------------- |
+| facts      | A sandboxed JavaScript fact, without a model |
+| System One | A fast classifier: noul, choice or score     |
+| System Two | A reasoning model that cites its evidence    |
+| person     | The user, through the adapter                |
+
+The design is in [the v2 plan](https://github.com/wrkhse/chauffeur/issues/43)
+and its sub-issues: [plugins](https://github.com/wrkhse/chauffeur/issues/44),
+[escalation](https://github.com/wrkhse/chauffeur/issues/45),
+[facts](https://github.com/wrkhse/chauffeur/issues/46),
+[guards and person steps](https://github.com/wrkhse/chauffeur/issues/47),
+[harness adapters](https://github.com/wrkhse/chauffeur/issues/50),
+[System Two](https://github.com/wrkhse/chauffeur/issues/51) and
+[rulebooks](https://github.com/wrkhse/chauffeur/issues/52).
+
 ## Install
 
 The release candidate is `1.0.0-rc.5`. It installs as `chauffeur-next`, with
