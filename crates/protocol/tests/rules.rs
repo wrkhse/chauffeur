@@ -5,9 +5,10 @@
 
 use std::path::PathBuf;
 
-use chauffeur_core::{Failure, Outcome, Panel};
-use chauffeur_judges::{Answer, AnsweredBy, Confidence, Milli, Probabilities, Question, Tier};
-use chauffeur_protocol::{Event, Rule, RuleError, Then};
+use chauffeur_core::{Bar, Failure, Near, Outcome, Panel, Run, Wants, When};
+use chauffeur_judges::{Answer, AnsweredBy, Probabilities, Question, Tier};
+use chauffeur_protocol::{Event, Expect, Rule, RuleError, Then};
+use serde_json::Value;
 
 fn shipped(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -31,26 +32,48 @@ fn tool_after(command: &str) -> Event {
     Event::parse(&event.to_string()).unwrap()
 }
 
-/// What the rule returns when its `quick` judge gives `yes` with probability
-/// `reply`, or fails.
-fn then_for(rule: &Rule, reply: Result<f64, Failure>) -> Option<String> {
-    let confidence = Confidence::Bar(Milli::new(700).unwrap());
-    let by = AnsweredBy {
-        model: "jev".into(),
-        placeholder: true,
-    };
-    let judge = |question: &Question| match reply {
-        Ok(yes) => {
-            let p = Probabilities::read(question.outcomes(), [("yes", yes), ("no", 1.0 - yes)])
-                .unwrap();
-            Outcome::Value(Answer::settle(question, p, &confidence, by.clone()))
-        }
-        Err(failure) => Outcome::Failed(failure),
-    };
-    let run = rule
-        .plan()
-        .run(&Panel::new().with("quick", &judge))
-        .unwrap();
+/// Runs the rule with each named judge giving `yes` with its probability,
+/// settled under the rule's own confidence, or failing. A judge not named is
+/// unavailable.
+fn run_with(rule: &Rule, replies: &[(&str, Result<f64, Failure>)]) -> Run<Answer> {
+    let judges: Vec<_> = rule
+        .judges()
+        .iter()
+        .map(|(name, spec)| {
+            let reply = replies
+                .iter()
+                .find(|(answering, _)| answering == name)
+                .map_or(Err(Failure::Unavailable), |(_, reply)| *reply);
+            let confidence = spec.confidence.clone();
+            let by = AnsweredBy {
+                model: name.clone(),
+                placeholder: true,
+            };
+            let judge = move |question: &Question| match reply {
+                Ok(yes) => {
+                    let p =
+                        Probabilities::read(question.outcomes(), [("yes", yes), ("no", 1.0 - yes)])
+                            .unwrap();
+
+                    Outcome::Value(Answer::settle(question, p, &confidence, by.clone()))
+                }
+                Err(failure) => Outcome::Failed(failure),
+            };
+
+            (name.as_str(), judge)
+        })
+        .collect();
+    let panel = judges.iter().fold(Panel::new(), |panel, (name, judge)| {
+        panel.with(*name, judge)
+    });
+
+    rule.plan().run(&panel).unwrap()
+}
+
+/// What the rule returns when its judges reply as in [`run_with`].
+fn then_for(rule: &Rule, replies: &[(&str, Result<f64, Failure>)]) -> Option<String> {
+    let run = run_with(rule, replies);
+
     Then::first_met(rule.then(), &run.verdict)
         .map(|then| format!("{} {}", then.name(), then.payload()))
 }
@@ -77,26 +100,152 @@ fn the_shipped_commit_rule_hooks_only_commits() {
         rule.cooldown().map(|cooldown| cooldown.as_secs()),
         Some(120)
     );
+
+    let judges: Vec<_> = rule
+        .judges()
+        .iter()
+        .map(|(name, judge)| (name.as_str(), judge.tier, judge.model.as_deref()))
+        .collect();
     assert_eq!(
-        rule.judges().get("quick").map(|judge| judge.tier),
-        Some(Tier::SystemOne)
+        judges,
+        [
+            ("glide", Tier::SystemOne, Some("glide")),
+            ("jev", Tier::SystemOne, Some("jev")),
+        ]
+    );
+}
+
+/// The shipped nudge escalates from Jev to `GLiDE` near its bar or on a
+/// failure, and acts on the decision plus a failed `GLiDE` after Jev's yes.
+#[test]
+fn the_shipped_commit_rule_escalates_near_the_bar_or_on_a_failure() {
+    let rule = commit_rule();
+    let steps = rule.plan().steps();
+
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| (step.id(), step.judge()))
+            .collect::<Vec<_>>(),
+        [("nonconventional", "jev"), ("sure", "glide")]
+    );
+
+    let sure = &steps[1];
+    assert_eq!(sure.any(), []);
+    let needs = sure.all();
+    assert_eq!(needs.len(), 1);
+    assert_eq!(needs[0].step(), "nonconventional");
+    assert_eq!(
+        needs[0].wants(),
+        &Wants::Outcome {
+            near: Some(Near::new(
+                150,
+                [Bar {
+                    outcome: 0,
+                    at: 700
+                }]
+            )),
+            when: Some(vec![When::Failed]),
+        }
+    );
+
+    let then = rule.then();
+    assert_eq!(then.len(), 2);
+    assert_eq!(
+        then[0].needs(),
+        &[("decision".to_owned(), Expect::Outcome("yes".to_owned()))]
+    );
+    assert_eq!(
+        then[1].needs(),
+        &[
+            (
+                "nonconventional".to_owned(),
+                Expect::Outcome("yes".to_owned())
+            ),
+            ("sure".to_owned(), Expect::Failed),
+        ]
+    );
+    assert_eq!(then[0].name(), "message.append");
+    assert_eq!(then[1].name(), "message.append");
+}
+
+/// The shipped nudge, as `then_for` prints it.
+fn nudge() -> String {
+    let payload: Value = serde_json::from_str(
+        r#"{ "label": "commit message isn't conventional; asking the agent to amend it",
+             "parts": [{ "text": "Chauffeur, which the user set up to check commits: this message does not follow Conventional Commits. Unless the user chose the message, amend it to `type(scope): description`, such as `fix(parser): handle empty input`." }],
+             "delivery": "now" }"#,
+    )
+    .unwrap();
+
+    format!("message.append {payload}")
+}
+
+#[test]
+fn a_confident_jev_decides_and_glide_is_skipped() {
+    let rule = commit_rule();
+    let glide_says_no = ("glide", Ok(0.06));
+
+    let confident = run_with(&rule, &[("jev", Ok(0.94)), glide_says_no]);
+    assert_eq!(confident.verdict.skipped().collect::<Vec<_>>(), ["sure"]);
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.94)), glide_says_no]),
+        Some(nudge())
+    );
+
+    let conventional = run_with(&rule, &[("jev", Ok(0.06)), ("glide", Ok(0.94))]);
+    assert_eq!(conventional.verdict.skipped().collect::<Vec<_>>(), ["sure"]);
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.06)), ("glide", Ok(0.94))]),
+        None,
+        "a conventional message"
     );
 }
 
 #[test]
-fn the_nudge_goes_out_only_on_a_confident_yes() {
+fn glide_settles_a_yes_near_the_bar() {
     let rule = commit_rule();
 
-    let nudge = then_for(&rule, Ok(0.94)).unwrap();
-    assert!(nudge.starts_with("message.append "), "{nudge}");
-    assert!(nudge.contains(r#""delivery":"now""#), "{nudge}");
-    assert_eq!(then_for(&rule, Ok(0.06)), None, "a conventional message");
-    assert_eq!(then_for(&rule, Ok(0.58)), None, "unsure sends nothing");
     assert_eq!(
-        then_for(&rule, Err(Failure::Unavailable)),
+        then_for(&rule, &[("jev", Ok(0.8)), ("glide", Ok(0.06))]),
         None,
-        "a failure sends nothing"
+        "glide overturns a near yes"
     );
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.8)), ("glide", Ok(0.94))]),
+        Some(nudge()),
+        "glide agrees"
+    );
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.8)), ("glide", Err(Failure::Timeout))]),
+        Some(nudge()),
+        "a failed glide leaves jev's near yes standing"
+    );
+}
+
+#[test]
+fn glide_answers_when_jev_is_unsure_or_fails() {
+    let rule = commit_rule();
+
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.58)), ("glide", Ok(0.94))]),
+        Some(nudge()),
+        "glide settles an unsure jev"
+    );
+    assert_eq!(
+        then_for(&rule, &[("jev", Ok(0.58))]),
+        None,
+        "unsure with glide down sends nothing"
+    );
+    assert_eq!(
+        then_for(
+            &rule,
+            &[("jev", Err(Failure::Timeout)), ("glide", Ok(0.94))]
+        ),
+        Some(nudge()),
+        "glide stands in for a failed jev"
+    );
+    assert_eq!(then_for(&rule, &[]), None, "both failing sends nothing");
 }
 
 #[test]
@@ -278,10 +427,13 @@ fn unsure_and_failed_can_be_expected_in_then() {
     let then = r#"{ "if": { "s": "unsure" }, "ask": "unsure" }, { "if": { "s": "failed" }, "ask": "failed" }"#;
     let rule = Rule::parse("fallbacks", &rule_text(quick, "quick", ASK, then)).unwrap();
 
-    assert_eq!(then_for(&rule, Ok(0.5)).as_deref(), Some(r#"ask "unsure""#));
     assert_eq!(
-        then_for(&rule, Err(Failure::Timeout)).as_deref(),
+        then_for(&rule, &[("quick", Ok(0.5))]).as_deref(),
+        Some(r#"ask "unsure""#)
+    );
+    assert_eq!(
+        then_for(&rule, &[("quick", Err(Failure::Timeout))]).as_deref(),
         Some(r#"ask "failed""#)
     );
-    assert_eq!(then_for(&rule, Ok(0.9)), None);
+    assert_eq!(then_for(&rule, &[("quick", Ok(0.9))]), None);
 }
