@@ -75,13 +75,39 @@ pub(super) enum AskRef {
     Inline(AskFile),
 }
 
-/// One step as written: its ID, its judge, and its ask.
+/// One step as written: its ID, its judge, its ask, and the earlier steps
+/// it waits on.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepFile {
     pub(super) id: String,
     pub(super) judge: String,
     pub(super) ask: AskRef,
+    #[serde(default)]
+    pub(super) after: Vec<NeedFile>,
+    #[serde(default)]
+    pub(super) after_any: Vec<NeedFile>,
+}
+
+/// A need as written: a step ID, which waits for that step to finish, or an
+/// object, which waits for its answer.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum NeedFile {
+    Settled(String),
+    Outcome(OutcomeNeedFile),
+}
+
+/// An object need: the step, a margin around the bars of the outcomes it
+/// acts on, the values that also match, and the one outcome `near` bars
+/// when named.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OutcomeNeedFile {
+    pub(super) step: String,
+    pub(super) near: Option<f64>,
+    pub(super) when: Option<Vec<String>>,
+    pub(super) outcome: Option<String>,
 }
 
 #[derive(Deserialize)]

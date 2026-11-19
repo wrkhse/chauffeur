@@ -26,11 +26,39 @@ export type Ask = {
   readonly evidence?: readonly string[]
 }
 
+/** An earlier step's answer near the bars its judge sets; outcome names the one bar. */
+type NearNeed = {
+  readonly step: string
+  readonly near: number
+  readonly when?: readonly string[]
+  readonly outcome?: string
+}
+
+/** An earlier step's answer that is one of when: its outcomes, unsure or failed. */
+type WhenNeed = {
+  readonly step: string
+  readonly near?: never
+  readonly when: readonly string[]
+  readonly outcome?: never
+}
+
+/**
+ * What a step waits on. A string is an earlier step's ID and holds once that
+ * step finished, settled, failed or skipped. An object holds when the step's
+ * answer is near the bar of an outcome the strategy acts on, or one listed in
+ * when; it never holds for a skipped step.
+ */
+export type Need = string | NearNeed | WhenNeed
+
 /** One step: its ID, the judge that answers it, and its question or an ask's name. */
 export type Step = {
   readonly id: string
   readonly judge: string
   readonly ask: Ask | string
+  /** Needs on earlier steps that must all hold before the step is asked; at most 64. */
+  readonly after?: readonly Need[]
+  /** Needs of which at least one must hold; with after, both must. At most 64. */
+  readonly after_any?: readonly Need[]
 }
 
 type Common = {

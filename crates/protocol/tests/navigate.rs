@@ -105,7 +105,7 @@ fn assert_kept(name: &str, params: &Value, navigate: &Navigate) {
 #[test]
 fn every_fixture_is_accepted_or_rejected_as_it_expects() {
     let cases = cases();
-    assert_eq!(cases.len(), 78);
+    assert_eq!(cases.len(), 88);
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
