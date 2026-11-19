@@ -1,6 +1,7 @@
 # Chauffeur v2 implementation plan
 
-Status: design for review. The starting workspace is clean apart from its
+Status: slices 0 to 2 are implemented and slice 3 is in progress; see
+[Slices](slices/README.md). The starting workspace is clean apart from its
 toolchain, license, plan/audit documents and the Vite/WebAssembly playground.
 The [v1 architecture audit](../audits/architecture.md) records the source
 findings and checks that inform this plan.
