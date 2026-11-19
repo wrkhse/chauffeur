@@ -814,3 +814,7 @@ These run at the slice's proof, with their answers recorded.
 - Labelled scale questions, asked through `choice` and through `score` by the
   same model registered under two names, report which agrees with the labels
   more often.
+- The live score check confirms a GLiDE `score` reply settles only when it
+  carries probabilities for every level: v1's captured GLiDE score fixture has
+  none, and any score reply that omits them fails `invalid`. The shipped commit
+  nudge asks yes/no and is unaffected.
