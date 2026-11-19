@@ -41,8 +41,8 @@ flowchart LR
 
 **Core** is the engine in Rust. It runs bounded strategies: named steps that
 each ask one judge one question, in rounds that end at a deadline. Evidence
-is redacted before a judge sees it, and a failed judge stays a failure rather
-than an answer.
+is redacted before a judge sees it, and a failed judge stays a failure, not
+an answer.
 
 **Extensions** are rule files and the content shipped in `distribution/`.
 A rule file names the event it hooks, the question it asks and what to do with
