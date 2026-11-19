@@ -5,13 +5,6 @@ evidence is redacted on the calling thread, then the judges are asked on a
 worker thread, and the caller waits for the result until its deadline or its
 cancellation.
 
-| File      | Holds                                                                                 |
-| --------- | ------------------------------------------------------------------------------------- |
-| `mod.rs`  | `run`, `run_strategy`, `Context` (models, redactor, keys) and `Ran` (how a run ended) |
-| `wait.rs` | `within`: a job on a worker, waited for until done, its deadline or `Cancel`          |
-| `pool.rs` | `Pool`: worker threads kept between runs, at most `max` alive, and `Job`, the work    |
-| `log.rs`  | `EventLog`: a navigation's events, at most `MAX_EVENTS`, counting the ones past it    |
-
 ```mermaid
 sequenceDiagram
     participant C as Caller
@@ -26,14 +19,39 @@ sequenceDiagram
     else 32 alive for this source
         P-->>C: Busy
     end
-    W->>W: cancelled or past the deadline? stop before the round
+    W->>W: start core with the caller's deadline
+    W->>W: assemble judges with core's effective end, validate the panel
+    loop each core round
+        W->>W: cancelled? stop, caller deadline passed? stop
+        W->>W: questions, ask the panel, answer
+    end
     W-->>C: Settled or Refused, unless the deadline or a cancel came first
     W->>P: wait for the next run, if fewer than 8 wait
 ```
 
-Starting a thread for every run took about a tenth of a rule's run, so
-workers are kept. A run that outlives its deadline keeps its worker busy
-until its models time out; the next run takes another worker, or starts one,
+| File        | Holds                                                            |
+| ----------- | ---------------------------------------------------------------- |
+| `mod.rs`    | Entry points, model assembly, panel validation, `Context`, `Ran` |
+| `rounds.rs` | Core round loop, caller checks and invalid-reply handling        |
+| `wait.rs`   | `within`: waiting for a job until done, deadline or `Cancel`     |
+| `pool.rs`   | Bounded worker `Pool` and `Job`                                  |
+| `log.rs`    | Bounded navigation `EventLog`                                    |
+
+Core's effective end is one second before the caller's deadline. Every named
+judge shares that end; an HTTP call uses the lesser of its configured timeout
+and the time left. A budget inside that reserve settles as `Failed(Deadline)`
+without sending an HTTP request. Model assembly checks the caller's deadline;
+core reads its round clock only when advancing needs it.
+
+Before any judge is asked, every step's rule-local judge ID must be present in
+the panel. Each round checks cancellation first, then the caller's deadline,
+before asking core for its questions. Core groups each judge's requests into
+one batch. The driver gives the answers back together; a refused batch fails
+the open round as `Invalid`. When core has no questions, `finish` produces the
+events and verdict. Cancellation between rounds prevents later requests.
+
+Workers are kept between runs. A run that outlives its deadline keeps its worker
+busy until its models time out; the next run takes another worker, or starts one,
 so it is never held up. At most 8 workers wait between runs, enough for
 every rule one event hooks to start at once, and at most 32 per source are
 alive. `Busy` means every worker was busy, and a thread that cannot start is
