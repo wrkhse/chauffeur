@@ -34,4 +34,4 @@ pub use question::{Label, Outcomes, Question, QuestionError};
 #[cfg(feature = "systemone")]
 pub use tiers::system_one::SystemOne;
 pub use tiers::system_one::{SystemOneAsk, SystemOneEntry};
-pub use tiers::{Fallback, Model, NamedJudge, Tier};
+pub use tiers::{Fallback, Model, NamedJudge, REST, Rests, Tier};

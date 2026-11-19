@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chauffeur_core::{Failure, Outcome};
-use chauffeur_judges::Models;
+use chauffeur_judges::{Models, Rests};
 use chauffeur_protocol::{Event, Rule, Strategy};
 use chauffeur_protocol::{Navigate, Target};
 use chauffeur_runtime::{
@@ -53,6 +53,7 @@ fn context(name: &str, models: &str, files: &[(&str, &str)]) -> Arc<Context> {
         models: Models::load(&[folder.join("models.json")]).unwrap(),
         redactor: Redactor::load(&[repo("distribution/safety/redaction.json")]).unwrap(),
         keys: Box::new(|_| Some("test-key".to_owned())),
+        rests: Rests::new(),
     })
 }
 
@@ -99,6 +100,53 @@ fn a_judge_sees_only_redacted_evidence() {
 }
 
 #[test]
+fn a_rest_is_shared_across_runs_on_one_context() {
+    let (endpoint, server) = rate_limited_server(Duration::from_secs(2));
+    let models = limited_then_stand_in(&endpoint);
+    let context = context("shared-rest", &models, &[]);
+    let (strategy, evidence) = inline("migrated 42 of 42 tables");
+
+    let first = run_strategy(
+        &context,
+        &strategy,
+        &evidence,
+        in_ms(2_000),
+        &Cancel::new(Source::Harness),
+    );
+    let second = run_strategy(
+        &context,
+        &strategy,
+        &evidence,
+        in_ms(2_000),
+        &Cancel::new(Source::Harness),
+    );
+    let calls = server.join().unwrap();
+
+    let Ran::Settled(first) = first else {
+        panic!("the first run did not settle: {first:?}");
+    };
+    let Ran::Settled(second) = second else {
+        panic!("the second run did not settle: {second:?}");
+    };
+    let Some(Outcome::Value(first_answer)) = first.verdict.get("done") else {
+        panic!("the first run has no answer: {:?}", first.verdict);
+    };
+    let Some(Outcome::Value(second_answer)) = second.verdict.get("done") else {
+        panic!("the second run has no answer: {:?}", second.verdict);
+    };
+
+    // The rate-limited model is asked once, in the first run. The rest it
+    // started survives on the shared registry into the second run, which
+    // skips it; the stand-in answers both runs. The rest's 60 s length is
+    // covered by the judges, so this waits only for the two quick runs.
+    assert_eq!(calls, 1);
+    assert_eq!(first_answer.by().model.as_str(), "stand-in");
+    assert_eq!(second_answer.by().model.as_str(), "stand-in");
+    assert_eq!(first_answer.outcome().to_string(), "yes");
+    assert_eq!(second_answer.outcome().to_string(), "yes");
+}
+
+#[test]
 fn with_no_model_answering_the_step_fails_and_nothing_is_returned() {
     let rule = commit_rule();
     let ran = run(
@@ -131,6 +179,7 @@ fn a_run_whose_worker_stops_ends_at_once_not_late() {
     let context = Arc::into_inner(context("stopped", models, &[])).unwrap();
     let context = Arc::new(Context {
         keys: Box::new(|_| panic!("the worker stops while it builds the judges")),
+        rests: Rests::new(),
         ..context
     });
 
@@ -325,6 +374,53 @@ fn two_rounds() -> (Arc<Strategy>, Vec<(String, String)>) {
     };
 
     (Arc::new(strategy), evidence)
+}
+
+/// A rate-limited model on loopback first, then a stand-in that answers.
+fn limited_then_stand_in(endpoint: &str) -> String {
+    format!(
+        r#"{{ "models": {{ "limited": {{ "format": "systemone", "endpoint": "{endpoint}", "model": "limited-latest",
+                                       "key": {{ "env": "TEST" }}, "timeout_ms": 1000 }},
+                        "stand-in": {{ "format": "placeholder", "otherwise": {{ "yes": 0.9, "no": 0.1 }} }} }},
+             "tiers": {{ "system-one": ["limited", "stand-in"] }} }}"#
+    )
+}
+
+/// A loopback model that answers each request with 429 (rate limited),
+/// counting its calls, for at most `wait`.
+fn rate_limited_server(wait: Duration) -> (String, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let server = thread::spawn(move || {
+        let mut calls = 0_usize;
+        let started = Instant::now();
+
+        while let Some(left) = wait.checked_sub(started.elapsed()) {
+            if left.is_zero() {
+                break;
+            }
+            let Some(mut stream) = accept(&listener, left) else {
+                break;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let _ = request(&mut stream);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"
+            );
+            calls = calls.saturating_add(1);
+        }
+
+        calls
+    });
+
+    (endpoint, server)
 }
 
 /// A stand-in answering yes, and Jev at `endpoint` with a 5 s timeout.
@@ -550,6 +646,7 @@ fn cancelled_integration_jobs_keep_their_slots_and_leave_harness_workers_free() 
             done.fetch_add(1, Ordering::SeqCst);
             None
         }),
+        rests: Rests::new(),
         ..base
     });
     let (strategy, evidence) = inline("waiting");

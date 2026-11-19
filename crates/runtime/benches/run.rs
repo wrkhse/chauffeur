@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use benchfmt::{CountingAlloc, Suite};
-use chauffeur_judges::Models;
+use chauffeur_judges::{Models, Rests};
 use chauffeur_protocol::{Event, Rule};
 use chauffeur_runtime::{Context, Masking, Redactor, run};
 
@@ -68,6 +68,7 @@ fn context() -> Arc<Context> {
         models,
         redactor: Redactor::load(&[repo("distribution/safety/redaction.json")]).unwrap(),
         keys: Box::new(|_| None),
+        rests: Rests::new(),
     })
 }
 

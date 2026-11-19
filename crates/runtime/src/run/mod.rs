@@ -13,6 +13,7 @@ use chauffeur_protocol::{Event, JudgeSpec, Rule, Strategy, Then};
 use crate::Source;
 use crate::redact::{Masking, Redactor};
 
+pub use chauffeur_judges::Rests;
 pub use log::{EventLog, MAX_EVENTS};
 pub use pool::{ExecuteError, Job, Pool};
 pub use wait::{Cancel, Waited, within};
@@ -42,6 +43,10 @@ pub struct Context {
     pub redactor: Redactor,
     /// Finds model keys.
     pub keys: Box<Keys>,
+    /// Shared model-rest state, keyed by model name. A model that cannot
+    /// answer rests here and is skipped while it rests; the registry
+    /// survives across runs while this `Context` lives.
+    pub rests: Rests,
 }
 
 /// How a strategy's run ended.
@@ -150,7 +155,9 @@ fn run_now(
             spec.tier,
             spec.model.as_deref(),
             &context.keys,
-        ) {
+        )
+        .map(|fallback| fallback.with_rests(context.rests.clone()))
+        {
             Ok(fallback) => fallbacks.push((name, spec, fallback)),
             Err(error) => return Ran::Refused(error.to_string()),
         }
