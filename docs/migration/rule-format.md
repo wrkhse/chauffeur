@@ -92,21 +92,39 @@ v2, `distribution/rules/conventional-commits.json`:
       "excludes": ["feat:", "feat(", "fix:", "fix(", "…"]
     }
   },
-  "judges": { "quick": { "tier": "system-one", "confidence": 0.7 } },
+  "judges": {
+    "jev": { "tier": "system-one", "model": "jev", "confidence": 0.7 },
+    "glide": { "tier": "system-one", "model": "glide", "confidence": 0.7 }
+  },
+  "asks": {
+    "nonconventional": {
+      "outcomes": ["yes", "no"],
+      "evidence": ["tool_call", "request"],
+      "instructions": "Does this call create a git commit whose message does not follow …? A call the user explicitly asked for, exactly as asked, does not count."
+    }
+  },
   "strategy": [
+    { "id": "nonconventional", "judge": "jev", "ask": "nonconventional" },
     {
-      "id": "nonconventional",
-      "judge": "quick",
-      "ask": {
-        "outcomes": ["yes", "no"],
-        "evidence": ["tool_call", "request"],
-        "instructions": "Does this call create a git commit whose message does not follow …? A call the user explicitly asked for, exactly as asked, does not count."
-      }
+      "id": "sure",
+      "judge": "glide",
+      "ask": "nonconventional",
+      "after": [{ "step": "nonconventional", "near": 0.15, "when": ["failed"] }]
     }
   ],
   "then": [
     {
-      "if": { "nonconventional": "yes" },
+      "if": { "decision": "yes" },
+      "message.append": {
+        "label": "commit message isn't conventional; asking the agent to amend it",
+        "parts": [
+          { "text": "Chauffeur: Use Conventional Commits for commit messages, …" }
+        ],
+        "delivery": "now"
+      }
+    },
+    {
+      "if": { "sure": "failed", "nonconventional": "yes" },
       "message.append": {
         "label": "commit message isn't conventional; asking the agent to amend it",
         "parts": [
@@ -121,4 +139,6 @@ v2, `distribution/rules/conventional-commits.json`:
 ```
 
 Instructions and texts carry over word for word, with a `label` added; the
-pages for each rule abbreviate them as `…`.
+pages for each rule abbreviate them as `…`. The `sure` step asks GLiDE only
+when Jev is near its bar or fails; the second `then` keeps Jev's near `yes`
+when GLiDE fails, so a confident nudge is never lost to a failed escalation.
