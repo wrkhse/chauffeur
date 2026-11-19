@@ -542,14 +542,21 @@ received in a round with one call, and the format decides how to ask its
 model from the question's outcomes:
 
 ```rust
-let replies = jev.answer_all(&round_questions, &evidence);
+let replies = jev.answer_all_until(&round_questions, &evidence, Some(end));
 // → [Ok({ yes: 0.94, no: 0.06 }), Err(Failure::Timeout), …]
 ```
 
 | `Failure`                               | Then                          |
 | --------------------------------------- | ----------------------------- |
 | `Unavailable`, `RateLimited`, `Timeout` | The tier's next model answers |
-| `Invalid`                               | The step fails                |
+| `Invalid`, `Deadline`                   | The step fails                |
+
+Formats receive the shared absolute end through `answer_all_until`. Its
+default checks expiry before calling `answer_all`; a blocking format must
+override it to bound its work. The default check and System One do not read
+the clock when there is no end. System One bounds the full HTTP call, body
+included, by the shorter of its model timeout and the remaining shared time.
+A model timeout allows fallback; exhausting the shared end fails as `deadline`.
 
 | Format        | Speaks                                                                                                                                                                                                                                |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

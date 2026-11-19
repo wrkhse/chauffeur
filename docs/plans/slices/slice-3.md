@@ -1,8 +1,8 @@
 # Slice 3: Escalation from Jev to GLiDE
 
-**Status:** In progress: `after` and rounds in core are built; lowering rules to
-plans, SubQ and GLiDE, image evidence, the `student` format, the rest for a
-failing model, `chauffeur strategy` and the playground follow.
+**Status:** In progress: `after` and rounds in core, and lowering rules to
+plans, are built; SubQ and GLiDE, image evidence, the `student` format, the
+rest for a failing model, `chauffeur strategy` and the playground follow.
 
 **You can:** have the commit nudge and `sourcefed/triage` ask GLiDE only when
 Jev's answer is near the bar the rule acts on, or Jev fails, see each
@@ -45,6 +45,11 @@ run is over. Core keeps what rungs knows nothing about:
 | Batches         | A reply is settled on a copy of the run, kept only when every step in it settles                                                                                                                                                                                   |
 | Failure reasons | `Failure::Timeout` and the rest stay in the events; rungs only records `FAILED`                                                                                                                                                                                    |
 
+Core records skipped steps. `navigate` remains on protocol 1 and omits skipped
+steps from both wire events and the verdict: rc.5 clients reject unknown
+events. A separate design covers future wire skips; audit and `strategy show`
+report skips in this slice.
+
 A string need is `Need::settled`, an object need `Need::outcome`, and `all`
 and `any` are a step's `after` and `after_any`. Every step has one attempt.
 
@@ -79,7 +84,10 @@ that also match, here a failure.
 
 The steps share the caller's deadline and end 1 s before it, so the answers
 in hand return in time; a step that escalates starts only with 500 ms left
-before that.
+before that. Runtime drives each round and passes this end to its judges.
+Between rounds it checks cancellation, then the caller's deadline. Cancellation
+does not interrupt an HTTP call already in progress; an admitted run holds
+its place until the worker finishes.
 
 The caller's request type implements `Request`, how many values its answer
 can settle to, and its answer type implements `Reply`, which value it settled
@@ -117,6 +125,26 @@ Verified by scenario tests:
   missing one, returns the unchanged round; each judge answers its share of a
   round in one call; a batch of the wrong length settles as `Failed`.
 
+Core's decision scenarios in `crates/core/tests/scenarios.rs`:
+
+- `a_confident_fast_answer_decides_when_sure_is_skipped`:
+  `fast` decides when escalation is skipped.
+- `sure_decides_when_fast_is_near_the_bar`:
+  `sure` supplies the decision after escalation.
+- `a_failed_sure_is_the_decision_for_every_failure_path`:
+  an answered failure, `fail`, `fail_round` and finishing an open round
+  all preserve `sure`'s failure as the decision.
+- `a_later_round_decides_before_a_higher_plan_index`:
+  the later round wins over a higher index in the first round.
+- `the_higher_plan_index_decides_despite_reversed_replies`:
+  plan order breaks ties within a round, regardless of reply order.
+- `failure_settlement_order_does_not_change_the_decision`:
+  reversing individual failure settlements preserves the decision.
+- `a_trailing_skipped_step_does_not_decide`:
+  a skipped tail leaves `sure` as the decision.
+- `the_decision_step_id_is_reserved`:
+  `decision` returns the reserved-ID error; `Decision` is a valid ID.
+
 rungs' own Kani proofs cover the `after` rule: a step waits until every step
 it names has finished, starts exactly when its needs hold, is skipped only when
 they cannot, and a run never stalls and starts every step within `depth()`
@@ -134,19 +162,268 @@ a small outcome enum:
 
 ### Lowering rules to plans
 
-Named judges, asks and `after` in a rule file become a `chauffeur_core::Plan`.
+A rule's named judges, asks and needs become a `chauffeur_core::Plan`.
+`Rule::parse` reads the outcomes `then.if` acts on before lowering needs,
+then checks the `then` entries against the plan. Judges keep their rule-local
+IDs as panel keys: `jev` and `glide` here.
 
-Files: `crates/protocol/src/lower.rs`
+Files: `crates/protocol/src/rule/{mod,file,need,strategy,error,then}.rs`,
+`crates/protocol/src/then.rs`, `crates/protocol/src/limits.rs`,
+`crates/protocol/schema/navigate.json`, `crates/protocol/tests/needs.rs`,
+`crates/protocol/fixtures/navigate.json`, `crates/core/src/lib.rs`,
+`crates/core/src/event.rs`, `crates/core/src/plan/error.rs`
 
-```rust
-// Named judges become core judges, such as "system-one:glide".
-let plan = lower(&rule, &models)?;
+```json
+{
+  "on": "tool.after",
+  "judges": {
+    "jev": { "tier": "system-one", "model": "jev", "confidence": 0.7 },
+    "glide": { "tier": "system-one", "model": "glide", "confidence": 0.7 }
+  },
+  "asks": {
+    "commit": {
+      "outcomes": ["yes", "no"],
+      "instructions": "Does this commit message break Conventional Commits?"
+    }
+  },
+  "strategy": [
+    { "id": "fast", "judge": "jev", "ask": "commit" },
+    {
+      "id": "sure",
+      "judge": "glide",
+      "ask": "commit",
+      "after": [{ "step": "fast", "near": 0.15, "when": ["failed"] }]
+    }
+  ],
+  "then": [{ "if": { "decision": "yes" }, "withhold": "event" }]
+}
 ```
 
-Verified by:
+The need on `fast` lowers to a bar on outcome 0 (`yes`), taken from
+`jev`'s confidence. `sure` keeps `glide` as its judge ID.
 
-- Kani: `strategy_show_bounds_every_lowered_plan`, a lowered plan has at most
-  the rounds `strategy show` reports.
+```rust
+let bar = Bar { outcome: 0, at: 700 };
+
+let need = Need::outcome(
+    "fast",
+    Some(Near::new(150, [bar])),
+    Some(vec![When::Failed]),
+);
+```
+
+Both `after` and `after_any` are arrays of these needs:
+
+- A step ID string waits for that step to finish: settled, failed or skipped.
+- An object `{ step, near?, when?, outcome? }` needs `near` or `when`.
+  `outcome` comes only with `near`. An object never matches a skipped
+  step. `when` lists the target's outcomes, `unsure` or `failed`.
+- Every `after` need must hold; at least one `after_any` need must hold
+  when that list is nonempty. With both lists, both conditions must hold.
+
+`near` selects the explicit `outcome` when present. Otherwise it selects
+the target's real outcomes named by `then.if` for that step or for
+`decision`, together with those any later need's `when` names for the
+target. `unsure` and `failed` select no bars. It never selects all outcomes
+by default, and sharing an ask with another step selects nothing for it.
+An inline strategy has no `then`: it names the outcome in `outcome` or
+through a later `when`.
+
+Each selected bar comes from the target step's judge, including its
+per-outcome confidence. A `near` with no selected outcome, or whose target
+judge settles on the likeliest outcome with no bar, is refused when it loads.
+Margins run from 0 to 1 and are stored as whole thousandths.
+
+Each needs list holds at most 64 needs, each `when` at most 66 values
+(64 outcomes, `unsure`, `failed`), and each text at most 16 KiB.
+The loader checks bounds before reading needs and keeps their order and
+repeats. Core refuses unknown, same-step or later-step targets, an empty
+`when`, and needs whose outcome codes do not fit.
+
+#### The decision
+
+`then.if.decision` reads the answer of the last step that ran. Last means
+the greatest pair of (round it opened in, plan order): a later round wins
+over a higher plan index in an earlier round, and settlement order never
+changes the decision. A skipped step is never the decision; a step that ran
+and failed makes a failed decision. With no step run there is none.
+Step-scoped `then.if` entries read their own step.
+
+For the example, a confident `fast` answer of `yes` skips `sure`, and
+the decision is `fast`'s answer. With `fast` near the bar and `sure`
+answering `no`, the decision is `no` and the rule returns no intent.
+
+`Verdict::get(DECISION)` reads that outcome, and `Verdict::decision()`
+also returns its step ID. The loader reserves the step ID `decision` in
+`strategy.rs`'s `check_bounds`, before needs are lowered and `then` entries
+are resolved. It returns `RuleError::Plan` with `PlanError::ReservedStep`:
+
+```text
+rule `bad`: step ID `decision` is reserved for the step that decides the run
+```
+
+Navigate reports `invalid`; its schema excludes that step ID with
+`"not": { "const": "decision" }`.
+
+#### Structure
+
+Core exports `DECISION` from its crate root. These are the decision-related
+additions to its verdict API and plan errors:
+
+```rust
+pub const DECISION: &str = "decision";
+
+impl<O> Verdict<O> {
+    pub fn decision(&self) -> Option<(&str, &Outcome<O>)>;
+}
+
+pub enum PlanError {
+    ReservedStep(String),
+}
+```
+
+A step holds its needs as written. The file types keep fields scoped to
+the rule loader; `StepFile` is re-exported for inline strategies.
+
+```rust
+pub struct StepFile {
+    pub(super) id: String,
+    pub(super) judge: String,
+    pub(super) ask: AskRef,
+    pub(super) after: Vec<NeedFile>,
+    pub(super) after_any: Vec<NeedFile>,
+}
+
+pub(super) enum NeedFile {
+    Settled(String),
+    Outcome(OutcomeNeedFile),
+}
+
+pub(super) struct OutcomeNeedFile {
+    pub(super) step: String,
+    pub(super) near: Option<f64>,
+    pub(super) when: Option<Vec<String>>,
+    pub(super) outcome: Option<String>,
+}
+```
+
+`ActedOn` holds real outcome names read from `then.if`. Rule lowering
+passes it to `Strategy::lower`; inline `Strategy::build` supplies empty
+metadata. Both resolve judges and asks, lower needs, then call `Plan::new`.
+
+```rust
+pub(super) struct ActedOn {
+    by_step: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ActedOn {
+    pub(super) fn read(then: &[ThenFile]) -> Self;
+}
+
+impl Rule {
+    pub fn parse(id: &str, text: &str) -> Result<Self, RuleError>;
+}
+
+pub struct Strategy {
+    judges: BTreeMap<String, JudgeSpec>,
+    plan: Plan<Question>,
+}
+
+impl Strategy {
+    pub(crate) fn build(
+        id: &str,
+        judges: BTreeMap<String, JudgeFile>,
+        asks: &BTreeMap<String, AskFile>,
+        strategy: Vec<StepFile>,
+    ) -> Result<Self, RuleError>;
+
+    pub(super) fn lower(
+        id: &str,
+        judges: BTreeMap<String, JudgeFile>,
+        asks: &BTreeMap<String, AskFile>,
+        strategy: Vec<StepFile>,
+        acted_on: &ActedOn,
+    ) -> Result<Self, RuleError>;
+
+    pub const fn judges(&self) -> &BTreeMap<String, JudgeSpec>;
+
+    pub const fn plan(&self) -> &Plan<Question>;
+}
+```
+
+A need error names the rule, the waiting step and its target. These are the
+need-related error and limit variants; a bound violation is a
+`RuleError::Limit`, or `limit_exceeded` for navigate.
+
+```rust
+pub enum RuleError {
+    Need {
+        rule: String,
+        step: String,
+        need: String,
+        reason: String,
+    },
+    Limit {
+        rule: String,
+        source: Exceeded,
+    },
+}
+
+pub enum Limit {
+    Needs,
+    WhenOutcomes,
+    TextBytes,
+}
+```
+
+Verified by `crates/protocol/tests/needs.rs`:
+
+- `a_near_need_asks_sure_only_near_the_bar_the_decision_acts_on`:
+  only the selected `yes` bar lowers; a confident answer skips `sure`,
+  and a near answer opens round 2. Wire events and verdict omit the skip.
+- `a_near_need_holds_at_its_margin_and_on_a_listed_failure`:
+  P(yes) 0.55 matches a 0.7 bar with margin 0.15; 0.54 and 0.25 do not;
+  a listed timeout opens `sure`.
+- `the_decision_is_the_answer_of_the_last_step_that_ran`:
+  confident `fast` returns `yes`; `sure` answering `no` makes the
+  decision `no`; `Verdict::decision()` identifies each deciding step.
+- `a_last_step_that_fails_is_the_decision`:
+  a failed `sure` is the decision and matches `then.if.decision: failed`.
+- `a_step_named_decision_is_refused` and
+  `an_inline_step_named_decision_is_invalid`:
+  rule and inline loaders return the reserved-ID error.
+- `a_then_on_a_step_bars_its_outcome_and_still_returns_on_it`:
+  a step-scoped condition selects its bar and reads that step's result.
+- `an_inline_near_bars_the_outcome_it_names` and
+  `an_inline_near_bars_what_a_later_when_acts_on`:
+  explicit outcomes and later `when` values select inline bars.
+- `near_takes_each_outcome_bar_from_the_judge_of_the_step_it_waits_on`:
+  per-outcome bars come from the target judge.
+- Refusal tests cover missing selection, likeliest judges, outcomes the
+  target lacks, `outcome` without `near`, invalid margins, and shared
+  asks that supply no selection. Core refusal tests cover unknown and later
+  targets, empty needs and `when`, duplicate IDs and code capacity.
+- `repeated_needs_are_kept_as_written` and
+  `a_step_with_after_and_after_any_runs_only_when_both_hold`:
+  needs retain order and duplicates, and both lists constrain a step.
+- `each_needs_list_holds_64_needs`,
+  `a_when_holds_every_outcome_unsure_and_failed` and
+  `a_need_text_over_16_kib_is_refused`: each bound accepts its limit
+  and refuses one over it.
+- `an_outcome_named_skipped_is_a_real_outcome` and
+  `a_then_on_the_decision_expects_an_outcome_some_step_has`:
+  `skipped` is an ordinary label; decision conditions validate against
+  the plan's outcomes.
+
+The navigate fixtures replay the accepted escalation with both lists and
+refusals named `a near need with no outcome to bar`,
+`a near need on a judge with no confidence`,
+`a when naming an outcome its step lacks`, `a need on a later step`,
+`an outcome without near`, `65 needs in after`,
+`67 values in a need's when`, `a need's step over 16 KiB` and
+`a step named decision`.
+`tests/navigate.rs` checks both parser and schema results, including cases
+whose semantic checks the schema cannot express.
 
 ### SubQ, GLiDE and richer questions
 
@@ -266,6 +543,8 @@ Verified by:
 
 - `"model": "glide"` without GLiDE configured shows the tier's fallback
   order.
+- Kani: `strategy_show_bounds_every_lowered_plan`, a lowered plan has at most
+  the rounds `strategy show` reports.
 
 ### The playground
 
