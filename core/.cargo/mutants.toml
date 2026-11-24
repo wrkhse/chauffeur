@@ -1,0 +1,6 @@
+test_workspace = true
+test_tool = "nextest"
+exclude_globs = ["**/proofs.rs"]
+
+# Exclude equivalent mutants by name with a reason when one is found.
+exclude_re = []
