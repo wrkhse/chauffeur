@@ -16,8 +16,9 @@
 //!     }"#,
 //! )?;
 //! let judgment = Engine::new(RuleSet::builtin()).judge(&request);
+//! let verdict = judgment.verdict().expect("the shell guard allows git status");
 //!
-//! assert_eq!(judgment.verdict.outcome, Outcome::Allow);
+//! assert_eq!(verdict.outcome(), Outcome::Allow);
 //! # Ok::<(), RequestError>(())
 //! ```
 
@@ -28,11 +29,11 @@ mod rules;
 mod trace;
 mod verdict;
 
-pub use engine::{Engine, Judgment};
-pub use request::{DEFAULT_DEADLINE_MS, MAX_DEADLINE_MS, MAX_REQUEST_BYTES};
+pub use engine::{Engine, Judgment, JudgmentError};
 pub use request::{MAX_EVIDENCE_BLOCKS, MAX_EVIDENCE_BYTES, MAX_TEXT_BYTES};
-pub use request::{Request, RequestError};
+pub use request::{MAX_REQUEST_BYTES, Request, RequestError};
 pub use rule::{MAX_RULES, Rule, RuleSet, RuleSetError};
 pub use rules::ShellGuard;
-pub use trace::{MAX_EVENTS, Trace, TraceEvent};
-pub use verdict::{Outcome, Verdict};
+pub use trace::{MAX_EVENTS, Trace, TraceError, TraceEvent};
+pub use verdict::{MAX_REASON_BYTES, MAX_RULE_NAME_BYTES};
+pub use verdict::{Outcome, Verdict, VerdictError};

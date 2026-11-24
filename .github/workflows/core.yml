@@ -2,7 +2,7 @@ name: Check core
 
 on:
   push:
-    branches: [main, feat/core-slice-1]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,10 +11,10 @@ permissions:
 
 concurrency:
   group: check-core-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: "${{ github.ref != 'refs/heads/main' }}"
 
 jobs:
-  rust:
+  core-rust:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -25,31 +25,35 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain
         run: |
-          rustup toolchain install nightly-2026-10-25 --profile minimal \
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          printf 'TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          rustup toolchain install "$toolchain" --profile minimal \
             --component rustfmt --component clippy
           rustup show active-toolchain
-      - run: cargo +nightly-2026-10-25 fmt --all -- --check
+      - run: cargo +"$TOOLCHAIN" fmt --all -- --check
       - run: >-
-          cargo +nightly-2026-10-25 clippy --workspace --all-targets
+          cargo +"$TOOLCHAIN" clippy --workspace --all-targets
           --all-features --locked -- -D warnings
       # v2.90.4
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
         with:
           tool: cargo-nextest@0.9.152
       - run: >-
-          cargo +nightly-2026-10-25 nextest run --workspace
+          cargo +"$TOOLCHAIN" nextest run --workspace
           --all-features --locked
-      - run: cargo +nightly-2026-10-25 test --doc --workspace --locked
-      - run: cargo +nightly-2026-10-25 doc --workspace --no-deps --locked
+      - run: cargo +"$TOOLCHAIN" test --doc --workspace --locked
+      - run: cargo +"$TOOLCHAIN" doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
       # v2.90.4
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
         with:
-          tool: cargo-deny@0.22.0
-      - run: cargo +nightly-2026-10-25 deny check
+          tool: cargo-deny@0.20.2
+      - run: cargo +"$TOOLCHAIN" deny check
 
-  mutants:
+  core-mutants:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -62,9 +66,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Rust toolchain
-        run: >-
-          rustup toolchain install nightly-2026-10-25 --profile minimal
-          --component rustfmt --component clippy
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          printf 'TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          rustup toolchain install "$toolchain" --profile minimal \
+            --component rustfmt --component clippy
       # v2.90.4
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
         with:
@@ -77,22 +85,23 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: >-
-          git -C .. diff --relative=core "$BASE"...HEAD -- core
+          git -C .. diff --relative=core "$BASE"...HEAD -- '*.rs'
           > "$RUNNER_TEMP/pr.diff"
       - run: >-
-          cargo +nightly-2026-10-25 mutants --in-diff "$RUNNER_TEMP/pr.diff"
+          cargo +"$TOOLCHAIN" mutants --in-diff "$RUNNER_TEMP/pr.diff"
           --no-shuffle -j 2 -vV
       - name: What was tested
         if: always()
         run: |
+          set -euo pipefail
           outcomes="$GITHUB_WORKSPACE/core/mutants.out/outcomes.json"
           if [ -f "$outcomes" ]; then
             jq -r '
-              "- Tested: \(.total_mutants)",
-              "- Caught: \(.caught)",
-              "- Missed: \(.missed)",
-              "- Timeout: \(.timeout)",
-              "- Unviable: \(.unviable)"
+              "- Tested: \\(.total_mutants)",
+              "- Caught: \\(.caught)",
+              "- Missed: \\(.missed)",
+              "- Timeout: \\(.timeout)",
+              "- Unviable: \\(.unviable)"
             ' "$outcomes" >> "$GITHUB_STEP_SUMMARY"
           else
             printf '%s\n' 'none in this diff' >> "$GITHUB_STEP_SUMMARY"

@@ -1,23 +1,23 @@
-# Adapted from origin/v2 deny.toml at 5330c3b.
+# Adapted from origin/v2 deny.toml at 3b3d3c7.
 
 [graph]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
 all-features = true
 
 [advisories]
 yanked = "deny"
 
 [licenses]
-allow = [
-  "Apache-2.0",
-  "BSD-3-Clause",
-  "CDLA-Permissive-2.0",
-  "ISC",
-  "MIT",
-  "Unicode-3.0",
-]
+# unicode-ident is (MIT OR Apache-2.0) AND Unicode-3.0.
+allow = ["MIT", "Unicode-3.0"]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
 

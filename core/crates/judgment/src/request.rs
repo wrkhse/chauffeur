@@ -18,10 +18,6 @@ pub const MAX_EVIDENCE_BLOCKS: usize = 64;
 pub const MAX_EVIDENCE_BYTES: usize = 262_144;
 /// The most bytes of the id, session, hook, or one evidence name or value.
 pub const MAX_TEXT_BYTES: usize = 16_384;
-/// The longest deadline a request may ask for, in milliseconds.
-pub const MAX_DEADLINE_MS: u64 = 30_000;
-/// The deadline of a request that names none, in milliseconds.
-pub const DEFAULT_DEADLINE_MS: u64 = 3_000;
 
 /// Why a request is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,8 +55,6 @@ struct RequestFile {
     subject: Map<String, Value>,
     #[serde(default)]
     evidence: BTreeMap<String, String>,
-    #[serde(default)]
-    deadline_ms: Option<u64>,
 }
 
 /// A validated request: every field is within its limit.
@@ -71,7 +65,6 @@ pub struct Request {
     hook: String,
     subject: Map<String, Value>,
     evidence: BTreeMap<String, String>,
-    deadline_ms: u64,
 }
 
 impl Request {
@@ -83,8 +76,8 @@ impl Request {
     /// # Errors
     ///
     /// Returns [`RequestError::Invalid`] for malformed JSON, unknown fields,
-    /// empty text or a zero deadline, and [`RequestError::Limit`] for
-    /// text over [`MAX_REQUEST_BYTES`] or a part over its limit.
+    /// or empty text, and [`RequestError::Limit`] for text over
+    /// [`MAX_REQUEST_BYTES`] or a part over its limit.
     pub fn parse(json: &str) -> Result<Self, RequestError> {
         if json.len() > MAX_REQUEST_BYTES {
             return Err(limit("request bytes", MAX_REQUEST_BYTES));
@@ -101,12 +94,8 @@ impl Request {
         }
 
         check_evidence(&file.evidence)?;
-        let deadline_ms = check_deadline(file.deadline_ms)?;
 
-        let id = file
-            .id
-            .take()
-            .unwrap_or_else(|| derive_id(&file, deadline_ms));
+        let id = file.id.take().unwrap_or_else(|| derive_id(&file));
 
         Ok(Self {
             id,
@@ -114,7 +103,6 @@ impl Request {
             hook: file.hook,
             subject: file.subject,
             evidence: file.evidence,
-            deadline_ms,
         })
     }
 
@@ -151,12 +139,6 @@ impl Request {
     #[must_use]
     pub const fn evidence(&self) -> &BTreeMap<String, String> {
         &self.evidence
-    }
-
-    /// How long the caller waits for a verdict, in milliseconds.
-    #[must_use]
-    pub const fn deadline_ms(&self) -> u64 {
-        self.deadline_ms
     }
 }
 
@@ -209,29 +191,16 @@ fn check_evidence(evidence: &BTreeMap<String, String>) -> Result<(), RequestErro
     Ok(())
 }
 
-fn check_deadline(deadline_ms: Option<u64>) -> Result<u64, RequestError> {
-    match deadline_ms {
-        None => Ok(DEFAULT_DEADLINE_MS),
-        Some(0) => Err(RequestError::Invalid("deadline_ms is zero".to_owned())),
-        Some(ms) if ms > MAX_DEADLINE_MS => Err(RequestError::Limit {
-            name: "deadline_ms",
-            max: MAX_DEADLINE_MS,
-        }),
-        Some(ms) => Ok(ms),
-    }
-}
-
 /// Derives `r` and 16 lowercase hex digits from the request's content.
 ///
 /// The content is the canonical JSON of its fields; `serde_json` keeps object
 /// keys sorted, so equal requests give equal text.
-fn derive_id(file: &RequestFile, deadline_ms: u64) -> String {
+fn derive_id(file: &RequestFile) -> String {
     let mut content = Map::new();
     content.insert("session".to_owned(), Value::from(file.session.clone()));
     content.insert("hook".to_owned(), Value::from(file.hook.clone()));
     content.insert("subject".to_owned(), Value::Object(file.subject.clone()));
     content.insert("evidence".to_owned(), evidence_value(&file.evidence));
-    content.insert("deadline_ms".to_owned(), Value::from(deadline_ms));
 
     format!(
         "r{:016x}",
@@ -338,13 +307,12 @@ mod tests {
         let again = parse(&minimal()).unwrap();
 
         assert_eq!(request, again);
-        // FNV-1a of {"deadline_ms":3000,"evidence":{},"hook":"tool_after",
-        // "session":"s1","subject":{}}, computed outside this crate.
-        assert_eq!(request.id(), "r73031f2691553a88");
+        // FNV-1a of {"evidence":{},"hook":"tool_after","session":"s1","subject":{}},
+        // computed outside this crate.
+        assert_eq!(request.id(), "re3f4b2ee308f9424");
         assert_eq!(request.session(), "s1");
         assert_eq!(request.hook(), "tool_after");
         assert_eq!(request.evidence(), &BTreeMap::new());
-        assert_eq!(request.deadline_ms(), DEFAULT_DEADLINE_MS);
     }
 
     #[test]
@@ -371,8 +339,7 @@ mod tests {
             error,
             RequestError::Invalid(
                 "unknown field `extra`, expected one of `id`, `session`, \
-                 `hook`, `subject`, `evidence`, `deadline_ms` at line 1 \
-                 column 47"
+                 `hook`, `subject`, `evidence` at line 1 column 47"
                     .to_owned(),
             ),
         );
@@ -424,6 +391,25 @@ mod tests {
 
         assert_eq!(request.session(), session);
         assert_eq!(error, limit("session", MAX_TEXT_BYTES));
+    }
+
+    #[test]
+    fn id_and_hook_at_the_text_bound_parse_and_one_byte_more_does_not() {
+        let text = "x".repeat(MAX_TEXT_BYTES);
+        let id_request = parse(&with("id", json!(text))).unwrap();
+        let hook_request = parse(&with("hook", json!(text))).unwrap();
+        let longer = json!("x".repeat(MAX_TEXT_BYTES + 1));
+
+        assert_eq!(id_request.id(), text);
+        assert_eq!(hook_request.hook(), text);
+        assert_eq!(
+            parse(&with("id", longer.clone())).unwrap_err(),
+            limit("id", MAX_TEXT_BYTES)
+        );
+        assert_eq!(
+            parse(&with("hook", longer)).unwrap_err(),
+            limit("hook", MAX_TEXT_BYTES)
+        );
     }
 
     #[test]
@@ -480,38 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn deadline_at_the_max_parses_and_keeps_it() {
-        let request = parse(&with("deadline_ms", json!(MAX_DEADLINE_MS))).unwrap();
-
-        assert_eq!(request.deadline_ms(), MAX_DEADLINE_MS);
-    }
-
-    #[test]
-    fn zero_deadline_is_invalid() {
-        let error = parse(&with("deadline_ms", json!(0))).unwrap_err();
-
-        assert_eq!(
-            error,
-            RequestError::Invalid("deadline_ms is zero".to_owned())
-        );
-    }
-
-    #[test]
-    fn deadline_over_the_max_hits_the_limit() {
-        let late = json!(MAX_DEADLINE_MS + 1);
-        let error = parse(&with("deadline_ms", late)).unwrap_err();
-
-        assert_eq!(
-            error,
-            RequestError::Limit {
-                name: "deadline_ms",
-                max: MAX_DEADLINE_MS
-            },
-        );
-        assert_eq!(error.to_string(), "deadline_ms exceeds 30000");
-    }
-
-    #[test]
     fn field_finds_a_nested_subject_value() {
         let subject = json!({ "tool": "shell", "input": { "command": "ls" } });
         let request = parse(&with("subject", subject)).unwrap();
@@ -526,8 +480,7 @@ mod tests {
     fn accessors_return_the_parsed_values() {
         let request = Request::parse(
             r#"{"id":"c1","session":"s9","hook":"tool_before",
-                "subject":{"tool":"read"},"evidence":{"diff":"+a"},
-                "deadline_ms":500}"#,
+                "subject":{"tool":"read"},"evidence":{"diff":"+a"}}"#,
         )
         .unwrap();
         let evidence = BTreeMap::from([("diff".to_owned(), "+a".to_owned())]);
@@ -536,6 +489,5 @@ mod tests {
         assert_eq!(request.session(), "s9");
         assert_eq!(request.hook(), "tool_before");
         assert_eq!(request.evidence(), &evidence);
-        assert_eq!(request.deadline_ms(), 500);
     }
 }

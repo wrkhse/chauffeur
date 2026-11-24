@@ -14,6 +14,8 @@ repository = "https://github.com/wrkhse/chauffeur"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The lint table comes from origin/v2 Cargo.toml at 3b3d3c7, where it last
+# changed.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
