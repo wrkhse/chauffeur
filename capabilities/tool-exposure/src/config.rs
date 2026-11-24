@@ -108,8 +108,8 @@ pub struct ToolTexts {
     pub keep_option: Template,
     /// The confirmation option that keeps it hidden as uncertain.
     pub uncertain_option: Template,
-    /// Names a Code Mode note for the user, and its attachment's file:
-    /// `{namespace}` (several, comma-separated, in one reply).
+    /// Names a Code Mode note for the user: `{namespace}` (several,
+    /// comma-separated, in one reply).
     pub code_mode_label: Template,
     /// One tool in the note: `{tool}`, `{description}`.
     pub code_mode_tool: Template,

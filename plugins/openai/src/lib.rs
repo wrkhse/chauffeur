@@ -80,8 +80,8 @@ mod tests {
 
         assert_eq!(tier("gpt-6-astra", Some("high")), Some(Tier::Frontier));
         assert_eq!(tier("gpt-6-astra", Some("low")), Some(Tier::Frontier));
-        assert_eq!(tier("gpt-6.1-sol", Some("high")), Some(Tier::Balanced));
-        assert_eq!(tier("gpt-6.1-sol", Some("low")), Some(Tier::Balanced));
+        assert_eq!(tier("gpt-6.2-sol", Some("high")), Some(Tier::Balanced));
+        assert_eq!(tier("gpt-6.2-sol", Some("low")), Some(Tier::Balanced));
         assert_eq!(tier("gpt-6.1-terra", Some("high")), Some(Tier::Efficient));
         assert_eq!(tier("gpt-6.1-terra", Some("max")), Some(Tier::Efficient));
         assert_eq!(tier("gpt-6.1-terra", None), Some(Tier::Efficient));
@@ -90,17 +90,17 @@ mod tests {
         assert_eq!(tier("gpt-6-luna", None), Some(Tier::Fast));
         // A switch picks the first variant a model's rows name.
         assert_eq!(provider.variants("gpt-6-astra"), vec![Some("high"), None]);
-        assert_eq!(provider.variants("gpt-6.1-sol"), vec![Some("high"), None]);
+        assert_eq!(provider.variants("gpt-6.2-sol"), vec![Some("high"), None]);
         assert_eq!(provider.variants("gpt-6.1-terra"), vec![Some("high"), None]);
         assert_eq!(provider.variants("gpt-6-luna"), vec![None]);
         // Family patterns cover new versions.
-        assert_eq!(tier("gpt-6.1-astra", None), Some(Tier::Frontier));
+        assert_eq!(tier("gpt-6.2-astra", None), Some(Tier::Frontier));
         assert_eq!(tier("gpt-6-sol", Some("high")), Some(Tier::Balanced));
         assert_eq!(tier("gpt-6.2-terra", Some("high")), Some(Tier::Efficient));
         assert_eq!(tier("gpt-6.1-luna", Some("max")), Some(Tier::Fast));
         // Fast editions and older generations have no tier.
         assert_eq!(tier("gpt-6-astra-fast", Some("high")), None);
-        assert_eq!(tier("gpt-6.1-sol-fast", Some("high")), None);
+        assert_eq!(tier("gpt-6.2-sol-fast", Some("high")), None);
         assert_eq!(tier("gpt-6.1-terra-fast", Some("high")), None);
         assert_eq!(tier("gpt-5.6-sol", None), None);
     }
@@ -115,7 +115,7 @@ mod tests {
         };
 
         assert_eq!(rated("gpt-6-astra", Some("high")), Some(true));
-        assert_eq!(rated("gpt-6.1-sol", Some("high")), Some(true));
+        assert_eq!(rated("gpt-6.2-sol", Some("high")), Some(true));
         assert_eq!(rated("gpt-6.1-terra", Some("high")), Some(true));
         assert_eq!(rated("gpt-6-luna", None), Some(true));
         assert_eq!(rated("gpt-6-astra", None), Some(false));
@@ -132,8 +132,8 @@ mod tests {
             [
                 recommended("gpt-6-astra", Some("high"), Tier::Frontier),
                 row("gpt-6-astra", None, Tier::Frontier),
-                recommended("gpt-6.1-sol", Some("high"), Tier::Balanced),
-                row("gpt-6.1-sol", None, Tier::Balanced),
+                recommended("gpt-6.2-sol", Some("high"), Tier::Balanced),
+                row("gpt-6.2-sol", None, Tier::Balanced),
                 recommended("gpt-6.1-terra", Some("high"), Tier::Efficient),
                 row("gpt-6.1-terra", None, Tier::Efficient),
                 recommended("gpt-6-luna", None, Tier::Fast),

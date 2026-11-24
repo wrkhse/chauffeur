@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use chauffeur_core::{Answer, Question, SystemOne, SystemOneError, validate_answers};
 use chauffeur_judge_glide::{GlideClient, GlideConfig};
 use chauffeur_judge_jev::{JevClient, JevConfig};
+use chauffeur_judge_liquid::{LiquidClient, LiquidConfig};
 use chauffeur_judge_subq::{SubqClient, SubqConfig};
 
 use crate::escalation::{Escalate, Review};
@@ -23,6 +24,7 @@ enum Provider {
     Jev(JevConfig),
     Subq(SubqConfig),
     Glide(GlideConfig),
+    Liquid(LiquidConfig),
     Custom(SystemOneFactory),
 }
 
@@ -32,6 +34,7 @@ impl Provider {
             Self::Jev(config) => Ok(Box::new(JevClient::new(config.clone())?)),
             Self::Subq(config) => Ok(Box::new(SubqClient::new(config.clone())?)),
             Self::Glide(config) => Ok(Box::new(GlideClient::new(config.clone())?)),
+            Self::Liquid(config) => Ok(Box::new(LiquidClient::new(config.clone())?)),
             Self::Custom(factory) => factory(),
         }
     }
@@ -44,6 +47,55 @@ struct Escalation {
     to: Provider,
     below: f32,
     review: Option<String>,
+}
+
+/// The hosted judges this process can select. Each is present only when its
+/// credentials are set; an unused provider sends nothing.
+#[derive(Clone, Default)]
+struct Providers {
+    jev: Option<JevConfig>,
+    subq: Option<SubqConfig>,
+    glide: Option<GlideConfig>,
+    liquid: Option<LiquidConfig>,
+}
+
+impl Providers {
+    fn from_env() -> Self {
+        Self {
+            jev: JevConfig::from_env(),
+            subq: SubqConfig::from_env(),
+            glide: GlideConfig::from_env(),
+            liquid: LiquidConfig::from_env(),
+        }
+    }
+
+    fn provider(&self, name: &str) -> Result<Provider, String> {
+        match name {
+            "jev" => self
+                .jev
+                .clone()
+                .map(Provider::Jev)
+                .ok_or_else(|| "TYPESAFE_API_KEY is required for the selected Jev judge".into()),
+            "subq" => self
+                .subq
+                .clone()
+                .map(Provider::Subq)
+                .ok_or_else(|| "SUBQ_API_KEY is required for the selected SubQ judge".into()),
+            "glide" => {
+                self.glide.clone().map(Provider::Glide).ok_or_else(|| {
+                    "FASTINO_API_KEY is required for the selected GLiDE judge".into()
+                })
+            }
+            "liquid" => self
+                .liquid
+                .clone()
+                .map(Provider::Liquid)
+                .ok_or_else(|| "LIQUID_AI_KEY is required for the selected Liquid judge".into()),
+            _ => Err(format!(
+                "unknown judge {name:?}; expected jev, subq, glide or liquid"
+            )),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -83,18 +135,12 @@ impl JudgeConfig {
     /// to another service.
     pub fn from_env() -> Result<Self, String> {
         let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-        let (jev, subq, glide) = (
-            JevConfig::from_env(),
-            SubqConfig::from_env(),
-            GlideConfig::from_env(),
-        );
+        let providers = Providers::from_env();
         let primary = var("CHAUFFEUR_JUDGE").unwrap_or_else(|| "jev".into());
-        let config = Self::select_with_glide(
+        let config = Self::select(
             &primary,
             var("CHAUFFEUR_JUDGE_FALLBACK").as_deref(),
-            jev.clone(),
-            subq.clone(),
-            glide.clone(),
+            &providers,
         )?;
         let Some(to) = var("CHAUFFEUR_JUDGE_ESCALATE").filter(|name| name != "none") else {
             return Ok(config);
@@ -105,7 +151,7 @@ impl JudgeConfig {
             &to,
             var("CHAUFFEUR_JUDGE_ESCALATE_BELOW").as_deref(),
             var("CHAUFFEUR_JUDGE_REVIEW"),
-            &|name| provider(name, jev.as_ref(), subq.as_ref(), glide.as_ref()),
+            &providers,
         )
     }
 
@@ -115,7 +161,7 @@ impl JudgeConfig {
         to: &str,
         below: Option<&str>,
         review: Option<String>,
-        provider: &dyn Fn(&str) -> Result<Provider, String>,
+        providers: &Providers,
     ) -> Result<Self, String> {
         if to == primary {
             return Err("CHAUFFEUR_JUDGE_ESCALATE must differ from CHAUFFEUR_JUDGE".into());
@@ -131,7 +177,7 @@ impl JudgeConfig {
         };
 
         self.escalation = Some(Escalation {
-            to: provider(to)?,
+            to: providers.provider(to)?,
             below,
             review,
         });
@@ -151,22 +197,10 @@ impl JudgeConfig {
         self
     }
 
-    #[cfg(test)]
     fn select(
         primary: &str,
         fallback: Option<&str>,
-        jev: Option<JevConfig>,
-        subq: Option<SubqConfig>,
-    ) -> Result<Self, String> {
-        Self::select_with_glide(primary, fallback, jev, subq, None)
-    }
-
-    fn select_with_glide(
-        primary: &str,
-        fallback: Option<&str>,
-        jev: Option<JevConfig>,
-        subq: Option<SubqConfig>,
-        glide: Option<GlideConfig>,
+        providers: &Providers,
     ) -> Result<Self, String> {
         let fallback = fallback.filter(|name| !name.is_empty() && *name != "none");
 
@@ -174,11 +208,9 @@ impl JudgeConfig {
             return Err("CHAUFFEUR_JUDGE_FALLBACK must differ from CHAUFFEUR_JUDGE".into());
         }
 
-        let provider = |name: &str| provider(name, jev.as_ref(), subq.as_ref(), glide.as_ref());
-
         Ok(Self {
-            primary: provider(primary)?,
-            fallback: fallback.map(provider).transpose()?,
+            primary: providers.provider(primary)?,
+            fallback: fallback.map(|name| providers.provider(name)).transpose()?,
             escalation: None,
             review: None,
         })
@@ -257,31 +289,6 @@ impl Judge {
                 }
             }
         }
-    }
-}
-
-fn provider(
-    name: &str,
-    jev: Option<&JevConfig>,
-    subq: Option<&SubqConfig>,
-    glide: Option<&GlideConfig>,
-) -> Result<Provider, String> {
-    match name {
-        "jev" => jev
-            .cloned()
-            .map(Provider::Jev)
-            .ok_or_else(|| "TYPESAFE_API_KEY is required for the selected Jev judge".into()),
-        "subq" => subq
-            .cloned()
-            .map(Provider::Subq)
-            .ok_or_else(|| "SUBQ_API_KEY is required for the selected SubQ judge".into()),
-        "glide" => glide
-            .cloned()
-            .map(Provider::Glide)
-            .ok_or_else(|| "FASTINO_API_KEY is required for the selected GLiDE judge".into()),
-        _ => Err(format!(
-            "unknown judge {name:?}; expected jev, subq or glide"
-        )),
     }
 }
 
@@ -499,14 +506,39 @@ mod tests {
             timeout: Duration::from_secs(3),
             record: None,
         };
-        assert!(JudgeConfig::select_with_glide("glide", None, None, None, None).is_err());
-        assert!(
-            JudgeConfig::select_with_glide("glide", None, None, None, Some(glide.clone())).is_ok()
-        );
-        assert!(
-            JudgeConfig::select_with_glide("glide", Some("glide"), None, None, Some(glide))
-                .is_err()
-        );
+        let without_key = Providers::default();
+        let with_key = Providers {
+            glide: Some(glide),
+            ..Providers::default()
+        };
+        assert!(JudgeConfig::select("glide", None, &without_key).is_err());
+        assert!(JudgeConfig::select("glide", None, &with_key).is_ok());
+        assert!(JudgeConfig::select("glide", Some("glide"), &with_key).is_err());
+    }
+
+    #[test]
+    fn liquid_selection_requires_its_key() {
+        let liquid = LiquidConfig {
+            base_url: "http://localhost".into(),
+            api_key: "test".into(),
+            model: "d1.2-ultra".into(),
+            timeout: Duration::from_secs(3),
+            record: None,
+        };
+        let both = Providers {
+            jev: Some(JevConfig {
+                base_url: "http://localhost".into(),
+                api_key: "test".into(),
+                model: "jev".into(),
+                timeout: Duration::from_secs(3),
+                record: None,
+            }),
+            liquid: Some(liquid),
+            ..Providers::default()
+        };
+        assert!(JudgeConfig::select("liquid", None, &Providers::default()).is_err());
+        assert!(JudgeConfig::select("liquid", None, &both).is_ok());
+        assert!(JudgeConfig::select("jev", Some("liquid"), &both).is_ok());
     }
 
     #[test]
@@ -519,8 +551,11 @@ mod tests {
             record: None,
         };
         let base = || JudgeConfig::custom(Arc::new(|| Err("not built".into())));
-        let with_key = |name: &str| provider(name, None, None, Some(&glide));
-        let without_key = |name: &str| provider(name, None, None, None);
+        let without_key = Providers::default();
+        let with_key = Providers {
+            glide: Some(glide),
+            ..Providers::default()
+        };
 
         let config = base()
             .escalating(
@@ -577,19 +612,28 @@ mod tests {
             timeout: Duration::from_secs(3),
             record: None,
         };
-        assert!(JudgeConfig::select("jev", None, Some(jev.clone()), None).is_ok());
-        assert!(JudgeConfig::select("subq", None, None, Some(subq.clone())).is_ok());
-        assert!(JudgeConfig::select("jev", Some("subq"), Some(jev.clone()), None).is_err());
-        assert!(JudgeConfig::select("subq", Some("jev"), None, Some(subq.clone())).is_err());
-        assert!(
-            JudgeConfig::select("jev", Some("subq"), Some(jev.clone()), Some(subq.clone())).is_ok()
-        );
-        assert!(
-            JudgeConfig::select("subq", Some("jev"), Some(jev.clone()), Some(subq.clone())).is_ok()
-        );
-        assert!(JudgeConfig::select("jev", Some("jev"), Some(jev.clone()), None).is_err());
-        assert!(JudgeConfig::select("typo", None, Some(jev.clone()), Some(subq.clone())).is_err());
-        assert!(JudgeConfig::select("jev", Some("typo"), Some(jev.clone()), Some(subq)).is_err());
-        assert!(JudgeConfig::select("jev", Some("none"), Some(jev), None).is_ok());
+        let both = Providers {
+            jev: Some(jev.clone()),
+            subq: Some(subq.clone()),
+            ..Providers::default()
+        };
+        let jev_only = Providers {
+            jev: Some(jev),
+            ..Providers::default()
+        };
+        let subq_only = Providers {
+            subq: Some(subq),
+            ..Providers::default()
+        };
+        assert!(JudgeConfig::select("jev", None, &jev_only).is_ok());
+        assert!(JudgeConfig::select("subq", None, &subq_only).is_ok());
+        assert!(JudgeConfig::select("jev", Some("subq"), &jev_only).is_err());
+        assert!(JudgeConfig::select("subq", Some("jev"), &subq_only).is_err());
+        assert!(JudgeConfig::select("jev", Some("subq"), &both).is_ok());
+        assert!(JudgeConfig::select("subq", Some("jev"), &both).is_ok());
+        assert!(JudgeConfig::select("jev", Some("jev"), &both).is_err());
+        assert!(JudgeConfig::select("typo", None, &both).is_err());
+        assert!(JudgeConfig::select("jev", Some("typo"), &both).is_err());
+        assert!(JudgeConfig::select("jev", Some("none"), &jev_only).is_ok());
     }
 }

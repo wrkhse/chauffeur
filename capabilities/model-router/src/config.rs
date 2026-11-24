@@ -386,12 +386,21 @@ impl ModelRouterConfig {
         matches!(status, Some(402 | 429 | 503 | 529)) || self.limit.matches(error_type, message)
     }
 
+    /// Which `last_resort` pattern offers `model`, by its place in the list:
+    /// an earlier pattern is preferred over a later one.
+    #[must_use]
+    pub fn last_resort_rank(&self, model: &ModelRef) -> Option<usize> {
+        let key = format!("{}/{}", model.provider, model.model);
+
+        self.last_resort
+            .iter()
+            .position(|pattern| glob(pattern, &key))
+    }
+
     /// Whether `model` is a last-resort fallback.
     #[must_use]
     pub fn is_last_resort(&self, model: &ModelRef) -> bool {
-        let key = format!("{}/{}", model.provider, model.model);
-
-        self.last_resort.iter().any(|pattern| glob(pattern, &key))
+        self.last_resort_rank(model).is_some()
     }
 
     /// Whether the router must never select `model`, regardless of variant.
@@ -481,6 +490,11 @@ mod tests {
 
         assert_eq!(config, ModelRouterConfig::default());
         assert!(config.pins.is_empty());
+        assert!(config.blacklist.is_empty());
+        assert_eq!(
+            config.last_resort,
+            vec!["opencode-go/*-free", "opencode/*-free"]
+        );
         assert!((config.pick_confidence.value() - 0.2).abs() < f32::EPSILON);
         assert_eq!(config.switch_back.after_seconds, 300);
         assert_eq!(config.max_candidates, 8);
@@ -517,19 +531,49 @@ mod tests {
         };
 
         assert!(config.is_blacklisted(&model("opencode-go", "example-free")));
-        assert!(config.is_blacklisted(&model("openai", "gpt-6.1-sol")));
+        assert!(config.is_blacklisted(&model("openai", "gpt-6.2-sol")));
         assert!(!config.is_blacklisted(&model("opencode", "example-free")));
         assert!(!config.is_blacklisted(&model("openai", "gpt-6-luna")));
     }
 
     #[test]
-    fn your_blacklist_replaces_the_shipped_exclusion() {
-        let path = yours("blacklist", r#"{ "blacklist": [] }"#);
+    fn your_blacklist_overlays_the_shipped_default() {
+        let path = yours("blacklist", r#"{ "blacklist": ["opencode-go/*"] }"#);
         let config = ModelRouterConfig::load(&path).unwrap();
+        let shipped = ModelRouterConfig::default();
 
-        assert!(config.blacklist.is_empty());
-        assert_eq!(config.last_resort, vec!["opencode/*-free"]);
+        assert_eq!(config.blacklist, vec!["opencode-go/*"]);
+        assert!(config.is_blacklisted(&ModelRef {
+            provider: "opencode-go".into(),
+            model: "hy4-flash-free".into(),
+            variant: None,
+        }));
+        assert_eq!(config.last_resort, shipped.last_resort);
+        assert_eq!(config.switch_back, shipped.switch_back);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn last_resort_patterns_rank_by_their_place_in_the_list() {
+        let config = ModelRouterConfig {
+            last_resort: vec!["opencode-go/*-free".into(), "opencode/*-free".into()],
+            ..ModelRouterConfig::default()
+        };
+        let model = |provider: &str, model: &str| ModelRef {
+            provider: provider.into(),
+            model: model.into(),
+            variant: None,
+        };
+
+        assert_eq!(
+            config.last_resort_rank(&model("opencode-go", "hy4-flash-free")),
+            Some(0)
+        );
+        assert_eq!(
+            config.last_resort_rank(&model("opencode", "fledge-alpha-free")),
+            Some(1)
+        );
+        assert_eq!(config.last_resort_rank(&model("anthropic", "haiku")), None);
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chauffeur_capability_model_router::{ModelRouter, ModelRouterConfig, STAY};
 use chauffeur_capability_model_router::{Provider, Tier, TierEntry};
 use chauffeur_core::{
-    Answer, AnswerValue, AvailableModel, CachePrices, Capability, Effect, Judging, ModelRef, Plan,
-    QuestionKind, Signal, SignalKind, Situation,
+    Answer, AnswerValue, AvailableModel, CachePrices, Capability, ContextResumeReason, Effect,
+    Judging, ModelRef, Plan, QuestionKind, Signal, SignalKind, Situation,
 };
 
 struct Table(&'static str, Vec<TierEntry>);
@@ -711,8 +711,8 @@ const HOST_MODELS: [&str; 10] = [
     "anthropic/claude-sonnet-5-5",
     "openai/gpt-6-astra",
     "openai/gpt-6-luna",
-    "openai/gpt-6.1-sol",
     "openai/gpt-6.1-terra",
+    "openai/gpt-6.2-sol",
     "opencode/claude-sonnet-5-5",
     "opencode/fledge-alpha-free",
     "opencode/ling-3.1-flash-free",
@@ -764,14 +764,14 @@ fn tiers_follow_thinking_variants_and_never_offer_the_same_model() {
         )),
         vec!["openai/gpt-6-astra#high", STAY]
     );
-    // Opus at high thinking is balanced: gpt-6.1-sol at high. Luna, even at
+    // Opus at high thinking is balanced: gpt-6.2-sol at high. Luna, even at
     // max, is fast.
     assert_eq!(
         options(&shipped_router().plan(
             &Situation::default(),
             &limit_on("anthropic/claude-opus-5-5#high")
         )),
-        vec!["openai/gpt-6.1-sol#high", STAY]
+        vec!["openai/gpt-6.2-sol#high", STAY]
     );
     // Opus at low thinking is efficient: gpt-6.1-terra at high. Sonnet shares
     // the anthropic limit, and the gateway copy is not used directly.
@@ -829,7 +829,7 @@ fn an_agent_on_a_gateway_moves_to_its_tier_on_a_provider_used_directly() {
         "{offered:?}"
     );
     assert!(
-        offered.contains(&"openai/gpt-6.1-sol#high".to_string()),
+        offered.contains(&"openai/gpt-6.2-sol#high".to_string()),
         "{offered:?}"
     );
 }
@@ -842,7 +842,7 @@ fn recommended_models_come_first_and_fast_or_old_editions_are_never_offered() {
         // Listed first, as hosts list them, ahead of the recommended model.
         let older = [
             "openai/gpt-6-sol",
-            "openai/gpt-6.1-sol-fast",
+            "openai/gpt-6.2-sol-fast",
             "openai/gpt-5.6-sol",
             "anthropic/claude-opus-5",
             "anthropic/claude-opus-5-5-fast",
@@ -863,7 +863,7 @@ fn recommended_models_come_first_and_fast_or_old_editions_are_never_offered() {
 
     assert_eq!(
         options(&plan),
-        vec!["openai/gpt-6.1-sol#high", "openai/gpt-6-sol#high", STAY]
+        vec!["openai/gpt-6.2-sol#high", "openai/gpt-6-sol#high", STAY]
     );
 
     let Plan::Ask(questions) = &plan else {
@@ -882,8 +882,8 @@ fn without_a_confident_pick_each_tier_fails_over_like_for_like() {
     let cases = [
         ("anthropic/claude-fable-5-2#high", "openai/gpt-6-astra#high"),
         ("openai/gpt-6-astra#high", "anthropic/claude-fable-5-2#high"),
-        ("anthropic/claude-opus-5-5#high", "openai/gpt-6.1-sol#high"),
-        ("openai/gpt-6.1-sol#high", "anthropic/claude-opus-5-5#high"),
+        ("anthropic/claude-opus-5-5#high", "openai/gpt-6.2-sol#high"),
+        ("openai/gpt-6.2-sol#high", "anthropic/claude-opus-5-5#high"),
         ("anthropic/claude-opus-5-5#low", "openai/gpt-6.1-terra#high"),
         // Sonnet is efficient too, but Opus at low thinking is recommended.
         ("openai/gpt-6.1-terra#high", "anthropic/claude-opus-5-5#low"),
@@ -946,7 +946,7 @@ fn free_gateway_models_are_offered_only_when_nothing_else_is_left() {
 }
 
 #[test]
-fn go_is_blocked_even_when_pinned_or_last_resort_but_zen_free_models_remain() {
+fn blacklisted_go_models_are_skipped_even_when_pinned_or_last_resort() {
     let mut signal = limit_on("anthropic/claude-opus-5-5#high");
     if let SignalKind::ModelError { available, .. } = &mut signal.kind {
         available.retain(|entry| entry.model.provider == "opencode");
@@ -960,6 +960,7 @@ fn go_is_blocked_even_when_pinned_or_last_resort_but_zen_free_models_remain() {
     }
     let config = ModelRouterConfig {
         pins: vec!["opencode-go/sol".into(), "opencode-go/example-free".into()],
+        blacklist: vec!["opencode-go/*".into()],
         last_resort: vec!["opencode-go/*".into(), "opencode/*-free".into()],
         ..defaults()
     };
@@ -969,6 +970,45 @@ fn go_is_blocked_even_when_pinned_or_last_resort_but_zen_free_models_remain() {
         vec![
             "opencode/fledge-alpha-free",
             "opencode/ling-3.1-flash-free",
+            STAY
+        ]
+    );
+}
+
+#[test]
+fn go_free_models_come_first_however_the_host_lists_them() {
+    let listed = [
+        "anthropic/claude-opus-5-5",
+        "opencode/fledge-alpha-free",
+        "opencode-go/hy4-flash-free",
+        "opencode-go/gpt-6-luna",
+    ];
+    let offered = |config| {
+        let mut router = router_with(config);
+        let signal = limit_listed("anthropic/claude-opus-5-5", &listed);
+
+        options(&router.plan(&Situation::default(), &signal))
+    };
+
+    // Go's free models come first by the shipped order, though the host lists
+    // Zen's first; Go's paid models stay out.
+    assert_eq!(
+        offered(defaults()),
+        vec![
+            "opencode-go/hy4-flash-free",
+            "opencode/fledge-alpha-free",
+            STAY
+        ]
+    );
+    // Your order decides: listing Zen's pattern first puts its model first.
+    assert_eq!(
+        offered(ModelRouterConfig {
+            last_resort: vec!["opencode/*-free".into(), "opencode-go/*-free".into()],
+            ..defaults()
+        }),
+        vec![
+            "opencode/fledge-alpha-free",
+            "opencode-go/hy4-flash-free",
             STAY
         ]
     );
@@ -1035,6 +1075,7 @@ fn resumed(available: &[&str], window: u64) -> Signal {
             context_window: window,
             idle_seconds: 1_200,
             cache_seconds: None,
+            reason: ContextResumeReason::CacheExpired,
             available: available
                 .iter()
                 .map(|key| AvailableModel {
@@ -1059,6 +1100,63 @@ fn compact(key: &str) -> Vec<Effect> {
         agent_id: "session".into(),
         model: model(key),
     }]
+}
+
+/// A session about to run a long context on a new model after a switch.
+fn switched(target: &str, tokens: u64, available: &[&str]) -> Signal {
+    Signal {
+        agent_id: "session".into(),
+        at: 1,
+        kind: SignalKind::ContextResumed {
+            model: model_ref(target),
+            context_tokens: tokens,
+            context_window: 1_000_000,
+            idle_seconds: 0,
+            cache_seconds: None,
+            reason: ContextResumeReason::ModelSwitch,
+            available: available
+                .iter()
+                .map(|key| AvailableModel {
+                    model: model(key),
+                    usable: true,
+                })
+                .collect(),
+        },
+    }
+}
+
+#[test]
+fn a_long_context_is_summarized_before_the_new_model_reads_it() {
+    let mut router = router(&[]);
+    let signal = switched(
+        "anthropic/opus",
+        100_000,
+        &["anthropic/opus", "anthropic/haiku"],
+    );
+    let Plan::Settled(effects) = router.plan(&Situation::default(), &signal) else {
+        panic!("expected a deterministic compaction")
+    };
+
+    assert_eq!(effects, compact("anthropic/haiku"));
+}
+
+#[test]
+fn a_short_context_or_a_cheap_target_is_left_for_the_host_to_compact() {
+    let mut router = router(&[]);
+
+    let short = switched(
+        "anthropic/opus",
+        99_999,
+        &["anthropic/opus", "anthropic/haiku"],
+    );
+    assert_eq!(router.plan(&Situation::default(), &short), Plan::Skip);
+
+    let cheap = switched(
+        "anthropic/haiku",
+        100_000,
+        &["anthropic/opus", "anthropic/haiku"],
+    );
+    assert_eq!(router.plan(&Situation::default(), &cheap), Plan::Skip);
 }
 
 #[test]
@@ -1201,6 +1299,27 @@ fn the_summary_model_is_a_pin_then_fast_then_free_and_never_blacklisted() {
     assert_eq!(
         decide(defaults(), &["anthropic/opus", "opencode/x-free"]),
         compact("opencode/x-free")
+    );
+    // Go's free models write summaries too, once Go is subscribed.
+    assert_eq!(
+        decide(
+            defaults(),
+            &["anthropic/opus", "opencode-go/hy4-flash-free"]
+        ),
+        compact("opencode-go/hy4-flash-free")
+    );
+    // With both free providers available, the first-listed pattern wins over
+    // the host's order.
+    assert_eq!(
+        decide(
+            defaults(),
+            &[
+                "anthropic/opus",
+                "opencode/x-free",
+                "opencode-go/hy4-flash-free"
+            ]
+        ),
+        compact("opencode-go/hy4-flash-free")
     );
     let blocked = ModelRouterConfig {
         blacklist: vec!["anthropic/haiku".into()],

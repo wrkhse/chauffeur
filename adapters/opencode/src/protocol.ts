@@ -89,6 +89,8 @@ export type SignalKind =
     idle_seconds: number
     /** The prompt-cache lifetime the user set for the model, in seconds. */
     cache_seconds?: number | undefined
+    /** Why the context is reported: a cold cache or an impending switch. */
+    reason?: "cache_expired" | "model_switch"
     available: Array<{ model: ModelRef; usable: boolean }>
   }
   | { type: "context_idle"; model: ModelRef; context_tokens: number; context_window: number; awaiting_answer: boolean; prices: CachePrices; cache_seconds?: number | undefined }

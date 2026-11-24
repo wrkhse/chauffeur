@@ -3,6 +3,7 @@ import { Deferred, Effect } from "effect"
 import type { DaemonClient } from "../src/daemon.js"
 import { installModelRouter } from "../src/model-router.js"
 import type { HostEffect, Signal } from "../src/protocol.js"
+import { NO_RENEWAL } from "../src/renewal.js"
 import { eventStream, fakeHost, Hooks, install, noRulebooks, noSkills, settle, shippedTexts } from "./support.js"
 
 const failed = { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" }
@@ -17,6 +18,51 @@ const retry = (sessionID: string) => ({
   model: failed,
   error: { type: "provider.rate_limit", status: 429, message: "limited" },
   decision: { retry: true, delay: 1000 },
+})
+
+
+test("a long context is compacted before a failover switch and retry", async () => {
+  const sessionID = "ses_compact_switch"
+  const hooks = new Hooks()
+  const events = eventStream()
+  const actions: string[] = []
+
+  const host = fakeHost({
+    session: {
+      hook: hooks.register,
+      switchModel: () => Effect.sync(() => { actions.push("switch") }),
+      get: () => Effect.succeed({ model: failed }),
+    },
+    model: { list: () => Effect.succeed(models) },
+    tool: { hook: hooks.register },
+    event: { subscribe: events.subscribe },
+  })
+
+  const renewal = {
+    ...NO_RENEWAL,
+    beforeSwitch: (_sessionID: string, model: { readonly provider: string; readonly model: string }) => Effect.sync(() => {
+      actions.push(`compact:${model.provider}/${model.model}`)
+
+      return true
+    }),
+  }
+
+  const plugin = await install(installModelRouter(renewal), host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Effect.succeed([
+    { type: "model", agent_id: sessionID, model: { provider: "openai", model: "gpt-6-sol" } },
+  ]) })
+
+  try {
+    await events.publish({ type: "session.execution.started", data: { sessionID } })
+    await settle()
+
+    const event = retry(sessionID)
+
+    await hooks.emit("retry", event)
+    expect(actions).toEqual(["compact:openai/gpt-6-sol", "switch"])
+    expect(event.decision).toEqual({ retry: true, delay: 0 })
+  } finally {
+    await plugin.close()
+  }
 })
 
 test("a tool in an earlier request does not block failover; a tool in this request does", async () => {
@@ -45,7 +91,7 @@ test("a tool in an earlier request does not block failover; a tool in this reque
       : [{ type: "model", agent_id: sessionID, model: null }]
   }) }
 
-  const plugin = await install(installModelRouter, host, daemon)
+  const plugin = await install(installModelRouter(), host, daemon)
 
   try {
     await events.publish({ type: "session.execution.started", data: { sessionID } })
@@ -93,7 +139,7 @@ test("a session on the default model fails over; one whose selection moved on do
     event: { subscribe: events.subscribe },
   })
 
-  const plugin = await install(installModelRouter, host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Effect.succeed([
+  const plugin = await install(installModelRouter(), host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Effect.succeed([
     { type: "model", agent_id: sessionID, model: { provider: "openai", model: "gpt-6-sol" } },
   ]) })
 
@@ -137,7 +183,7 @@ test("stopping while the daemon decides never switches a cancelled execution", a
     event: { subscribe: events.subscribe },
   })
 
-  const plugin = await install(installModelRouter, host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Deferred.await(decided) })
+  const plugin = await install(installModelRouter(), host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: () => Deferred.await(decided) })
 
   try {
     await events.publish({ type: "session.execution.started", data: { sessionID } })
@@ -190,10 +236,10 @@ test("a switched-to model that fails outside the retry hook is reported, and the
     return [{ type: "model", agent_id: value.agent_id, model: from === "openai" ? opus : { provider: "openai", model: "gpt-6-sol" } }]
   }) }
 
-  const plugin = await install(installModelRouter, host, daemon)
+  const plugin = await install(installModelRouter(), host, daemon)
 
   try {
-    selection = { providerID: "openai", id: "gpt-6.1-sol", variant: "high" }
+    selection = { providerID: "openai", id: "gpt-6.2-sol", variant: "high" }
     await events.publish({ type: "session.execution.started", data: { sessionID } })
     await settle()
 
@@ -237,7 +283,7 @@ test("running sessions past the cap are forgotten, and a forgotten one keeps the
     event: { subscribe: events.subscribe },
   })
 
-  const plugin = await install(installModelRouter, host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: (value) => Effect.succeed([
+  const plugin = await install(installModelRouter(), host, { skills: noSkills, rulebooks: noRulebooks, texts: shippedTexts, signal: (value) => Effect.succeed([
     { type: "model", agent_id: value.agent_id, model: { provider: "openai", model: "gpt-6-sol" } },
   ]) })
 

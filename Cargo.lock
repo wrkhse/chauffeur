@@ -247,6 +247,7 @@ dependencies = [
  "chauffeur-judge-facts",
  "chauffeur-judge-glide",
  "chauffeur-judge-jev",
+ "chauffeur-judge-liquid",
  "chauffeur-judge-subq",
  "chauffeur-plugin-anthropic",
  "chauffeur-plugin-openai",
@@ -287,6 +288,15 @@ dependencies = [
 
 [[package]]
 name = "chauffeur-judge-jev"
+version = "0.1.0"
+dependencies = [
+ "chauffeur-core",
+ "chauffeur-judge-http",
+ "serde_json",
+]
+
+[[package]]
+name = "chauffeur-judge-liquid"
 version = "0.1.0"
 dependencies = [
  "chauffeur-core",

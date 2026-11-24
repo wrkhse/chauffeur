@@ -134,6 +134,7 @@ mod tests {
                 context_window: 1_000_000,
                 idle_seconds,
                 cache_seconds: None,
+                reason: chauffeur_core::ContextResumeReason::CacheExpired,
                 available: ["claude-opus-5-5", "claude-haiku-5"]
                     .map(|id| AvailableModel {
                         model: model(id),

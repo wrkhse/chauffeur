@@ -1,6 +1,6 @@
 import { type Plugin, Skill } from "@opencode/plugin/effect"
 import type { SessionContext, SessionPrompt } from "@opencode/plugin/effect/session"
-import { Effect, Schema, type Scope } from "effect"
+import { Effect, Schema, Stream, type Scope } from "effect"
 import { warnClippedSkills } from "./clipped-skills.js"
 import { codeModeNamespaces } from "./code-mode.js"
 import { Daemon } from "./daemon.js"
@@ -10,7 +10,7 @@ import { mcpSettled } from "./mcp-settle.js"
 import { applyNamespaces } from "./namespaces.js"
 import { ASK_TOOL } from "./ask-tool.js"
 import { NO_RENEWAL, type RenewalControl } from "./renewal.js"
-import { Texts, type TextsSource } from "./texts.js"
+import { fill, type HostTexts, Texts, type TextsSource } from "./texts.js"
 import { TODO_TOOL } from "./todo-data.js"
 import { catalogEntry, signal, TEXT_CODE_POINTS, type CatalogEntry, type CodeModeNamespace, type ContextEffect, type HostEffect, type ModelRef } from "./protocol.js"
 import { hostLoadsSkills, skillsInContext } from "./skills.js"
@@ -118,6 +118,8 @@ export const installExposure = (renewal: RenewalControl = NO_RENEWAL): Effect.Ef
   const texts = yield* Texts
   const hidden = new HiddenTools(host)
 
+  const note = yield* holdPromptNotes(host)
+
   // Only named tools are removed, so a tool the engine never judged stays.
   const hide = (event: SessionContext) => hidden.current(event.sessionID).pipe(Effect.map((set) => {
     for (const name of set ?? []) delete event.tools[name]
@@ -174,12 +176,21 @@ export const installExposure = (renewal: RenewalControl = NO_RENEWAL): Effect.Ef
         workspace,
       }), EXPOSURE_TIMEOUT)
 
+      // A model the user changed by hand still has the old context to read;
+      // compact it before the request. Our own switches compact where they
+      // are applied, so they are not detected here.
+      if (model && renewal.switched(event.sessionID, ref(model))) {
+        yield* renewal.beforeSwitch(event.sessionID, ref(model))
+      }
+
       yield* apply(host, event, effects, {
         attached,
         hidden: hidden.cached(sessionID),
         expected: model ? ref(model) : null,
         remember: (set) => hidden.remember(sessionID, set),
-      })
+        texts: texts.current(),
+        note: (value) => note(sessionID, value),
+      }, renewal)
     }).pipe(
       // Exposure fails open: the prompt is admitted unenhanced.
       Effect.catch((error) => Effect.logError("chauffeur: exposure unavailable", error)),
@@ -230,33 +241,81 @@ function control(host: Plugin.Context, hidden: HiddenTools, texts: TextsSource):
   }
 }
 
-/** What applying the engine's effects to one prompt needs. */
-type Applying = { attached: ReadonlySet<string>; hidden: Hidden; expected: ModelRef | null; remember: (set: Hidden) => void }
+/** Context text held until the prompt that earned it is admitted. */
+type PromptNote = { readonly text: string; readonly description: string }
 
-function apply(host: Plugin.Context, event: SessionPrompt, effects: ReadonlyArray<HostEffect>, applying: Applying): Effect.Effect<void, unknown> {
+/**
+ * A prompt hook runs before the user message reaches the inbox, so a
+ * synthetic sent there would be enqueued ahead of it. Hold each note until
+ * the message's own inbox event, then enqueue the note behind it.
+ */
+function holdPromptNotes(host: Plugin.Context): Effect.Effect<(sessionID: string, value: PromptNote) => void, never, Scope.Scope> {
+  const pending = new Map<string, PromptNote>()
+
+  return Effect.gen(function* () {
+    yield* host.event.subscribe().pipe(
+      Stream.runForEach((event) => {
+        if (event.type !== "session.inbox.enqueued" || event.data.item.type !== "user") return Effect.void
+
+        const sessionID = String(event.data.sessionID)
+        const value = pending.get(sessionID)
+
+        if (!value) return Effect.void
+
+        pending.delete(sessionID)
+
+        return host.session.synthetic({
+          sessionID: event.data.sessionID,
+          text: value.text,
+          description: value.description,
+          delivery: "steer",
+        }).pipe(
+          Effect.asVoid,
+          Effect.catch((error) => Effect.logError("chauffeur: prompt context note not delivered", error)),
+        )
+      }),
+      Effect.catch((error) => Effect.logError("chauffeur: prompt context events ended", error)),
+      Effect.forkScoped,
+    )
+
+    return (sessionID: string, value: PromptNote): void => {
+      if (!pending.has(sessionID) && pending.size >= MAX_SESSIONS) pending.clear()
+
+      pending.set(sessionID, value)
+    }
+  })
+}
+
+/** What applying the engine's effects to one prompt needs. */
+type Applying = { attached: ReadonlySet<string>; hidden: Hidden; expected: ModelRef | null; remember: (set: Hidden) => void; texts: HostTexts; note: (value: PromptNote) => void }
+
+function apply(host: Plugin.Context, event: SessionPrompt, effects: ReadonlyArray<HostEffect>, applying: Applying, renewal: RenewalControl): Effect.Effect<void, unknown> {
+  const promptContexts: ContextEffect[] = []
+
   return Effect.forEach(effects, (effect) => {
     if (effect.agent_id !== String(event.sessionID)) return Effect.void
 
-    if (effect.type === "model" && effect.model) return switchModel(host, event, effect.model, applying.expected)
+    if (effect.type === "model" && effect.model) return switchModel(host, event, effect.model, applying.expected, (model) => renewal.beforeSwitch(event.sessionID, model))
 
     if (effect.type === "tools") return hideTools(host, event, effect, applying)
 
     // Before admission, so the request this prompt starts already has them.
     if (effect.type === "namespaces") return applyNamespaces(event.sessionID, effect).pipe(Effect.provideService(Host, host))
 
-    if (effect.type === "context" && effect.delivery === "prompt") attach(effect, event, applying.attached)
+    if (effect.type === "context" && effect.delivery === "prompt") promptContexts.push(effect)
 
     return Effect.void
-  }, { discard: true })
+  }, { discard: true }).pipe(Effect.tap(() => Effect.sync(() => sendPromptContext(event, promptContexts, applying))))
 }
 
 /** Switch the session's model, unless the selection changed while the engine judged. */
-function switchModel(host: Plugin.Context, event: SessionPrompt, next: ModelRef, expected: ModelRef | null): Effect.Effect<void, unknown> {
+function switchModel(host: Plugin.Context, event: SessionPrompt, next: ModelRef, expected: ModelRef | null, before: (model: ModelRef) => Effect.Effect<boolean>): Effect.Effect<void, unknown> {
   return Effect.gen(function* () {
     const current = (yield* host.session.get({ sessionID: event.sessionID })).model
 
     if (!current || !expected || !sameModel(ref(current), expected)) return
 
+    yield* before(next)
     yield* host.session.switchModel({ sessionID: event.sessionID, model: hostModel(next) })
   })
 }
@@ -340,21 +399,25 @@ function attachedSkills(context: ReadonlyArray<HistoryMessage>, event?: SessionP
 }
 
 /**
- * Skills join the prompt as user-selected skills, unless the context or the
- * prompt already has them; text joins it as a text attachment. Both reach the
- * first step and add nothing to the system prompt.
+ * Prompt context: skills join the user's message as user-selected skills,
+ * unless the context or the prompt already has them. Their text is held for
+ * one synthetic message after the message is admitted, never a file
+ * attachment: an attachment has no file on disk, so the agent searches for
+ * it and never reads the note.
  */
-function attach(effect: ContextEffect, event: SessionPrompt, attached: ReadonlySet<string>): void {
-  const present = new Set([...attached, ...(event.prompt.skills ?? []).map((skill) => String(skill.id))])
-  const skills = effect.skills.filter((id) => !present.has(id))
+function sendPromptContext(event: SessionPrompt, contexts: ReadonlyArray<ContextEffect>, applying: Applying): void {
+  const present = new Set([...applying.attached, ...(event.prompt.skills ?? []).map((skill) => String(skill.id))])
+  const skills = [...new Set(contexts.flatMap((context) => context.skills))].filter((id) => !present.has(id))
 
-  event.prompt.skills = [...(event.prompt.skills ?? []), ...skills.map((id) => ({ id: Skill.ID.make(id) }))]
+  if (skills.length > 0) event.prompt.skills = [...(event.prompt.skills ?? []), ...skills.map((id) => ({ id: Skill.ID.make(id) }))]
 
-  if (effect.text) {
-    const name = `chauffeur-${effect.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.txt`
+  const text = contexts.flatMap((context) => context.text === null ? [] : [context.text]).join("\n\n")
 
-    event.prompt.files = [...(event.prompt.files ?? []), { uri: `data:text/plain;base64,${Buffer.from(effect.text, "utf8").toString("base64")}`, name }]
-  }
+  if (text === "") return
+
+  const label = contexts.map((context) => context.label).join(", ")
+
+  applying.note({ text, description: fill(applying.texts.labels.context, { label }) })
 }
 
 /** The context's hidden tools after applying the engine's decision. */

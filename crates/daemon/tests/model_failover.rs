@@ -102,7 +102,7 @@ async fn fails_over(from: ModelRef, to: ModelRef, other_tier: &'static str, judg
         model("anthropic", "claude-sonnet-5-5"),
         model("openai", "gpt-6-astra"),
         model("openai", "gpt-6-luna"),
-        model("openai", "gpt-6.1-sol"),
+        model("openai", "gpt-6.2-sol"),
         model("openai", "gpt-6.1-terra"),
     ]
     .into_iter()
@@ -135,13 +135,76 @@ async fn fails_over(from: ModelRef, to: ModelRef, other_tier: &'static str, judg
     server.join().expect("fixture");
 }
 
+/// A switch over the budget compacts through the engine thread from facts
+/// alone: no judge is asked, and the summary model is the cheap one.
+#[tokio::test]
+async fn a_long_context_is_summarized_before_a_model_switch() {
+    use chauffeur_core::ContextResumeReason;
+    use chauffeur_judge_jev::JevConfig;
+    use std::time::Duration;
+
+    let engine = EngineHandle::spawn(EngineOptions {
+        skills_dir: std::env::temp_dir().join("chauffeur-no-skills-repo"),
+        config_dir: std::env::temp_dir().join("chauffeur-daemon-test-config-absent"),
+        judge: chauffeur_daemon::JudgeConfig::jev(JevConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "unused".into(),
+            model: "unused".into(),
+            timeout: Duration::from_millis(1),
+            record: None,
+        }),
+        system_two: None,
+        idle_reminders: false,
+        sourcefed: None,
+        disabled: Vec::new(),
+        state_file: None,
+        audit_file: None,
+    })
+    .await
+    .expect("engine starts");
+
+    let available = ["anthropic/claude-opus-5-5", "anthropic/claude-haiku-5"]
+        .into_iter()
+        .map(|key| {
+            let (provider, id) = key.split_once('/').expect("provider/model");
+
+            AvailableModel {
+                model: model(provider, id),
+                usable: true,
+            }
+        })
+        .collect();
+
+    let switched = signal(
+        2,
+        SignalKind::ContextResumed {
+            model: model("anthropic", "claude-opus-5-5"),
+            context_tokens: 100_000,
+            context_window: 1_000_000,
+            idle_seconds: 0,
+            cache_seconds: None,
+            reason: ContextResumeReason::ModelSwitch,
+            available,
+        },
+    );
+
+    let effects = engine.ingest(switched).await.expect("switch signal");
+
+    assert_eq!(
+        effects,
+        vec![Effect::Compact {
+            agent_id: "ses_test".into(),
+            model: model("anthropic", "claude-haiku-5"),
+        }]
+    );
+}
 /// Jev picks the same-tier model.
 #[tokio::test]
 async fn a_frontier_supervisor_fails_over_to_frontier_on_the_other_provider() {
     fails_over(
         at("anthropic", "claude-fable-5-2", "high"),
         at("openai", "gpt-6-astra", "high"),
-        "openai/gpt-6.1-sol#high",
+        "openai/gpt-6.2-sol#high",
         Judged {
             choice: "openai/gpt-6-astra#high",
             confidence: 0.8,
@@ -155,10 +218,10 @@ async fn a_frontier_supervisor_fails_over_to_frontier_on_the_other_provider() {
 async fn a_balanced_worker_fails_over_to_balanced_on_the_other_provider() {
     fails_over(
         at("anthropic", "claude-opus-5-5", "high"),
-        at("openai", "gpt-6.1-sol", "high"),
+        at("openai", "gpt-6.2-sol", "high"),
         "openai/gpt-6-astra#high",
         Judged {
-            choice: "openai/gpt-6.1-sol#high",
+            choice: "openai/gpt-6.2-sol#high",
             confidence: 0.8,
         },
     )
@@ -184,7 +247,7 @@ async fn an_unsure_judge_still_sends_astra_to_fable() {
 #[tokio::test]
 async fn an_unsure_judge_still_sends_sol_to_opus() {
     fails_over(
-        at("openai", "gpt-6.1-sol", "high"),
+        at("openai", "gpt-6.2-sol", "high"),
         at("anthropic", "claude-opus-5-5", "high"),
         "anthropic/claude-fable-5-2#high",
         Judged {
@@ -201,7 +264,7 @@ async fn an_unsure_judge_still_sends_low_opus_to_terra() {
     fails_over(
         at("anthropic", "claude-opus-5-5", "low"),
         at("openai", "gpt-6.1-terra", "high"),
-        "openai/gpt-6.1-sol#high",
+        "openai/gpt-6.2-sol#high",
         Judged {
             choice: "openai/gpt-6-luna",
             confidence: 0.1,

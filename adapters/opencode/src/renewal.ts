@@ -1,9 +1,11 @@
+import type { Plugin } from "@opencode/plugin/effect"
 import type { SessionCompaction } from "@opencode/plugin/effect/session"
 import { Data, DateTime, Duration, Effect, Fiber, Predicate, Schema, type Scope, Stream } from "effect"
 import { Daemon } from "./daemon.js"
 import { currentContext, type HistoryMessage, Host, type SessionID } from "./host.js"
-import { available, hostModel, modelKey, ref } from "./model-router.js"
+import { available, hostModel, modelKey, ref, sameModel } from "./model-router.js"
 import { signal, type ModelRef } from "./protocol.js"
+import type { RenewalControl } from "./renewal-control.js"
 import { fill, type HostTexts, Texts } from "./texts.js"
 import type { PendingQuestion, WarmingControl } from "./warming.js"
 
@@ -68,16 +70,7 @@ export type CacheSettings = { readonly settings?: unknown; readonly variants?: R
 /** A compaction Chauffeur queued, and the model that writes its summary. */
 type Pending = { readonly model: ModelRef; readonly window: number; readonly at: number }
 
-export type RenewalControl = {
-  /**
-   * Before a prompt is admitted: when the engine says the session's context
-   * should be renewed, queue a compaction ahead of the prompt, to be written
-   * by the engine's cheaper model. True when one was queued.
-   */
-  readonly renew: (sessionID: SessionID) => Effect.Effect<boolean>
-}
-
-export const NO_RENEWAL: RenewalControl = { renew: () => Effect.succeed(false) }
+export { NO_RENEWAL, type RenewalControl } from "./renewal-control.js"
 
 /** The context's size and idle time, from its latest reply the provider measured. */
 export type ContextFacts = { readonly model: HostModel; readonly tokens: number; readonly idleSeconds: number }
@@ -94,22 +87,9 @@ export const installRenewal = (warming: WarmingControl = { lastWarmed: () => und
   const daemon = yield* Daemon
   const texts = yield* Texts
   const pending = new Map<string, Pending>()
+  const switched = yield* trackSwitches(host)
 
-  const stored = yield* host.storage.get(PASS_OVER_KEY).pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(Deadlines)),
-    Effect.orElseSucceed(() => ({})),
-  )
-
-  /** Providers whose summary request failed, until when they are passed over. */
-  const passedOver = new Map(Object.entries(stored))
-
-  const passOver = (provider: string) => {
-    passedOver.set(provider, Date.now() + PASS_OVER_MS)
-
-    return host.storage.set(PASS_OVER_KEY, Object.fromEntries(passedOver)).pipe(Effect.ignore)
-  }
-
-  const reachable = (provider: string) => (passedOver.get(provider) ?? 0) <= Date.now()
+  const { passOver, reachable } = yield* passOvers(host)
 
   yield* host.session.hook("compaction", (event) => {
     const sessionID = String(event.sessionID)
@@ -144,20 +124,22 @@ export const installRenewal = (warming: WarmingControl = { lastWarmed: () => und
   )
 
   /**
-   * Asks the engine whether a context resumed after `idleSeconds` should be
+   * Asks the engine whether `model` resuming this context should have it
    * renewed first: the model that writes its summary, and that model's
    * window, on a yes.
    */
-  const decide = (sessionID: SessionID, model: HostModel, tokens: number, idleSeconds: number) => Effect.gen(function* () {
+  const decide = (sessionID: SessionID, model: ModelRef, tokens: number, idleSeconds: number, reason: "cache_expired" | "model_switch") => Effect.gen(function* () {
     const models: ReadonlyArray<ListedModel> = (yield* host.model.list()).data
+    const listed = models.find((entry) => entry.providerID === model.provider && entry.id === model.model)
 
     const effects = yield* daemon.signal(signal(String(sessionID), {
       type: "context_resumed",
-      model: ref(model),
+      model,
       context_tokens: tokens,
-      context_window: windowOf(models, ref(model)) ?? 0,
+      context_window: windowOf(models, model) ?? 0,
       idle_seconds: idleSeconds,
-      cache_seconds: cacheSeconds(models.find((entry) => entry.providerID === model.providerID && entry.id === model.id), model.variant),
+      cache_seconds: cacheSeconds(listed, model.variant),
+      reason,
       available: available(models).map((entry) => (reachable(entry.model.provider) ? entry : { ...entry, usable: false })),
     }), DECISION_TIMEOUT)
 
@@ -175,8 +157,10 @@ export const installRenewal = (warming: WarmingControl = { lastWarmed: () => und
     yield* host.session.compact({ sessionID }).pipe(Effect.tapError(() => Effect.sync(() => pending.delete(String(sessionID)))))
   })
 
+  const beforeSwitch = renewBeforeSwitch(host, decide, queue)
+
   /** On the engine's yes, queues the renewal; true when it was queued. */
-  const judge = (sessionID: SessionID, model: HostModel, tokens: number, idleSeconds: number) => decide(sessionID, model, tokens, idleSeconds).pipe(
+  const judge = (sessionID: SessionID, model: HostModel, tokens: number, idleSeconds: number) => decide(sessionID, ref(model), tokens, idleSeconds, "cache_expired").pipe(
     Effect.flatMap((summary) => (summary ? queue(sessionID, summary).pipe(Effect.as(true)) : Effect.succeed(false))),
     // Renewal fails open: the input runs on the context as it is.
     Effect.catch((error) => Effect.logError("chauffeur: context renewal unavailable", error).pipe(Effect.as(false))),
@@ -196,7 +180,7 @@ export const installRenewal = (warming: WarmingControl = { lastWarmed: () => und
 
   yield* watchExpiry(renew, yield* withdrawal(decide, queue), warming)
 
-  return { renew }
+  return { renew, beforeSwitch, switched }
 })
 
 
@@ -207,10 +191,82 @@ type Withdraw = (sessionID: SessionID, question: PendingQuestion, open: () => bo
 type Summary = Omit<Pending, "at">
 
 /** The engine's answer to whether a context resumed after `idleSeconds` is renewed first: its summary on a yes. */
-type Decide = (sessionID: SessionID, model: HostModel, tokens: number, idleSeconds: number) => Effect.Effect<Summary | undefined, unknown>
+type Decide = (sessionID: SessionID, model: ModelRef, tokens: number, idleSeconds: number, reason: "cache_expired" | "model_switch") => Effect.Effect<Summary | undefined, unknown>
 
 /** Queues OpenCode's compaction, its summary written by the summary's model. */
 type Queue = (sessionID: SessionID, summary: Summary) => Effect.Effect<void, unknown>
+
+/** Providers whose summary request failed, until when they are passed over. */
+function passOvers(host: Plugin.Context): Effect.Effect<{
+  readonly passOver: (provider: string) => Effect.Effect<void>
+  readonly reachable: (provider: string) => boolean
+}> {
+  return Effect.gen(function* () {
+    const stored = yield* host.storage.get(PASS_OVER_KEY).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Deadlines)),
+      Effect.orElseSucceed(() => ({})),
+    )
+
+    const passedOver = new Map(Object.entries(stored))
+
+    return {
+      passOver: (provider) => {
+        passedOver.set(provider, Date.now() + PASS_OVER_MS)
+
+        return host.storage.set(PASS_OVER_KEY, Object.fromEntries(passedOver)).pipe(Effect.ignore)
+      },
+      reachable: (provider) => (passedOver.get(provider) ?? 0) <= Date.now(),
+    }
+  })
+}
+
+/**
+ * Remembers the model that last served each session, so a manual change is
+ * visible before a request reaches the new model.
+ */
+function trackSwitches(host: Plugin.Context): Effect.Effect<(sessionID: SessionID, model: ModelRef) => boolean, never, Scope.Scope> {
+  return Effect.gen(function* () {
+    const last = new Map<string, ModelRef>()
+
+    yield* host.session.hook("model.request", (event) => Effect.sync(() => {
+      if (event.kind !== "primary") return
+
+      if (!last.has(String(event.sessionID)) && last.size >= MAX_SESSIONS) last.clear()
+
+      last.set(String(event.sessionID), ref(event.model))
+    }))
+
+    return (sessionID, model) => {
+      const seen = last.get(String(sessionID))
+
+      return seen !== undefined && !sameModel(seen, model)
+    }
+  })
+}
+
+/**
+ * Before a switch, summarize a context too long for the new model to re-read.
+ * The compaction runs in OpenCode's hook; wait for it so no request reaches
+ * the new model while the old context is still there.
+ */
+function renewBeforeSwitch(host: Plugin.Context, decide: Decide, queue: Queue) {
+  return (sessionID: SessionID, model: ModelRef) => Effect.gen(function* () {
+    const facts = contextFacts(yield* host.session.context({ sessionID }), Date.now())
+
+    if (!facts) return false
+
+    const summary = yield* decide(sessionID, model, facts.tokens, facts.idleSeconds, "model_switch")
+
+    if (!summary) return false
+
+    yield* queue(sessionID, summary)
+    yield* host.session.wait({ sessionID }).pipe(Effect.timeout(SUMMARY_TIMEOUT), Effect.ignore)
+
+    return true
+  }).pipe(
+    Effect.catch((error) => Effect.logError("chauffeur: context renewal before a switch unavailable", error).pipe(Effect.as(false))),
+  )
+}
 
 /**
  * The answer to a question the user left open past the cache's lifetime
@@ -233,7 +289,7 @@ function withdrawal(decide: Decide, queue: Queue): Effect.Effect<Withdraw, never
 
       // The cache was last written by the request that asked the question.
       const idleSeconds = Math.max(0, Math.floor((Date.now() - question.asked) / 1_000))
-      const summary = yield* decide(sessionID, (yield* host.session.get({ sessionID })).model ?? facts.model, facts.tokens, idleSeconds)
+      const summary = yield* decide(sessionID, ref((yield* host.session.get({ sessionID })).model ?? facts.model), facts.tokens, idleSeconds, "cache_expired")
 
       if (!summary || !open()) return
 

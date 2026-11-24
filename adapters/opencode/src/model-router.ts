@@ -4,6 +4,7 @@ import { Effect, Stream } from "effect"
 import { Daemon } from "./daemon.js"
 import { Host, type SessionID } from "./host.js"
 import { signal, TEXT_CODE_POINTS, type ModelRef } from "./protocol.js"
+import { NO_RENEWAL, type RenewalControl } from "./renewal-control.js"
 import { deliverContext } from "./skills.js"
 import { clip } from "./text.js"
 import { fill, type HostTexts, Texts } from "./texts.js"
@@ -99,7 +100,7 @@ class Sessions {
  * Senses model errors, successes, and tool runs, and applies the engine's
  * model effects. All failover policy lives in the Chauffeur engine.
  */
-export const installModelRouter = Effect.gen(function* () {
+export const installModelRouter = (renewal: RenewalControl = NO_RENEWAL) => Effect.gen(function* () {
   const host = yield* Host
   const daemon = yield* Daemon
   const texts = yield* Texts
@@ -111,7 +112,7 @@ export const installModelRouter = Effect.gen(function* () {
     // The hook reports this failure itself; a later end of the execution is not news.
     sessions.switched.delete(sessionID)
 
-    return route(event, sessions.toolExecuted(sessionID), sessions.current(sessionID), (next) => sessions.switchedTo(sessionID, next)).pipe(
+    return route(event, sessions.toolExecuted(sessionID), sessions.current(sessionID), (next) => sessions.switchedTo(sessionID, next), renewal).pipe(
       Effect.provideService(Host, host),
       Effect.provideService(Daemon, daemon),
     )
@@ -145,7 +146,7 @@ export const installModelRouter = Effect.gen(function* () {
         // in a way the retry hook never saw: report it, or the agent stops.
         if (event.type !== "session.execution.failed" || !switched) return Effect.void
 
-        return followUp(sessionID, switched, event.data.error, texts.current(), (next) => sessions.switchedTo(sessionID, next)).pipe(
+        return followUp(sessionID, switched, event.data.error, texts.current(), (next) => sessions.switchedTo(sessionID, next), renewal).pipe(
           Effect.provideService(Host, host),
           Effect.provideService(Daemon, daemon),
           Effect.forkScoped,
@@ -171,14 +172,18 @@ export const installModelRouter = Effect.gen(function* () {
 })
 
 /** Report a failed model request and apply the engine's model decision. */
-function route(event: SessionRetry, toolExecuted: boolean, valid: () => boolean, switched: (next: ModelRef) => void): Effect.Effect<void, never, Host | Daemon> {
+function route(event: SessionRetry, toolExecuted: boolean, valid: () => boolean, switched: (next: ModelRef) => void, renewal: RenewalControl): Effect.Effect<void, never, Host | Daemon> {
   return Effect.gen(function* () {
     if (!valid()) return
 
     const next = yield* report(String(event.sessionID), ref(event.model), event.error, toolExecuted, valid)
 
     // Keeping the model (`model: null`) leaves the host's own retry decision in place.
-    if (next) yield* failover(event, next, valid, switched)
+    if (!next) return
+
+    // A long context is summarized by a cheap model before the new one reads it.
+    yield* renewal.beforeSwitch(event.sessionID, next)
+    yield* failover(event, next, valid, switched)
   }).pipe(
     // The host's own retry decision stands when the engine is unavailable.
     Effect.catch((error) => Effect.logError("chauffeur: model routing unavailable", error)),
@@ -219,7 +224,7 @@ function report(sessionID: string, model: ModelRef, error: ModelFailure, toolExe
  * The model Chauffeur switched to failed and ended the execution. Move on to
  * the engine's next choice and wake the agent, or say that none is left.
  */
-function followUp(sessionID: SessionID, failed: ModelRef, error: ModelFailure, texts: HostTexts, switched: (next: ModelRef) => void): Effect.Effect<void, never, Host | Daemon> {
+function followUp(sessionID: SessionID, failed: ModelRef, error: ModelFailure, texts: HostTexts, switched: (next: ModelRef) => void, renewal: RenewalControl): Effect.Effect<void, never, Host | Daemon> {
   return Effect.gen(function* () {
     const host = yield* Host
     // A new turn starts from the session's history, so no step is repeated.
@@ -232,6 +237,7 @@ function followUp(sessionID: SessionID, failed: ModelRef, error: ModelFailure, t
     const reason = clip(`${error.type}: ${error.message}`, ERROR_CODE_POINTS)
 
     if (next) {
+      yield* renewal.beforeSwitch(sessionID, next)
       yield* host.session.switchModel({ sessionID, model: hostModel(next) })
       switched(next)
     }

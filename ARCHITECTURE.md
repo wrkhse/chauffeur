@@ -164,11 +164,13 @@ which asks again only after a successful call with rounds left and otherwise
 settles the judge, so a verdict is always acted on. The design and migration
 are in `docs/plans/judge.md`.
 
-- **Hosted judges:** Jev (TypeSafe AI) is the default; SubQ Snap is optional.
-  `CHAUFFEUR_JUDGE` selects `jev` or `subq`. `CHAUFFEUR_JUDGE_FALLBACK` explicitly
-  enables the other judge, requiring its API key too. The shared HTTP client
-  validates every answer and records the provider name. Failure or invalid
-  answers trigger fallback, not low confidence. After a failure the primary
+- **Hosted judges:** Jev (TypeSafe AI) is the default; SubQ Snap, Fastino
+  GLiDE and Liquid d1.2 are optional. `CHAUFFEUR_JUDGE` selects `jev`, `subq`,
+  `glide` or `liquid`; Liquid defaults to `d1.2-ultra`.
+  `CHAUFFEUR_JUDGE_FALLBACK` explicitly enables another judge, requiring its
+  API key too. The shared HTTP client validates every answer and records the
+  provider name. Failure or invalid answers trigger fallback, not low
+  confidence. After a failure the primary
   cools down for 60 seconds, then the next call probes it again. Each attempt
   times out after 3 seconds, with no retry loop. If all configured judges fail,
   each capability applies its existing failure posture: nothing is hidden or
@@ -310,11 +312,12 @@ come first in that prefix.
   naming its matches and saying in a short clause what the first four do (on
   logged prompts, tool IDs alone left Jev unsure of 37% of these questions;
   with what they do, 16%), and,
-  for each chosen one, writes a note listing those matches with the
-  `search({ namespace })` call for exact paths. Each arrives as a `context`
-  effect with `prompt` delivery, a text attachment named after its namespace
-  (`chauffeur-code-mode-browser.txt`) that reaches the first step
-  and adds nothing to the system prompt. Tool exposure remembers per agent
+  for the chosen ones, writes one note listing those matches with the
+  `search({ namespace })` call for exact paths. It arrives as a single
+  `context` effect with `prompt` delivery and reaches the turn as a
+  synthetic message, not a text attachment: an attachment has no file on
+  disk, so the agent searches for it and never reads the note. It adds
+  nothing to the system prompt. Tool exposure remembers per agent
   what it surfaced and which namespaces the agent has called (the
   `tools.<namespace>` paths in `execute`'s code, and the calls the host
   reports from inside it). Neither gets a note again, even after a
@@ -354,13 +357,15 @@ come first in that prefix.
   prefix anyway, session-start classification runs again and only still-relevant
   skills are preloaded.
 - **Model switches are cache-cold** on the target provider. The model router
-  weighs that cost; each provider keeps its own warm prefix.
+  weighs that cost; each provider keeps its own warm prefix. A switch over the
+  renewal budget has a cheap model summarize the context first, so the new
+  model never re-reads it whole (see Context renewal).
 
 ## Capability catalog
 
 | Capability                  | Question                                                                                                                                                               | Triggered by                                                          | Effect                                               | Status |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- | ------ |
-| Model router                | switch, and to which same-tier model, or stay? has the limit on the model left behind cleared? should a cheaper model summarize this cold context first? (facts judge)   | model usage-limit error; user message after a switch; context resumed | decision; compaction                                 | built  |
+| Model router                | switch, and to which same-tier model, or stay? has the limit on the model left behind cleared? should a cheaper model summarize this cold context first? (facts judge)   | model usage-limit error; user message after a switch; context resumed, including a model switch | decision; compaction                                 | built  |
 | Permission / skill contract | each matching contract's typed question                                                                                                                                | permission request                                                    | decision                                             | built  |
 | Skill exposure              | does the request need each offered skill? (fan-out) is the agent using a generic approach where a skill fits?                                                          | user message; tool result and turn end; `ask_chauffeur`               | persistent                                           | built  |
 | Tool exposure               | will the task need this tool group? does the latest request need a hidden group now? which hidden groups and Code Mode namespaces cover the agent's request? (fan-out) | first user message of a context; later user messages; `ask_chauffeur` | tool set; Code Mode note                             | built  |
@@ -616,24 +621,26 @@ pins and named as recommended to Jev, while models a pattern alone covers are
 same-tier fallbacks. A table's `exclude` patterns (`*-fast` editions, older
 generations) take a model out of every pattern, so it has a tier only through
 an exact row. Only a provider with a plugin, one you use directly such as a
-subscription, rates its models, so a gateway copy (`opencode/gpt-6.1-sol`) is
+subscription, rates its models, so a gateway copy (`opencode/gpt-6.2-sol`) is
 never a failover target unless pinned. An agent already on a gateway copy is
 judged by the maker's tier and moves to that tier on a provider you use
 directly. `blacklist` in `model-router.json` contains `provider/model` patterns
 where `*` matches any run of characters. It excludes matching models at every
 variant from all router selections, overriding pins, tier ratings, last-resort
-patterns, and remembered switch-back origins. The shipped blacklist is
-`["opencode-go/*"]`: Go is not subscribed; Zen's free models remain available.
-Set `"blacklist": []` to remove the shipped exclusion when Go is subscribed.
-`last_resort` in `model-router.json` (shipped:
-`opencode/*-free`) names models offered only when no
-rated candidate is left. The order is: same tier, then any tier on providers
-you use directly, then the last resort:
+patterns, and remembered switch-back origins. The shipped blacklist is empty.
+Set `"blacklist": ["opencode-go/*"]` to exclude Go's models, for example when
+Go is not subscribed. `last_resort` in `model-router.json` (shipped:
+`["opencode-go/*-free", "opencode/*-free"]`) names models offered only when no
+rated candidate is left, in the order its patterns are listed: Go's free models
+first once Go is subscribed, then Zen's, with host order deciding only among a
+pattern's own models.
+Candidates come in tiers: same tier, then any tier on providers you use
+directly, then the last resort:
 
 | Tier      | Recommended                                 | Other variants and fallbacks                                                                                                               |
 | --------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Frontier  | `claude-fable-5-2#high`, `gpt-6-astra#high` | `claude-fable-5-2`, `gpt-6-astra` (every other variant); `claude-fable-*`, `gpt-*-astra*`                                                  |
-| Balanced  | `claude-opus-5-5#high`, `gpt-6.1-sol#high`  | `claude-opus-5-5`, `gpt-6.1-sol` (every other variant, except Opus `#low`, which is Efficient); `claude-opus-*` (not `#low`), `gpt-*-sol*` |
+| Balanced  | `claude-opus-5-5#high`, `gpt-6.2-sol#high`  | `claude-opus-5-5`, `gpt-6.2-sol` (every other variant, except Opus `#low`, which is Efficient); `claude-opus-*` (not `#low`), `gpt-*-sol*` |
 | Efficient | `claude-opus-5-5#low`, `gpt-6.1-terra#high` | `gpt-6.1-terra` (every other variant); `claude-opus-*#low`, `claude-sonnet-*`, `gpt-*-terra*`                                              |
 | Fast      | `gpt-6-luna` (every variant)                | `claude-haiku-*`, `gpt-*-luna*`                                                                                                            |
 
@@ -714,8 +721,9 @@ models. A session already on a fast-tier or last-resort model is left alone:
 re-reading its context costs little, and OpenCode compacts it the usual way
 when the window fills. Otherwise the router picks a summary model: a `renewal.pins` entry, else a
 fast-tier model on the agent's own provider, then on another provider used
-directly (recommended first), else a last-resort free model; never a
-blacklisted one, nor one on a provider the agent hit a limit on. With none,
+directly (recommended first), else a last-resort free model, the first its
+`last_resort` pattern is listed; never a blacklisted one, nor one on a
+provider the agent hit a limit on. With none,
 nothing is asked. Otherwise it asks `renew_context`, carrying the facts
 `idle_seconds`, `cache_seconds` (the model's `cache.ttl` as the user set it in
 OpenCode, a variant's first, which the adapter reads from the host's models
@@ -756,6 +764,20 @@ balance, a spent free allowance) has the adapter pass over that provider for
 an hour, kept in plugin storage: its models go to the engine as unusable in
 later `context_resumed` signals, so the router picks a summary model
 elsewhere. A summary that skips the template passes over nothing.
+
+A model switch renews a long context too. The adapter sends `context_resumed`
+with `reason: model_switch` and the model the session will run on, whatever
+its idle time. The router answers from facts, with no judge: over
+`renewal.budget.max_tokens` (100,000), on a model that is neither fast-tier
+nor a last resort, with a cheap model available, it returns a `compact`
+effect. The adapter queues the compaction and waits for the summary before
+letting the switch through. Failover compacts before switching and retrying;
+a model effect on a prompt (switch-back) compacts before `switchModel`; and a
+model the user changed by hand, detected by comparing the session's model with
+the last one that served a primary request, compacts before the prompt's
+request. A short context, a cheap target, no available summarizer, or an
+engine that declines leaves the switch as it was; an unavailable engine fails
+open.
 
 Input other than a prompt, such as an integration's synthetic message, a
 finished shell's notice or a subagent's reply, wakes a session without any hook
@@ -891,9 +913,12 @@ Installed as a package, it also registers the hand-over skills in
 - **`tools`:** the hidden list is recorded on the user message's
   `chauffeur.hidden` metadata and deleted from `tools` in
   `session.hook("context")`.
-- **`context`, `prompt` delivery:** skills go to `prompt.skills`, text to a
-  `data:text/plain` attachment in `prompt.files`. The prompt waits up to 6 s
-  for the engine, then proceeds unenhanced.
+- **`context`, `prompt` delivery:** skills go to `prompt.skills`; their text
+  joins all other prompt context as one `session.synthetic` message, never a
+  `data:text/plain` attachment in `prompt.files`. The prompt hook runs
+  before admission, so the note is held until the message's
+  `session.inbox.enqueued` event and then steered in behind it. The prompt
+  waits up to 6 s for the engine, then proceeds unenhanced.
 - **`context`, other deliveries:** one `session.synthetic` message with the
   text and each skill's body, recording the skills in `chauffeur.skills`
   metadata: `delivery: "steer"`, `resume: true`, or `resume: false`. The
@@ -933,6 +958,7 @@ Installed as a package, it also registers the hand-over skills in
 | `judges/http`                         | Shared bounded System One HTTP transport, validation and recordings |
 | `judges/jev`                          | Jev provider defaults |
 | `judges/subq`                         | SubQ Snap provider defaults |
+| `judges/liquid`                       | Liquid d1.2 provider defaults |
 | `judges/facts`                        | the facts judge: deterministic rules over a question's facts |
 | `adapters/opencode`                   | signals in, effects out; an Effect plugin whose hooks share the plugin scope                                                                                                                                                                               |
 
@@ -945,7 +971,8 @@ Installed as a package, it also registers the hand-over skills in
   16 KiB of state (oldest dropped, 32 KiB however configured), 2 KiB
   per signal field, 400 B per catalog description, 128 skills and 128 tools per
   signal, 256 available models per signal, a 64-deep engine queue,
-  3 s Jev timeout, 15 s engine reply timeout, 256 KiB Jev response cap, 128 KiB
+  3 s System One timeout, 15 s engine reply timeout, 256 KiB System One
+  response cap, 128 KiB
   RPC body cap.
 - **Persistence.** After every signal the daemon writes each capability's
   per-agent memory and the Situations to `$CHAUFFEUR_STATE_DIR/state.json`
@@ -1021,8 +1048,8 @@ compiled in and need a rebuild.
 
 | Variable                  | Default                                                      |
 | ------------------------- | ------------------------------------------------------------ |
-| `CHAUFFEUR_JUDGE`         | `jev`; also accepts `subq` or `glide`                       |
-| `CHAUFFEUR_JUDGE_FALLBACK` | unset; `jev`, `subq`, `glide`, or `none`                    |
+| `CHAUFFEUR_JUDGE`         | `jev`; also accepts `subq`, `glide` or `liquid`            |
+| `CHAUFFEUR_JUDGE_FALLBACK` | unset; `jev`, `subq`, `glide`, `liquid`, or `none`         |
 | `CHAUFFEUR_JUDGE_ESCALATE` | unset; a second judge for low-confidence answers           |
 | `CHAUFFEUR_JUDGE_ESCALATE_BELOW` | `0.6`; effective confidence below which answers escalate |
 | `CHAUFFEUR_JUDGE_REVIEW`  | unset; System Two profile for answers both judges doubt     |
@@ -1033,6 +1060,9 @@ compiled in and need a rebuild.
 | `SUBQ_API_KEY`            | required when SubQ is selected as primary or fallback        |
 | `SUBQ_BASE_URL`           | `https://api.subq.ai`                                       |
 | `SUBQ_DEFAULT_MODEL`      | `subq-snap-preview`                                         |
+| `LIQUID_AI_KEY`           | required when Liquid is selected as primary or fallback      |
+| `LIQUID_BASE_URL`         | `https://api.liquid.ai/decisions`                            |
+| `LIQUID_DEFAULT_MODEL`    | `d1.2-ultra`                                                 |
 | `CHAUFFEUR_CONFIG_DIR`    | `~/.config/chauffeur`                                        |
 | `CHAUFFEUR_SKILLS_DIR`    | the plugin package's `skills/`, else `$CHAUFFEUR_CONFIG_DIR/skills` |
 | `CHAUFFEUR_STATE_DIR`     | `$XDG_STATE_HOME/chauffeur`, else `~/.local/state/chauffeur` |

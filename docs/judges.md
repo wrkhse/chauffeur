@@ -6,7 +6,7 @@ reasonings and returns a ruling for each. Three kinds ship:
 
 | Judge        | What it is                                     | Answers                                        |
 | ------------ | ---------------------------------------------- | ---------------------------------------------- |
-| `system_one` | a fast hosted classifier: Jev or SubQ          | typed questions (yes/no, choice, score)        |
+| `system_one` | a fast hosted classifier: Jev, SubQ, GLiDE or Liquid | typed questions (yes/no, choice, score) |
 | `system_two` | a general-purpose LLM that reasons             | reasonings over evidence, to a schema          |
 | `facts`      | plain code, no model                           | yes/no questions, from the facts they carry    |
 
@@ -56,11 +56,13 @@ else `renewal.cache_seconds` for its provider.
 
 ## System One providers
 
-Chauffeur supports three System One providers:
+Chauffeur supports four System One providers:
 
 - **Jev**, from TypeSafe, the default (`jev-latest`).
 - **SubQ Snap**, optional (`subq-snap-preview`).
 - **Fastino GLiDE**, optional (`fastino/GLiDE`).
+- **Liquid d1.2**, optional (`d1.2-ultra` by default, or `d1.2` with
+  `LIQUID_DEFAULT_MODEL`).
 
 All receive the same locally redacted state and typed questions. They share
 the `/v1/systemone` transport and answer validation; capability thresholds and
@@ -108,6 +110,17 @@ To keep Jev primary and use GLiDE only on provider failure, set
 This is **not** confidence-based escalation: low-confidence valid answers
 remain final. Merely setting `FASTINO_API_KEY` changes nothing.
 
+Liquid alone uses `CHAUFFEUR_JUDGE=liquid` and `LIQUID_AI_KEY`:
+
+```sh
+export LIQUID_AI_KEY=...
+export CHAUFFEUR_JUDGE=liquid
+export CHAUFFEUR_JUDGE_FALLBACK=none
+```
+
+Its default model is `d1.2-ultra`; `LIQUID_DEFAULT_MODEL=d1.2` selects the
+smaller model. As with the others, a key alone never enables the provider.
+
 Provider-specific overrides:
 
 - `TYPESAFE_BASE_URL`, default `https://api.typesafe.ai`.
@@ -116,6 +129,8 @@ Provider-specific overrides:
 - `SUBQ_DEFAULT_MODEL`, default `subq-snap-preview`.
 - `FASTINO_BASE_URL`, default `https://api.fastino.ai`.
 - `FASTINO_DEFAULT_MODEL`, default `fastino/GLiDE`.
+- `LIQUID_BASE_URL`, default `https://api.liquid.ai/decisions`.
+- `LIQUID_DEFAULT_MODEL`, default `d1.2-ultra`.
 
 GLiDE always sends `store: false` and accepts Bearer authentication. Its
 integer `score` is the winning level, not Chauffeur's weighted score: the
@@ -213,6 +228,10 @@ can be changed to a fixed period or zero retention. The Decisions API does not
 document a per-request `store: false` switch. Enabling fallback therefore
 explicitly authorizes sending the redacted judgment context to that provider;
 it is never inferred from finding an API key.
+
+Liquid's d1.2 models are text-only here as well. Selecting Liquid authorizes
+sending the same redacted state and questions to Liquid's Decisions API under
+your Liquid account's policy.
 
 ## System Two
 
@@ -318,6 +337,13 @@ cargo run -q -p chauffeur-bench -- judges /path/to/judgments.jsonl \
 
 Agreement with recorded Jev answers is not ground-truth accuracy. Independently
 label disputes before changing the default judge.
+
+On 2026-11-17 the frozen 54-case set was replayed twice against Jev, d1.2 and
+d1.2-ultra. Label agreement was 85%, 88% and 93%; confident mistakes were 7%,
+6% and 2%; p50 latency was 290, 459 and 512 ms. d1.2-ultra made no
+permission-shell or drift error, while d1.2 and Jev asked on 7 and 8 of 20
+permission-shell cases that should have been allowed. The labels are synthetic
+and need independent review before they justify changing the default.
 
 ## Sources
 

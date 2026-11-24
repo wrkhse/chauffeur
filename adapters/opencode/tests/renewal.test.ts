@@ -146,6 +146,47 @@ test("a cold context reports its size and idle time; the engine's compaction is 
   }
 })
 
+
+test("a switch summarizes a long context before the new model reads it", async () => {
+  const { signals, compactions, actions, host, daemon } = setup([reply(0, 640_000)], true)
+  const plugin = await install(installRenewal(), host, daemon)
+
+  try {
+    const switched = await Effect.runPromise(plugin.value.beforeSwitch(session("ses_switch"), { provider: "openai", model: "gpt-6-sol" }))
+
+    expect(switched).toBe(true)
+    expect(signals[0]?.kind).toMatchObject({
+      type: "context_resumed",
+      model: { provider: "openai", model: "gpt-6-sol" },
+      context_tokens: 640_000,
+      idle_seconds: 0,
+      reason: "model_switch",
+    })
+    expect(compactions).toEqual(["ses_switch"])
+    expect(actions).toEqual(["compact", "wait"])
+  } finally {
+    await plugin.close()
+  }
+})
+
+test("a model change since the last request is detected as a switch", async () => {
+  const { hooks, host, daemon } = setup([], false)
+  const plugin = await install(installRenewal(), host, daemon)
+
+  try {
+    const id = session("ses_manual")
+    const onOpus = { provider: "anthropic", model: "claude-opus-5-5", variant: "high" as const }
+    const onSol = { provider: "openai", model: "gpt-6-sol" }
+
+    expect(plugin.value.switched(id, onOpus)).toBe(false)
+    await hooks.emit("model.request", { sessionID: "ses_manual", kind: "primary", model: opus })
+    expect(plugin.value.switched(id, onOpus)).toBe(false)
+    expect(plugin.value.switched(id, onSol)).toBe(true)
+  } finally {
+    await plugin.close()
+  }
+})
+
 test("no compaction is queued when the engine declines, or the context has no measured reply", async () => {
   const declined = setup([reply(30, 640_000)], false)
   const fresh = setup([], true)

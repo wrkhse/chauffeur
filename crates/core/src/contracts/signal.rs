@@ -156,6 +156,19 @@ pub struct AvailableModel {
     pub usable: bool,
 }
 
+/// Why a host reports a context as resumed: its cache went cold, or the
+/// session is about to run on a different model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextResumeReason {
+    /// The prompt cache expired while the session was idle.
+    #[default]
+    CacheExpired,
+    /// A model switch is under way; the new model would re-read the whole
+    /// context cold, so a long one may be summarized first.
+    ModelSwitch,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SignalKind {
@@ -306,6 +319,10 @@ pub enum SignalKind {
         /// host, in seconds; without one, the provider's configured default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_seconds: Option<u64>,
+        /// Why the context is reported. A host that omits it resumed a cold
+        /// cache.
+        #[serde(default)]
+        reason: ContextResumeReason,
         available: Vec<AvailableModel>,
     },
     /// A session the user drives finished its turn, or paused it on a

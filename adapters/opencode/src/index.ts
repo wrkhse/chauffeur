@@ -23,10 +23,11 @@ export { ChauffeurRpc } from "./gate.js"
 /** Every capability's hooks live in the plugin scope, so unloading releases them together. */
 const capabilities = Effect.gen(function* () {
   if (!hostLoadsSkills()) yield* claimSkillLoading
-  yield* installModelRouter
 
   const warming = yield* installWarming
   const renewal = yield* installRenewal(warming)
+
+  yield* installModelRouter(renewal)
   const exposure = yield* installExposure(renewal)
 
   yield* installPermission

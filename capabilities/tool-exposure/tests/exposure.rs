@@ -407,7 +407,7 @@ fn a_namespace_the_agent_already_called_gets_no_note_even_after_a_compaction() {
 }
 
 #[test]
-fn each_needed_namespace_is_its_own_note_named_after_it() {
+fn all_needed_namespaces_share_one_note_named_after_them() {
     let mut exposure = exposure();
     let signal = with_code_mode(false);
 
@@ -432,12 +432,10 @@ fn each_needed_namespace_is_its_own_note_named_after_it() {
         })
         .collect();
 
-    assert_eq!(
-        notes.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-        ["Code Mode browser", "Code Mode cloudflare"]
-    );
-    assert!(notes[0].1.contains("- browser_tabs_open:") && !notes[0].1.contains("cloudflare"));
-    assert!(notes[1].1.contains("- cloudflare_get_live:") && !notes[1].1.contains("browser"));
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].0, "Code Mode browser, cloudflare");
+    assert!(notes[0].1.contains("- browser_tabs_open:"));
+    assert!(notes[0].1.contains("- cloudflare_get_live:"));
 }
 
 #[test]

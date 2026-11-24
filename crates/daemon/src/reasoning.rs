@@ -451,13 +451,13 @@ mod tests {
 
         enable(
             &dir,
-            r#", "profiles": { "completion-review": { "model": "gpt-6.1-sol", "effort": "high" } }"#,
+            r#", "profiles": { "completion-review": { "model": "gpt-6.2-sol", "effort": "high" } }"#,
         );
         // The watch checks at most once a second.
         std::thread::sleep(Duration::from_millis(1_100));
 
         assert!(registry.reason(&review("completion-review")).is_ok());
-        assert!(calls.lock().unwrap()[0].starts_with("gpt-6.1-sol Some(\"high\") 6000ms"));
+        assert!(calls.lock().unwrap()[0].starts_with("gpt-6.2-sol Some(\"high\") 6000ms"));
     }
 
     #[test]

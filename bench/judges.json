@@ -40,6 +40,18 @@
     "key_env": "LIQUID_AI_KEY"
   },
   {
+    "name": "d1.2",
+    "url": "https://api.liquid.ai/decisions/v1/systemone",
+    "model": "d1.2",
+    "key_env": "LIQUID_AI_KEY"
+  },
+  {
+    "name": "d1.2-ultra",
+    "url": "https://api.liquid.ai/decisions/v1/systemone",
+    "model": "d1.2-ultra",
+    "key_env": "LIQUID_AI_KEY"
+  },
+  {
     "name": "nimble",
     "url": "http://localhost:11434/v1/systemone",
     "model": "nimble"

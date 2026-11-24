@@ -1,9 +1,9 @@
 //! Code Mode surfacing. Tools in a Code Mode namespace reach the model through
 //! `execute`, whose catalog shows each namespace only in part. When a request
-//! needs a namespace, a note naming its best-matching tools joins the user's
-//! message, once per session and one attachment per namespace, or answers the
-//! agent's own request. A namespace the agent has already called gets no note:
-//! it knows those tools.
+//! needs a namespace, one note naming the best-matching tools of every chosen
+//! namespace joins the user's message as a synthetic message, once per
+//! session, or answers the agent's own request. A namespace the agent has
+//! already called gets no note: it knows those tools.
 
 use std::collections::{HashMap, HashSet};
 
@@ -101,9 +101,9 @@ impl Surfaced {
         }
     }
 
-    /// The notes for the chosen namespaces at `delivery`, recorded as
-    /// surfaced: one per namespace on a prompt, where each becomes an
-    /// attachment named after it, and one for all of them elsewhere.
+    /// The note for the chosen namespaces at `delivery`, recorded as
+    /// surfaced: one note naming all of them, whether it joins the prompt or
+    /// reaches a later turn.
     pub fn surface(
         &mut self,
         agent_id: &str,
@@ -116,31 +116,24 @@ impl Surfaced {
             chosen.iter().map(|namespace| namespace.name.clone()),
         );
 
-        let groups: Vec<&[&CodeModeNamespace]> = match delivery {
-            Delivery::Prompt => chosen.chunks(1).collect(),
-            _ if chosen.is_empty() => Vec::new(),
-            _ => vec![chosen],
-        };
+        if chosen.is_empty() {
+            return Vec::new();
+        }
 
-        groups
-            .into_iter()
-            .map(|namespaces| {
-                let names: Vec<&str> = namespaces
-                    .iter()
-                    .map(|namespace| namespace.name.as_str())
-                    .collect();
+        let names: Vec<&str> = chosen
+            .iter()
+            .map(|namespace| namespace.name.as_str())
+            .collect();
 
-                Effect::Context {
-                    agent_id: agent_id.to_string(),
-                    delivery,
-                    label: texts
-                        .code_mode_label
-                        .render(&[("namespace", &names.join(", "))]),
-                    skills: Vec::new(),
-                    text: Some(note(namespaces, texts)),
-                }
-            })
-            .collect()
+        vec![Effect::Context {
+            agent_id: agent_id.to_string(),
+            delivery,
+            label: texts
+                .code_mode_label
+                .render(&[("namespace", &names.join(", "))]),
+            skills: Vec::new(),
+            text: Some(note(chosen, texts)),
+        }]
     }
 }
 

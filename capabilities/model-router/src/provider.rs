@@ -273,7 +273,7 @@ mod tests {
         assert!(glob("claude-opus-*", "claude-opus-5-5"));
         assert!(glob("claude-opus-*", "claude-opus-5-5-fast"));
         assert!(!glob("claude-opus-*", "claude-sonnet-5-5"));
-        assert!(glob("gpt-*-sol*", "gpt-6.1-sol"));
+        assert!(glob("gpt-*-sol*", "gpt-6.2-sol"));
         assert!(glob("gpt-*-sol*", "gpt-6-sol-fast"));
         assert!(!glob("gpt-*-sol*", "gpt-6-luna"));
         assert!(glob("exact", "exact"));

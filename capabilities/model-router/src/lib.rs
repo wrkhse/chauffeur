@@ -19,8 +19,8 @@ pub use provider::{MAX_TIER_ROWS, Provider, Rating, Tier, TierEntry, TierTable};
 
 use chauffeur_core::judgment::strategy;
 use chauffeur_core::{
-    ChoiceOption, Effect, Facts, Judged, Judgment, ModelRef, Question, QuestionKind, Signal,
-    SignalKind, Situation,
+    ChoiceOption, ContextResumeReason, Effect, Facts, Judged, Judgment, ModelRef, Question,
+    QuestionKind, Signal, SignalKind, Situation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +71,7 @@ impl ModelRouter {
 
     /// The model's rating from its own provider's table. Only a provider with
     /// a plugin is one you use directly, such as a subscription, so a gateway
-    /// copy of the same model (`opencode/gpt-6.1-sol`) has no rating and is
+    /// copy of the same model (`opencode/gpt-6.2-sol`) has no rating and is
     /// never a failover target unless pinned.
     fn rating(&self, model: &ModelRef) -> Option<Rating> {
         self.provider(&model.provider)
@@ -222,8 +222,9 @@ impl ModelRouter {
         self.exhausted.remove(agent_id);
     }
 
-    /// Usable last-resort models, in host order, once each, at most the
-    /// configured `max_candidates`.
+    /// Usable last-resort models once each, at most the configured
+    /// `max_candidates`: in the order their `last_resort` patterns are
+    /// listed, then host order.
     fn last_resort(
         &self,
         agent_id: &str,
@@ -237,6 +238,9 @@ impl ModelRouter {
             .filter(|model| self.config.is_last_resort(model))
             .collect();
 
+        // The first listed pattern's models come first; a stable sort keeps
+        // host order within one pattern.
+        candidates.sort_by_key(|model| self.config.last_resort_rank(model));
         candidates.retain(|model| offered.insert(format!("{}/{}", model.provider, model.model)));
         candidates.truncate(self.config.max_candidates);
 
@@ -372,6 +376,36 @@ impl ModelRouter {
         Some(strategy::single(question, bar).map(Verdict::SwitchBack))
     }
 
+    /// On a model switch, whether a cheap model should summarize a long
+    /// context before the new model reads it. Decided from the token count
+    /// and the target model's tier, with no question: a switch is a cost the
+    /// router already chose to pay, so there is nothing left to weigh.
+    fn switch_renewal(&self, signal: &Signal) -> Option<Judgment<Verdict>> {
+        let SignalKind::ContextResumed {
+            model,
+            context_tokens,
+            available,
+            reason: ContextResumeReason::ModelSwitch,
+            ..
+        } = &signal.kind
+        else {
+            return None;
+        };
+
+        // A cheap model re-reads its context cheaply; let the host compact it.
+        if self.current_tier(model) == Some(Tier::Fast) || self.config.is_last_resort(model) {
+            return None;
+        }
+
+        if *context_tokens < self.config.renewal.budget.max_tokens {
+            return None;
+        }
+
+        let summarizer = self.summarizer(&signal.agent_id, model, available)?;
+
+        Some(Judgment::done(Verdict::Renew(Some(summarizer))))
+    }
+
     /// When a prompt resumes a context, whether a cheaper model should
     /// summarize it first. The question carries its facts, so a judge that
     /// decides from facts can answer it as well as a model can. Nothing is
@@ -385,6 +419,7 @@ impl ModelRouter {
             idle_seconds,
             cache_seconds,
             available,
+            ..
         } = &signal.kind
         else {
             return None;
@@ -493,8 +528,9 @@ impl ModelRouter {
     /// The model to write a summary for an agent on `current`: a pinned
     /// summary model, else a fast-tier model on the agent's own provider,
     /// then on another provider you use directly, recommended first, else a
-    /// last-resort model such as a free one. Never a blacklisted model, nor
-    /// one on a provider the agent hit a usage limit on.
+    /// last-resort model such as a free one, the first its `last_resort`
+    /// pattern is listed. Never a blacklisted model, nor one on a provider
+    /// the agent hit a usage limit on.
     fn summarizer(
         &self,
         agent_id: &str,
@@ -522,7 +558,8 @@ impl ModelRouter {
         let free = || {
             usable
                 .iter()
-                .find(|model| self.config.is_last_resort(model))
+                .filter(|model| self.config.is_last_resort(model))
+                .min_by_key(|model| self.config.last_resort_rank(model))
         };
 
         pinned.or_else(fast).or_else(free).cloned()
@@ -784,6 +821,10 @@ impl Judged for ModelRouter {
 
                 self.switch_back(signal, model.as_ref())
             }
+            SignalKind::ContextResumed {
+                reason: ContextResumeReason::ModelSwitch,
+                ..
+            } => self.switch_renewal(signal),
             SignalKind::ContextResumed { .. } => self.renewal(signal),
             SignalKind::ContextIdle { .. } => self.idle(signal),
             SignalKind::ToolResult { .. }

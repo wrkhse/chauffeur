@@ -139,15 +139,17 @@ Chauffeur:
 - switches to the same tier on another provider you use directly (your
   Anthropic or OpenAI subscription), recommended models first, never an
   OpenCode copy of them;
-- uses OpenCode Zen's free models only when nothing else is left;
-- skips blacklisted models even when pinned; OpenCode Go is blocked by
-  default (`"blacklist": ["opencode-go/*"]` in `model-router.json`);
+- uses free models only when nothing else is left, in the order
+  `"last_resort"` lists them in `model-router.json`: OpenCode Go's free
+  models first when Go is subscribed, then OpenCode Zen's;
+- skips blacklisted models even when pinned (`"blacklist"` in
+  `model-router.json`, shipped empty);
 - switches back once the limit has likely cleared.
 
-![Opus hits a usage limit, then GPT-6.1 Sol does; Chauffeur switches each time and the task finishes on a free model](docs/media/failover.gif)
+![Opus hits a usage limit, then GPT-6.2 Sol does; Chauffeur switches each time and the task finishes on a free model](docs/media/failover.gif)
 
 In this clip, a local endpoint stands in for Anthropic and returns a usage
-limit. The GPT-6.1 Sol limit that follows is a real one.
+limit. The GPT-6.2 Sol limit that follows is a real one.
 
 **Warm caches, then a cheap summary.** When a session goes idle, Chauffeur
 keeps its prompt cache warm, sending a keep-alive just before the provider's
@@ -203,7 +205,8 @@ You need:
 - Rust
 - Node.js
 - OpenCode 2
-- an API key for your chosen judge: TypeSafe (default) or SubQ
+- an API key for your chosen judge: TypeSafe (default), SubQ, Fastino GLiDE
+  or Liquid d1.2
 
 ```sh
 export TYPESAFE_API_KEY=...          # required for the default Jev judge
@@ -237,7 +240,17 @@ export CHAUFFEUR_JUDGE=subq
 export CHAUFFEUR_JUDGE_FALLBACK=none
 ```
 
-SubQ reads `SUBQ_API_KEY`. Restart the daemon after changing these variables.
+To use Liquid's d1.2 as the primary judge:
+
+```sh
+export LIQUID_AI_KEY=...
+export CHAUFFEUR_JUDGE=liquid
+export CHAUFFEUR_JUDGE_FALLBACK=none
+```
+
+`d1.2-ultra` is the default model; `LIQUID_DEFAULT_MODEL=d1.2` selects the
+smaller one. SubQ reads `SUBQ_API_KEY`, and Liquid reads `LIQUID_AI_KEY`.
+Restart the daemon after changing these variables.
 Fallback happens only on failed calls or invalid answers, never to override a
 valid low-confidence answer. A failed primary is retried after 60 seconds.
 Each provider has a 3-second timeout. [Judge configuration](docs/judges.md)
