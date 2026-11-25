@@ -179,6 +179,8 @@ pub struct Trace {
 struct TraceFile {
     #[serde(deserialize_with = "deserialize_events")]
     events: Vec<TraceEvent>,
+    #[serde(default)]
+    dropped: usize,
 }
 
 impl TryFrom<TraceFile> for Trace {
@@ -202,7 +204,7 @@ impl TryFrom<TraceFile> for Trace {
 
         Ok(Self {
             events: file.events,
-            dropped: 0,
+            dropped: file.dropped,
         })
     }
 }
@@ -359,16 +361,17 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_refuses_a_supplied_dropped_count() {
-        let error = serde_json::from_value::<Trace>(json!({
-            "events": [], "dropped": 0,
-        }))
-        .unwrap_err();
+    fn round_trips_a_nonzero_dropped_count() {
+        let mut trace = Trace {
+            events: vec![started()],
+            dropped: usize::MAX,
+        };
+        trace.finish();
 
-        assert_eq!(
-            error.to_string(),
-            "unknown field `dropped`, expected `events`"
-        );
+        let json = serde_json::to_string(&trace).unwrap();
+        let read = serde_json::from_str::<Trace>(&json).unwrap();
+
+        assert_eq!(read, trace);
     }
 
     #[test]
