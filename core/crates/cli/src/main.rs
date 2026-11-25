@@ -193,3 +193,36 @@ fn state_dir() -> Result<PathBuf, CliError> {
     let home = env::var_os("HOME").ok_or(CliError::MissingHome)?;
     Ok(PathBuf::from(home).join(".local/state/chauffeur-core"))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::io;
+
+    use chauffeur_judgment::RequestError;
+
+    use super::CliError;
+
+    fn source_text(error: &CliError) -> Option<String> {
+        error.source().map(ToString::to_string)
+    }
+
+    #[test]
+    fn keeps_the_request_error_as_its_source() {
+        let error = CliError::from(RequestError::Invalid("bad".to_owned()));
+
+        assert_eq!(source_text(&error), Some("invalid request: bad".to_owned()));
+    }
+
+    #[test]
+    fn keeps_the_io_error_as_its_source() {
+        let error = CliError::from(io::Error::other("disk full"));
+
+        assert_eq!(source_text(&error), Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn usage_has_no_source() {
+        assert_eq!(source_text(&CliError::Usage), None);
+    }
+}

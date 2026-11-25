@@ -173,6 +173,30 @@ fn audit_keeps_records_from_separate_runs_in_order() {
 }
 
 #[test]
+fn judges_stdin_of_exactly_the_request_limit() {
+    let state = Scratch::new();
+    let request = json!({
+        "id": "limit-1",
+        "session": "s1",
+        "hook": "tool_after",
+        "subject": shell("git status"),
+    })
+    .to_string();
+    let mut bytes = request.into_bytes();
+    bytes.resize(MAX_REQUEST_BYTES, b' ');
+
+    let output = state.run(&["judge"], Some(&bytes));
+    let judgment: Value =
+        serde_json::from_str(stdout(&output)).expect("parse judgment JSON");
+
+    assert_eq!(bytes.len(), MAX_REQUEST_BYTES);
+    assert_eq!(
+        judgment,
+        expected_judgment("limit-1", "allow", ALLOW_REASON)
+    );
+}
+
+#[test]
 fn rejects_oversized_stdin() {
     let state = Scratch::new();
     let bytes = vec![b' '; MAX_REQUEST_BYTES + 1];

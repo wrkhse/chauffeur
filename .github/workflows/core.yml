@@ -60,7 +60,7 @@ jobs:
       - name: Smoke test the release CLI
         run: |
           set -euo pipefail
-          cargo +"$TOOLCHAIN" build --release --locked -p chauffeur-core
+          cargo +"$TOOLCHAIN" build --release --locked -p chauffeur-cli
           cd "$GITHUB_WORKSPACE"
 
           state_dir=$(mktemp -d "$RUNNER_TEMP/chauffeur-core.XXXXXX")

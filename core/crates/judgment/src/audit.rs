@@ -346,7 +346,7 @@ fn read_records(
 mod tests {
     use std::fs::{self, File};
     use std::io;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -355,7 +355,7 @@ mod tests {
 
     use super::{
         AuditError, AuditLog, AuditRecord, CURRENT, MAX_RECENT, MAX_RECORD_BYTES,
-        ROTATED, format_at,
+        ROTATED, check_text, format_at,
     };
     use crate::{
         Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
@@ -436,6 +436,89 @@ mod tests {
     }
 
     #[test]
+    fn default_log_keeps_two_large_records_in_one_file() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        let first = padded("call-1");
+        let second = padded("call-2");
+        let both = [first.line().unwrap(), second.line().unwrap()].concat();
+
+        log.append(&first).unwrap();
+        log.append(&second).unwrap();
+
+        // Past every one-operator change to MAX_AUDIT_BYTES, the largest
+        // being (8 + 1024) * 1024, yet well under the default bound.
+        assert!(both.len() > 1_056_768);
+        assert_eq!(fs::read(folder.join(CURRENT)).unwrap(), both);
+        assert_eq!(
+            fs::metadata(folder.join(ROTATED)).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(log.recent(2).unwrap(), [first, second]);
+    }
+
+    #[test]
+    fn rotates_past_the_bound_but_not_at_it() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let records = [record("call-1"), record("call-2"), record("call-3")];
+        let lines = records.each_ref().map(|item| item.line().unwrap());
+        let full = [lines[0].as_slice(), lines[1].as_slice()].concat();
+        let max = u64::try_from(full.len()).unwrap();
+        let log = AuditLog::with_max(&folder, max);
+
+        log.append(&records[0]).unwrap();
+        log.append(&records[1]).unwrap();
+
+        assert_eq!(fs::read(folder.join(CURRENT)).unwrap(), full);
+        assert_eq!(
+            fs::metadata(folder.join(ROTATED)).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+
+        log.append(&records[2]).unwrap();
+
+        assert_eq!(fs::read(folder.join(ROTATED)).unwrap(), full);
+        assert_eq!(fs::read(folder.join(CURRENT)).unwrap(), lines[2]);
+        assert_eq!(log.recent(3).unwrap(), records);
+    }
+
+    #[test]
+    fn keeps_a_first_record_larger_than_the_bound() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let item = record("call-1");
+        let log = AuditLog::with_max(&folder, 1);
+
+        log.append(&item).unwrap();
+
+        assert_eq!(
+            fs::read(folder.join(CURRENT)).unwrap(),
+            item.line().unwrap()
+        );
+        assert_eq!(
+            fs::metadata(folder.join(ROTATED)).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn accepts_text_at_the_bound_and_refuses_one_byte_more() {
+        let at_bound = "x".repeat(MAX_TEXT_BYTES);
+        let over = "x".repeat(MAX_TEXT_BYTES + 1);
+
+        assert_eq!(check_text("session", &at_bound), Ok(()));
+        assert_eq!(
+            check_text("session", &over),
+            Err(AuditError::Limit {
+                name: "session",
+                max: 16_384
+            })
+        );
+    }
+
+    #[test]
     fn refuses_an_oversized_record_without_creating_a_log() {
         let scratch = Scratch::new();
         let folder = scratch.folder();
@@ -500,6 +583,21 @@ mod tests {
             assert_eq!(error.to_string(), "expected value at line 1 column 1");
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn reports_an_open_failure_other_than_not_found() {
+        // ELOOP: 40 on Linux, 62 on macOS and the BSDs.
+        const ELOOP: i32 = if cfg!(target_os = "linux") { 40 } else { 62 };
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        fs::create_dir(&folder).unwrap();
+        symlink(CURRENT, folder.join(CURRENT)).unwrap();
+
+        let error = log.recent(1).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(ELOOP));
     }
 
     #[test]
@@ -628,6 +726,14 @@ mod tests {
         let judgment = Engine::new(RuleSet::builtin()).judge(&request);
 
         AuditRecord::new(&request, &judgment).unwrap()
+    }
+
+    /// A record whose judgment carries 600 KiB of padding.
+    fn padded(id: &str) -> AuditRecord {
+        let mut item = record(id);
+        item.judgment["padding"] = json!("x".repeat(600 * 1024));
+
+        item
     }
 
     fn request(id: &str) -> Request {
