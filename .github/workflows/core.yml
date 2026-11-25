@@ -57,6 +57,22 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo +"$TOOLCHAIN" deny check
+      - name: Smoke test the release CLI
+        run: |
+          set -euo pipefail
+          cargo +"$TOOLCHAIN" build --release --locked -p chauffeur-core
+          cd "$GITHUB_WORKSPACE"
+
+          state_dir=$(mktemp -d "$RUNNER_TEMP/chauffeur-core.XXXXXX")
+          export CHAUFFEUR_CORE_STATE_DIR="$state_dir"
+          binary=core/target/release/chauffeur-core
+          request_id=ci-git-status
+
+          jq -n --arg id "$request_id" '{
+            id: $id, session: "ci", hook: "tool_after",
+            subject: {tool: "shell", input: {command: "git status"}}
+          }' | "$binary" judge | jq -e '.verdict.outcome == "allow"'
+          "$binary" audit 1 | jq -e --arg id "$request_id" '.request_id == $id'
 
   core-mutants:
     if: github.event_name == 'pull_request'
