@@ -358,7 +358,8 @@ mod tests {
         ROTATED, format_at,
     };
     use crate::{
-        Engine, Judgment, MAX_TEXT_BYTES, Request, RuleSet, Trace, TraceEvent,
+        Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
+        TraceEvent,
     };
 
     #[test]
@@ -519,13 +520,26 @@ mod tests {
     fn round_trips_the_exact_judgment_including_a_dropped_event() {
         let request = request("call-1");
         let mut trace = Trace::new();
-        trace.push(TraceEvent::finished().unwrap());
+
+        for _ in 0..MAX_EVENTS {
+            trace.push(TraceEvent::rule_started("overflow").unwrap());
+        }
+
+        trace.finish();
+
+        let started = json!({ "kind": "rule_started", "rule": "overflow" });
+        let mut events = vec![started; MAX_EVENTS - 1];
+        events.push(json!({ "kind": "finished" }));
+
+        assert_eq!(trace.events().len(), MAX_EVENTS);
+        assert_eq!(trace.dropped(), 1);
+
         let judgment = Judgment::new(request.id(), None, trace).unwrap();
         let record = AuditRecord::new(&request, &judgment).unwrap();
         let expected = json!({
             "request_id": "call-1",
             "verdict": null,
-            "trace": { "dropped": 1, "events": [] },
+            "trace": { "dropped": 1, "events": events },
         });
         let json = serde_json::to_string(&record).unwrap();
 
