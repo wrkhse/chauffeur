@@ -52,6 +52,9 @@ The verdict and trace are:
 }
 ```
 
+A hook that calls `chauffeur-core` treats a non-zero exit as deny, so an
+invalid request or an unwritable audit log fails closed.
+
 Read the same judgment from the latest audit record. The CLI emits one JSON
 line per record; Python formats it here for reading. The timestamp varies.
 
