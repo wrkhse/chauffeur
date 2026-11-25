@@ -1,3 +1,5 @@
 [toolchain]
+# This nightly is for development. CI checks the workspace MSRV (rust-version
+# 1.100) on stable Rust.
 channel = "nightly-2026-10-25"
 components = ["rustfmt", "clippy", "rust-analyzer"]
