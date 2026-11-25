@@ -9,4 +9,10 @@ test_tool = "nextest"
 exclude_re = [
   """^crates/judgment/src/rules/shell_guard\\.rs:152:41: \
   replace > with >= in removes_root$""",
+  # Equivalent: the log names are fixed inside a 0700 folder the user owns,
+  # so a symlink_metadata error other than NotFound cannot be arranged there,
+  # and every reachable case still resolves at open.
+  """^crates/judgment/src/audit\\.rs:[0-9]+:[0-9]+: \
+  replace match guard error\\.kind\\(\\) == io::ErrorKind::NotFound \
+  with true in entry$""",
 ]

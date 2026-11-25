@@ -500,7 +500,7 @@ fn read_records(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
+    use std::fs::{self, File, OpenOptions};
     use std::io;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
@@ -513,7 +513,7 @@ mod tests {
 
     use super::{
         AuditError, AuditLog, AuditRecord, CURRENT, LOCK, MAX_RECENT,
-        MAX_RECORD_BYTES, ROTATED, check_text, format_at,
+        MAX_RECORD_BYTES, ROTATED, check_text, format_at, open_or_create,
     };
     use crate::{
         Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
@@ -764,6 +764,48 @@ mod tests {
                 assert_eq!(error.to_string(), "audit.jsonl is a symlink");
             }
             assert_eq!(fs::read(folder.join("elsewhere.jsonl")).unwrap(), line);
+        }
+    }
+
+    #[test]
+    fn reports_no_torn_lines_for_a_fresh_or_clean_log() {
+        let scratch = Scratch::new();
+        let log = AuditLog::new(&scratch.folder());
+        let item = record("call-1");
+
+        assert_eq!(log.torn_lines(), 0);
+
+        log.append(&item).unwrap();
+
+        assert_eq!(log.recent(1).unwrap(), [item]);
+        assert_eq!(log.torn_lines(), 0);
+    }
+
+    #[test]
+    fn both_racers_open_the_file_one_of_them_creates() {
+        let scratch = Scratch::new();
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+
+        // Each round races two creates of a fresh path: the loser sees
+        // AlreadyExists and opens the winner's file instead of failing.
+        for round in 0..1000 {
+            let path = scratch.0.join(format!("race-{round}"));
+            let barrier = Barrier::new(2);
+            let opened = thread::scope(|scope| {
+                let racers = [(); 2].map(|()| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        open_or_create(&path, "race", &options)
+                            .map(drop)
+                            .map_err(|error| error.kind())
+                    })
+                });
+
+                racers.map(|racer| racer.join().unwrap())
+            });
+
+            assert_eq!(opened, [Ok(()), Ok(())]);
         }
     }
 
