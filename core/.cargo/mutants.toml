@@ -1,0 +1,12 @@
+test_workspace = true
+test_tool = "nextest"
+
+# Exclude equivalent mutants by name with a reason when one is found.
+#
+# Equivalent: `>=` in the short-flag length check admits only a lone `-`,
+# which has no `r`, `R` or `f` to set a recursive or force flag. Left on the
+# operand branch it is not a root either, so the verdict is the same.
+exclude_re = [
+  """^crates/judgment/src/rules/shell_guard\\.rs:152:41: \
+  replace > with >= in removes_root$""",
+]

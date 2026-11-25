@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/judgment"]
+
+[workspace.package]
+version = "0.1.0-rc.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.100"
+publish = false
+repository = "https://github.com/wrkhse/chauffeur"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The lint table comes from origin/v2 Cargo.toml at 3b3d3c7, where it last
+# changed.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+todo = "deny"
+exit = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+unchecked_time_subtraction = "deny"
+as_conversions = "deny"
+too_many_lines = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
