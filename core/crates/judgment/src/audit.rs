@@ -419,9 +419,11 @@ fn cut_torn_tail(file: &mut File) -> io::Result<u64> {
     let floor = size.saturating_sub(span);
     let mut chunk = [0_u8; TAIL_CHUNK_BYTES];
     let step = u64::try_from(chunk.len()).map_err(io::Error::other)?;
-    let mut end = size;
+    // A counted loop: the scan ends after these chunks whatever they hold.
+    let chunks = size.saturating_sub(floor).div_ceil(step);
 
-    while end > floor {
+    for index in 0..chunks {
+        let end = size.saturating_sub(index.saturating_mul(step));
         let start = end.saturating_sub(step).max(floor);
         let len =
             usize::try_from(end.saturating_sub(start)).map_err(io::Error::other)?;
@@ -439,8 +441,6 @@ fn cut_torn_tail(file: &mut File) -> io::Result<u64> {
 
             return Ok(whole);
         }
-
-        end = start;
     }
 
     if floor > 0 {
@@ -513,7 +513,8 @@ mod tests {
 
     use super::{
         AuditError, AuditLog, AuditRecord, CURRENT, LOCK, MAX_RECENT,
-        MAX_RECORD_BYTES, ROTATED, check_text, format_at, open_or_create,
+        MAX_RECORD_BYTES, ROTATED, TAIL_CHUNK_BYTES, check_text, format_at,
+        open_or_create,
     };
     use crate::{
         Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
@@ -894,6 +895,38 @@ mod tests {
         );
         assert_eq!(log.recent(5).unwrap(), [first, second, third]);
         assert_eq!(log.torn_lines(), 1);
+    }
+
+    #[test]
+    fn cuts_torn_tails_that_end_on_a_chunk_boundary() {
+        let whole = record("call-1").line().unwrap();
+        let item = record("call-2");
+
+        // A newline as the first byte of the last chunk, as the last byte
+        // of the chunk before it, and one byte further back; then a log of
+        // exactly two chunks that is all torn.
+        let cases = [
+            (whole.clone(), TAIL_CHUNK_BYTES - 1),
+            (whole.clone(), TAIL_CHUNK_BYTES),
+            (whole, TAIL_CHUNK_BYTES + 1),
+            (Vec::new(), 2 * TAIL_CHUNK_BYTES),
+        ];
+
+        for (kept, torn) in cases {
+            let scratch = Scratch::new();
+            let folder = scratch.folder();
+            let log = AuditLog::new(&folder);
+            let bytes = [kept.clone(), vec![b'x'; torn]].concat();
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join(CURRENT), bytes).unwrap();
+
+            log.append(&item).unwrap();
+
+            assert_eq!(
+                fs::read(folder.join(CURRENT)).unwrap(),
+                [kept, item.line().unwrap()].concat()
+            );
+        }
     }
 
     #[test]
