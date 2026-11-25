@@ -2,6 +2,9 @@
 //!
 //! Append and recent adapt wrkhse/chauffeur origin/v2
 //! crates/daemon/src/audit.rs at 2273807, introduced at 0eb45c0.
+//!
+//! A log path is refused when it is a symlink, and when the opened file's device
+//! or inode differs from the lstat result.
 
 use std::collections::VecDeque;
 use std::fmt;
