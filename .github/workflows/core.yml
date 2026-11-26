@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_tree:
+        description: Run all mutants, including those outside the pull request diff
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +38,11 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal \
             --component rustfmt --component clippy
           rustup show active-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ hashFiles('core/Cargo.lock', 'core/rust-toolchain.toml') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: "core -> target"
       - name: Check MSRV
         run: |
           set -euo pipefail
@@ -96,13 +107,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bash .github/scripts/test-frame-guard.sh
 
-  core-mutants:
-    if: github.event_name == 'pull_request'
+  core-mutants-shard:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     defaults:
       run:
         working-directory: core
+    env:
+      FULL_TREE: ${{ github.ref == 'refs/heads/main' || inputs.full_tree }}
+      SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,6 +133,11 @@ jobs:
           printf 'TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
           rustup toolchain install "$toolchain" --profile minimal \
             --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ hashFiles('core/Cargo.lock', 'core/rust-toolchain.toml') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: "core -> target"
       # v2.90.4
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
         with:
@@ -125,27 +147,57 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
       - name: The pull request's diff
+        if: env.FULL_TREE != 'true'
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: >-
           git -C .. diff --relative=core "$BASE"...HEAD -- '*.rs'
           > "$RUNNER_TEMP/pr.diff"
-      - run: >-
-          cargo +"$TOOLCHAIN" mutants --in-diff "$RUNNER_TEMP/pr.diff"
-          --no-shuffle -j 2 -vV -- --run-ignored all
+      - name: Mutants
+        run: |
+          set -euo pipefail
+
+          args=(--no-shuffle -j 2 --shard "$SHARD/4")
+          if [[ $FULL_TREE != true ]]; then
+            args+=(--in-diff "$RUNNER_TEMP/pr.diff")
+          fi
+
+          cargo +"$TOOLCHAIN" mutants "${args[@]}" -vV -- --run-ignored all
+
+          outcomes=mutants.out/outcomes.json
+          if [ ! -f "$outcomes" ]; then
+            if ! listed=$(cargo +"$TOOLCHAIN" mutants --list "${args[@]}"); then
+              echo "::error::cargo mutants --list failed in shard $SHARD"
+              exit 1
+            fi
+            if [ -z "$listed" ]; then
+              mkdir -p mutants.out
+              jq -n '{total_mutants: 0, caught: 0, missed: 0, timeout: 0, unviable: 0}' > "$outcomes"
+            else
+              echo "::error::shard $SHARD listed mutants but wrote no outcomes.json"
+              exit 1
+            fi
+          fi
+      - name: Check outcomes
+        if: always()
+        run: |
+          set -euo pipefail
+          outcomes=mutants.out/outcomes.json
+          if [ ! -f "$outcomes" ]; then
+            echo "::error::shard $SHARD produced no outcomes.json"
+            exit 1
+          fi
+          if ! jq -e '.missed == 0 and .timeout == 0' "$outcomes" > /dev/null; then
+            echo "::error::shard $SHARD has missed or timed out mutants"
+            exit 1
+          fi
       - name: What was tested
         if: always()
         run: |
           set -euo pipefail
           outcomes="$GITHUB_WORKSPACE/core/mutants.out/outcomes.json"
           if [ -f "$outcomes" ]; then
-            jq -r '
-              "- Tested: \\(.total_mutants)",
-              "- Caught: \\(.caught)",
-              "- Missed: \\(.missed)",
-              "- Timeout: \\(.timeout)",
-              "- Unviable: \\(.unviable)"
-            ' "$outcomes" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '"- Tested: \(.total_mutants)", "- Caught: \(.caught)", "- Missed: \(.missed)", "- Timeout: \(.timeout)", "- Unviable: \(.unviable)"' "$outcomes" >> "$GITHUB_STEP_SUMMARY"
           else
             printf '%s\n' 'none in this diff' >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -153,5 +205,111 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          path: core/mutants.out
-          if-no-files-found: ignore
+          name: core-mutants-shard-${{ matrix.shard }}
+          path: core/mutants.out/outcomes.json
+          if-no-files-found: error
+
+  core-mutants:
+    needs: [core-mutants-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      FULL_TREE: ${{ github.ref == 'refs/heads/main' || inputs.full_tree }}
+    steps:
+      # v4.3.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: core-mutants-shard-*
+          path: ${{ runner.temp }}/mutants
+      - name: Check shard outcomes
+        env:
+          RESULT: ${{ needs.core-mutants-shard.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ $RESULT != success ]]; then
+            echo "::error::mutants shards result is $RESULT"
+            exit 1
+          fi
+
+          dir="$RUNNER_TEMP/mutants"
+          shopt -s nullglob
+          files=("$dir"/core-mutants-shard-*/outcomes.json)
+          shopt -u nullglob
+          if (( ${#files[@]} != 4 )); then
+            echo "::error::expected 4 shard outcomes.json files, found ${#files[@]}"
+            exit 1
+          fi
+
+          tested=0
+          caught=0
+          for file in "${files[@]}"; do
+            if ! jq -e '.missed == 0 and .timeout == 0' "$file" > /dev/null; then
+              echo "::error::$(basename "$(dirname "$file")") has missed or timed out mutants"
+              exit 1
+            fi
+            read -r part_tested part_caught < <(jq -r '[.total_mutants, .caught] | @tsv' "$file")
+            tested=$((tested + part_tested))
+            caught=$((caught + part_caught))
+          done
+
+          printf -- '- Shards: %s\n- Tested: %s\n- Caught: %s\n- Missed: 0\n- Timeout: 0\n' "${#files[@]}" "$tested" "$caught" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Rust toolchain
+        working-directory: core
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          printf 'TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          rustup toolchain install "$toolchain" --profile minimal \
+            --component rustfmt --component clippy
+      # v2.90.4
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: The pull request's diff
+        if: env.FULL_TREE != 'true'
+        working-directory: core
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: >-
+          git -C .. diff --relative=core "$BASE"...HEAD -- '*.rs'
+          > "$RUNNER_TEMP/pr.diff"
+      - name: Verify mutant coverage
+        working-directory: core
+        run: |
+          set -euo pipefail
+
+          dir="$RUNNER_TEMP/mutants"
+          files=("$dir"/core-mutants-shard-*/outcomes.json)
+
+          summed=0
+          for file in "${files[@]}"; do
+            part=$(jq -r '.total_mutants' "$file")
+            summed=$((summed + part))
+          done
+
+          args=(--no-shuffle -j 2)
+          if [[ $FULL_TREE != true ]]; then
+            args+=(--in-diff "$RUNNER_TEMP/pr.diff")
+          fi
+
+          if ! listed=$(cargo +"$TOOLCHAIN" mutants --list "${args[@]}"); then
+            echo "::error::cargo mutants --list failed"
+            exit 1
+          fi
+
+          listed_count=0
+          if [ -n "$listed" ]; then
+            listed_count=$(printf '%s\n' "$listed" | wc -l)
+          fi
+
+          if (( summed != listed_count )); then
+            echo "::error title=mutant-coverage::shards tested $summed mutants but the unsharded list has $listed_count"
+            exit 1
+          fi
