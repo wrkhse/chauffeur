@@ -129,7 +129,7 @@ jobs:
           > "$RUNNER_TEMP/pr.diff"
       - run: >-
           cargo +"$TOOLCHAIN" mutants --in-diff "$RUNNER_TEMP/pr.diff"
-          --no-shuffle -j 2 -vV
+          --no-shuffle -j 2 -vV -- --run-ignored all
       - name: What was tested
         if: always()
         run: |

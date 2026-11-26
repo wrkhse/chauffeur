@@ -1,8 +1,5 @@
 test_workspace = true
 test_tool = "nextest"
-# The CLI's process tests are #[ignore] so the host never starts them; the
-# mutation run is in CI and needs them to check the binary.
-additional_cargo_test_args = ["--run-ignored", "all"]
 
 # Exclude equivalent mutants by name with a reason when one is found.
 #

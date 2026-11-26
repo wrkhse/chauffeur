@@ -105,13 +105,18 @@ this workspace yet.
 
 ## Checks
 
-Run these from `core/`. The dependency check uses cargo-deny 0.20.2.
+Run these from `core/`, except the second `nextest` command, which runs only in
+CI. The dependency check uses cargo-deny 0.20.2.
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo nextest run --workspace --all-features --locked
+cargo nextest run -p chauffeur-cli --test cli --run-ignored only --locked
 cargo test --workspace --doc --all-features --locked
 cargo deny check
 cargo mutants
 ```
+
+The nine CLI process tests are ignored locally, so the first `nextest` run skips
+them; the second command runs them in CI.

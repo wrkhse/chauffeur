@@ -230,8 +230,9 @@ fn limit(name: &'static str, max: usize) -> AuditError {
 /// Appends judgment records in a private folder.
 ///
 /// Appends hold an exclusive lock on the folder's `lock` file, and reads take
-/// it when it exists, so handles in any process take turns. Both try the lock
-/// 50 times, 10 ms apart, then fail instead of waiting longer.
+/// a shared one when it exists, so readers run together while writers take
+/// turns with them. Both try the lock 50 times, 10 ms apart, then fail
+/// instead of waiting longer.
 #[derive(Debug)]
 pub struct AuditLog {
     folder: PathBuf,
@@ -324,7 +325,7 @@ impl AuditLog {
         let lock = open_trusted(&self.folder.join(LOCK), LOCK, owner)?;
 
         if let Some(lock) = &lock {
-            wait_for_lock(lock)?;
+            wait_for_shared_lock(lock)?;
         }
 
         for name in [ROTATED, CURRENT] {
@@ -489,6 +490,25 @@ fn wait_for_lock(file: &File) -> io::Result<()> {
     ))
 }
 
+/// Takes the shared lock on `file`, trying [`LOCK_ATTEMPTS`] times
+/// [`LOCK_RETRY`] apart, so a writer that never releases it fails the caller
+/// closed instead of hanging it. Other readers never block the wait; only a
+/// writer's exclusive lock does.
+fn wait_for_shared_lock(file: &File) -> io::Result<()> {
+    for _ in 0..LOCK_ATTEMPTS {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => thread::sleep(LOCK_RETRY),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "audit lock is held by another handle",
+    ))
+}
+
 /// Cuts a final line without a newline and returns the length that remains.
 ///
 /// The scan reads backwards in chunks over at most the last
@@ -562,7 +582,7 @@ fn read_records(
         }
         if line.last() != Some(&b'\n') {
             // Only the end of the file stops a line short of its newline.
-            // The log lock serializes reads, so the count cannot race.
+            // The count is atomic, so concurrent readers cannot race it.
             let seen = torn.load(Ordering::Relaxed);
             torn.store(seen.saturating_add(1), Ordering::Relaxed);
 
@@ -1022,6 +1042,35 @@ mod tests {
         for (path, bits) in modes {
             assert_eq!(mode(&path), bits);
         }
+    }
+
+    #[test]
+    fn two_readers_hold_shared_locks_and_both_succeed() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        let items = [record("a"), record("b")];
+
+        for item in &items {
+            log.append(item).unwrap();
+        }
+
+        // Two separate handles hold a shared lock on the same lock file at
+        // once. An exclusive read lock would wait and fail both reads.
+        let path = folder.join(LOCK);
+        let holders = [File::open(&path).unwrap(), File::open(&path).unwrap()];
+        for holder in &holders {
+            holder.lock_shared().unwrap();
+        }
+
+        let started = Instant::now();
+        let first = AuditLog::new(&folder).recent(2).unwrap();
+        let second = AuditLog::new(&folder).recent(2).unwrap();
+        let waited = started.elapsed();
+
+        assert_eq!(first, items);
+        assert_eq!(second, items);
+        assert!(waited < Duration::from_secs(5), "{waited:?}");
     }
 
     #[test]
