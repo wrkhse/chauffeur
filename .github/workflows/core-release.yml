@@ -213,6 +213,10 @@ jobs:
           printf '%s\n' "$request" | ./chauffeur-core judge \
             | jq -c '{request_id, verdict}'
           status=$?
+          if (( status != 0 )); then
+            echo "::error::chauffeur-core judge exited $status, not 0"
+            exit 1
+          fi
           echo "chauffeur-core judge exited with $status"
           touch judged.flag
           read -r _
@@ -240,6 +244,10 @@ jobs:
 
           ./chauffeur-core audit 1 | jq -c '{at, request_id, judgment}'
           status=$?
+          if (( status != 0 )); then
+            echo "::error::chauffeur-core audit exited $status, not 0"
+            exit 1
+          fi
           echo "chauffeur-core audit exited with $status"
           read -r _
           SH
@@ -467,8 +475,9 @@ jobs:
           # The blank-GIF guard reads the exported GIF itself. Every frame
           # is extracted at 1 fps with the footer cropped, OCRed and joined.
           # The judge take shows the allow verdict and the audit take shows
-          # its own command, so finding both strings proves both takes are
-          # present. Whitespace OCR inserts inside a word is dropped.
+          # its audit record, with the judgment key and request id, so
+          # finding both proves both takes are present. Whitespace OCR
+          # inserts inside a word is dropped.
           gif_frames=$(mktemp -d)
           ffmpeg -hide_banner -loglevel error -y -i artifacts/demo.gif \
             -vf 'fps=1,crop=iw:ih*3/4:0:0,format=gray,negate' \
@@ -490,8 +499,8 @@ jobs:
             echo "::error::OCR finds no allow verdict in demo.gif"
             exit 1
           fi
-          if [[ $flat != *audit* ]]; then
-            echo "::error::OCR finds no audit entry in demo.gif"
+          if [[ $flat != *judgment* || $flat != *record-1* ]]; then
+            echo "::error::OCR finds no audit record in demo.gif"
             exit 1
           fi
           rm -rf -- "$gif_frames"
@@ -552,6 +561,7 @@ jobs:
             exit 1
           fi
           tarball=${tarballs[0]}
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
           if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
             names=$(gh api "repos/$GH_REPO/releases/tags/$TAG" \
@@ -591,7 +601,7 @@ jobs:
           if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
             assets=(SHA256SUMS demo.gif)
           else
-            assets=("$tarball" SHA256SUMS demo.gif)
+            assets=("$TARBALL" SHA256SUMS demo.gif)
           fi
 
           # A rerun or a dispatch finds the release already made, so it
