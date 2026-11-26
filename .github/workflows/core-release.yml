@@ -8,7 +8,8 @@ name: Core release
 # another; `release` attaches the tarball, the demo GIF and SHA256SUMS
 # to a GitHub prerelease that is never latest.
 #
-# A dispatch names an existing tag and rebuilds the assets for it.
+# A dispatch names an existing tag, films its published tarball and
+# rebuilds the demo GIF and checksums for it.
 
 on:
   push:
@@ -116,7 +117,9 @@ jobs:
           path: ${{ runner.temp }}/dist/*.tar.gz
           if-no-files-found: error
 
-  # Films the packed binary in two panes that share one state directory.
+  # Films a packed binary in two panes that share one state directory. A
+  # dispatch films the published tarball, so the demo and the checksums
+  # describe the same bytes.
   # The judge pane pipes a git status request and prints the verdict; the
   # audit pane runs audit 1 in a fresh process and prints its record. The
   # two takes join into one GIF, a release asset only; it is never committed.
@@ -166,10 +169,14 @@ jobs:
           cargo +1.100.0 install terminal-control --version 1.2.1 --locked
           termctrl --version
       - name: Judge in one pane, audit in a fresh process in the other
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           work=$(mktemp -d)
+          published=
           judge_live=
           audit_live=
 
@@ -193,11 +200,31 @@ jobs:
               status=1
             fi
 
+            if [[ -n $published ]] && ! rm -rf "$published"; then
+              echo "::error::could not remove $published"
+              status=1
+            fi
+
             return "$status"
           }
           trap 'status=$?; cleanup "$status" || status=1; exit "$status"' EXIT
 
-          tar -xzf "$RUNNER_TEMP"/dist/*.tar.gz -C "$work"
+          # A dispatch films the tarball published with the release: the
+          # same bytes the release job checksums and keeps. A tag push
+          # films the freshly built artifact from the build job.
+          tarball=$(echo "$RUNNER_TEMP"/dist/*.tar.gz)
+          [[ -f $tarball ]] || {
+            echo "::error::no tarball in $RUNNER_TEMP/dist"
+            exit 1
+          }
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            published=$(mktemp -d)
+            gh release download "$TAG" \
+              --pattern "$(basename "$tarball")" --clobber --dir "$published"
+            tarball="$published/$(basename "$tarball")"
+          fi
+
+          tar -xzf "$tarball" -C "$work"
           mkdir -p "$work/state" artifacts
           export CHAUFFEUR_CORE_STATE_DIR="$work/state"
 
@@ -211,7 +238,7 @@ jobs:
             hook: "tool_after",
             subject: {tool: "shell", input: {command: "git status"}}}')
           printf '%s\n' "$request" | ./chauffeur-core judge \
-            | jq -c '{request_id, verdict}'
+            | jq -c '{request_id, verdict, trace}'
           status=$?
           if (( status != 0 )); then
             echo "::error::chauffeur-core judge exited $status, not 0"
@@ -402,8 +429,11 @@ jobs:
 
           # OCR reads every frame of each exported take at 1 fps with the
           # footer cropped, then concatenates the text. The judge take must
-          # show allow and the audit take must show its own command line,
-          # so a take that filmed no output fails.
+          # show the request_id and trace keys from the judge binary's own
+          # JSON, not the caption's allow verdict; the audit take must show
+          # its judgment key. The frame that shows the marker is measured
+          # too: a rendered frame of text has grayscale deviation >= 0.02,
+          # so a dark export fails even when a later hold is bright.
           for take in judge audit; do
             frames_dir=$(mktemp -d)
             ffmpeg -hide_banner -loglevel error -y \
@@ -418,17 +448,39 @@ jobs:
               exit 1
             fi
 
-            text=$(for frame in "${frames[@]}"; do
-              tesseract "$frame" stdout
-            done)
+            text=
+            shown=
+            rendered=
+            for frame in "${frames[@]}"; do
+              frame_text=$(tesseract "$frame" stdout)
+              text+=$frame_text
+              frame_flat=$(tr -d '[:space:]' \
+                <<< "$frame_text" | tr '[:upper:]' '[:lower:]')
+              if [[ $take == judge ]]; then
+                [[ $frame_flat == *request_id* && $frame_flat == *trace* ]] \
+                  || continue
+              else
+                [[ $frame_flat == *judgment* ]] || continue
+              fi
+              shown=1
+              deviation=$(convert "$frame" -colorspace Gray \
+                -format '%[fx:standard_deviation]' info:)
+              echo "demo-$take.mp4 output frame deviation: $deviation"
+              if awk -v d="$deviation" 'BEGIN { exit !(d >= 0.02) }'; then
+                rendered=1
+              fi
+            done
             printf -- '--- OCR of demo-%s.mp4 frames ---\n%s\n' "$take" "$text"
-            flat=$(tr -d '[:space:]' <<< "$text" | tr '[:upper:]' '[:lower:]')
-            if [[ $take == judge && $flat != *allow* ]]; then
-              echo "::error::OCR finds no allow verdict in demo-judge.mp4"
+            if [[ -z $shown ]]; then
+              if [[ $take == judge ]]; then
+                echo "::error::demo-judge.mp4 shows no judge JSON keys"
+              else
+                echo "::error::demo-audit.mp4 shows no audit record"
+              fi
               exit 1
             fi
-            if [[ $take == audit && $flat != *audit* ]]; then
-              echo "::error::OCR finds no audit command in demo-audit.mp4"
+            if [[ -z $rendered ]]; then
+              echo "::error::demo-$take.mp4's output frame is blank"
               exit 1
             fi
             rm -rf -- "$frames_dir"
@@ -474,10 +526,11 @@ jobs:
 
           # The blank-GIF guard reads the exported GIF itself. Every frame
           # is extracted at 1 fps with the footer cropped, OCRed and joined.
-          # The judge take shows the allow verdict and the audit take shows
-          # its audit record, with the judgment key and request id, so
-          # finding both proves both takes are present. Whitespace OCR
-          # inserts inside a word is dropped.
+          # The judge take shows the request_id and trace keys from the
+          # binary's JSON, not the caption's allow verdict; the audit take
+          # shows its judgment key and request id. Finding both proves both
+          # takes are present. Whitespace OCR inserts inside a word is
+          # dropped.
           gif_frames=$(mktemp -d)
           ffmpeg -hide_banner -loglevel error -y -i artifacts/demo.gif \
             -vf 'fps=1,crop=iw:ih*3/4:0:0,format=gray,negate' \
@@ -495,8 +548,8 @@ jobs:
           done)
           printf -- '--- OCR of demo.gif frames ---\n%s\n' "$gif_text"
           flat=$(tr -d '[:space:]' <<< "$gif_text" | tr '[:upper:]' '[:lower:]')
-          if [[ $flat != *allow* ]]; then
-            echo "::error::OCR finds no allow verdict in demo.gif"
+          if [[ $flat != *request_id* || $flat != *trace* ]]; then
+            echo "::error::OCR finds no judge JSON keys in demo.gif"
             exit 1
           fi
           if [[ $flat != *judgment* || $flat != *record-1* ]]; then
