@@ -42,6 +42,7 @@ jobs:
         with:
           key: ${{ hashFiles('core/Cargo.lock', 'core/rust-toolchain.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: "core -> target"
       - name: Check MSRV
         run: |
           set -euo pipefail
@@ -136,6 +137,7 @@ jobs:
         with:
           key: ${{ hashFiles('core/Cargo.lock', 'core/rust-toolchain.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: "core -> target"
       # v2.90.4
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
         with:
@@ -211,6 +213,8 @@ jobs:
     needs: [core-mutants-shard]
     if: always()
     runs-on: ubuntu-latest
+    env:
+      FULL_TREE: ${{ github.ref == 'refs/heads/main' || inputs.full_tree }}
     steps:
       # v4.3.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -250,3 +254,62 @@ jobs:
           done
 
           printf -- '- Shards: %s\n- Tested: %s\n- Caught: %s\n- Missed: 0\n- Timeout: 0\n' "${#files[@]}" "$tested" "$caught" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Rust toolchain
+        working-directory: core
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          printf 'TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          rustup toolchain install "$toolchain" --profile minimal \
+            --component rustfmt --component clippy
+      # v2.90.4
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: The pull request's diff
+        if: env.FULL_TREE != 'true'
+        working-directory: core
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: >-
+          git -C .. diff --relative=core "$BASE"...HEAD -- '*.rs'
+          > "$RUNNER_TEMP/pr.diff"
+      - name: Verify mutant coverage
+        working-directory: core
+        run: |
+          set -euo pipefail
+
+          dir="$RUNNER_TEMP/mutants"
+          files=("$dir"/core-mutants-shard-*/outcomes.json)
+
+          summed=0
+          for file in "${files[@]}"; do
+            part=$(jq -r '.total_mutants' "$file")
+            summed=$((summed + part))
+          done
+
+          args=(--no-shuffle -j 2)
+          if [[ $FULL_TREE != true ]]; then
+            args+=(--in-diff "$RUNNER_TEMP/pr.diff")
+          fi
+
+          if ! listed=$(cargo +"$TOOLCHAIN" mutants --list "${args[@]}"); then
+            echo "::error::cargo mutants --list failed"
+            exit 1
+          fi
+
+          listed_count=0
+          if [ -n "$listed" ]; then
+            listed_count=$(printf '%s\n' "$listed" | wc -l)
+          fi
+
+          if (( summed != listed_count )); then
+            echo "::error title=mutant-coverage::shards tested $summed mutants but the unsharded list has $listed_count"
+            exit 1
+          fi
