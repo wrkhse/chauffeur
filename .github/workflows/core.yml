@@ -48,6 +48,9 @@ jobs:
       - run: >-
           cargo +"$TOOLCHAIN" nextest run --workspace
           --all-features --locked
+      - run: >-
+          cargo +"$TOOLCHAIN" nextest run -p chauffeur-cli
+          --test cli --run-ignored only --locked
       - run: cargo +"$TOOLCHAIN" test --doc --workspace --locked
       - run: cargo +"$TOOLCHAIN" doc --workspace --no-deps --locked
         env:
@@ -66,13 +69,29 @@ jobs:
           state_dir=$(mktemp -d "$RUNNER_TEMP/chauffeur-core.XXXXXX")
           export CHAUFFEUR_CORE_STATE_DIR="$state_dir"
           binary=core/target/release/chauffeur-core
-          request_id=ci-git-status
 
-          jq -n --arg id "$request_id" '{
-            id: $id, session: "ci", hook: "tool_after",
-            subject: {tool: "shell", input: {command: "git status"}}
-          }' | "$binary" judge | jq -e '.verdict.outcome == "allow"'
-          "$binary" audit 1 | jq -e --arg id "$request_id" '.request_id == $id'
+          # judge ID TOOL KEY VALUE OUTCOME: one run, one expected verdict.
+          judge() {
+            jq -n --arg id "$1" --arg tool "$2" --arg key "$3" \
+              --arg value "$4" '{
+                id: $id, session: "ci", hook: "tool_after",
+                subject: {tool: $tool, input: {($key): $value}}
+              }' \
+              | "$binary" judge \
+              | jq -e --arg id "$1" --arg outcome "$5" \
+                '.request_id == $id and .verdict.outcome == $outcome'
+          }
+
+          judge ci-allow shell command 'git status' allow
+          judge ci-ask read path \~/.ssh/id_ed25519 ask
+          judge ci-deny shell command 'rm -rf /' deny
+
+          # A fresh process reads back what the three runs recorded.
+          "$binary" audit 3 | jq -e -s '
+            map([.request_id, .judgment.verdict.outcome]) == [
+              ["ci-allow", "allow"], ["ci-ask", "ask"], ["ci-deny", "deny"]
+            ]
+          '
 
   core-mutants:
     if: github.event_name == 'pull_request'

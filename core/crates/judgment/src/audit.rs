@@ -5,11 +5,15 @@
 //!
 //! A log path is refused when it is a symlink, and when the opened file's device
 //! or inode differs from the lstat result.
+//!
+//! Appends keep the folder 0700 and its files 0600. Reads change nothing and
+//! refuse a folder or file another user owns or the group or others can write.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{
     DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
 };
@@ -32,6 +36,7 @@ pub const MAX_RECENT: usize = 1024;
 const CURRENT: &str = "audit.jsonl";
 const ROTATED: &str = "audit.1.jsonl";
 const LOCK: &str = "lock";
+const FOLDER: &str = "audit folder";
 const TAIL_CHUNK_BYTES: usize = 4096;
 const SECOND_DIGITS: usize = 20;
 const MICROSECOND_DIGITS: usize = 6;
@@ -221,8 +226,8 @@ fn limit(name: &'static str, max: usize) -> AuditError {
 
 /// Appends judgment records in a private folder.
 ///
-/// Appends and reads hold an exclusive lock on the folder's `lock` file, so
-/// handles in any process take turns.
+/// Appends hold an exclusive lock on the folder's `lock` file, and reads take
+/// it when it exists, so handles in any process take turns.
 #[derive(Debug)]
 pub struct AuditLog {
     folder: PathBuf,
@@ -286,29 +291,41 @@ impl AuditLog {
 
     /// Reads the last records, oldest first, up to [`MAX_RECENT`].
     ///
-    /// A final line without a newline is skipped and counted in
-    /// [`AuditLog::torn_lines`].
+    /// A read changes no permissions and creates nothing: a missing folder
+    /// holds no records, and a folder with no `lock` file has had no append,
+    /// so it is read without the lock. A final line without a newline is
+    /// skipped and counted in [`AuditLog::torn_lines`].
     ///
     /// # Errors
-    /// Returns an error if the log cannot be locked, a log file is a symlink
-    /// or changes while opening, or a file cannot be read or has a malformed
-    /// or oversized line. Missing logs contribute no records.
+    /// Returns an error if the folder, lock or a log file is owned by another
+    /// user or writable by the group or others, a file is a symlink or
+    /// changes while opening, the log cannot be locked, or a file cannot be
+    /// read or has a malformed or oversized line. Missing logs contribute no
+    /// records.
     pub fn recent(&self, count: usize) -> io::Result<Vec<AuditRecord>> {
         let count = count.min(MAX_RECENT);
         let mut records = VecDeque::with_capacity(count);
 
-        if !self.folder.try_exists()? {
-            return Ok(Vec::new());
-        }
+        let folder = match fs::metadata(&self.folder) {
+            Ok(folder) => folder,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        let owner = own_uid()?;
+        trusted(FOLDER, &folder, owner)?;
 
-        let _lock = self.lock()?;
-        let mut options = OpenOptions::new();
-        options.read(true);
+        let lock = open_trusted(&self.folder.join(LOCK), LOCK, owner)?;
+
+        if let Some(lock) = &lock {
+            lock.lock()?;
+        }
 
         for name in [ROTATED, CURRENT] {
             let path = self.folder.join(name);
 
-            if let Some(file) = open_existing(&path, name, &options)? {
+            if let Some(file) = open_trusted(&path, name, owner)? {
                 read_records(file, &mut records, count, &self.torn)?;
             }
         }
@@ -334,33 +351,76 @@ impl AuditLog {
     }
 }
 
-/// Opens an existing regular file with `options`, or creates it alone.
+/// Opens an existing regular file with `options`, or creates it alone, and
+/// makes it private.
 fn open_or_create(
     path: &Path,
     name: &'static str,
     options: &OpenOptions,
 ) -> io::Result<File> {
     if let Some(file) = open_existing(path, name, options)? {
+        private(&file)?;
         return Ok(file);
     }
 
     let mut creating = options.clone();
 
-    match creating.create_new(true).mode(0o600).open(path) {
-        Ok(file) => {
-            private(&file)?;
-            Ok(file)
-        }
+    let file = match creating.create_new(true).mode(0o600).open(path) {
+        Ok(file) => file,
         // Another process creates it first: open the file it made.
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            open_existing(path, name, options)?.ok_or(error)
+            open_existing(path, name, options)?.ok_or(error)?
         }
-        Err(error) => Err(error),
-    }
+        Err(error) => return Err(error),
+    };
+
+    private(&file)?;
+    Ok(file)
 }
 
-/// Opens a regular file that exists, never through a symlink, and makes it
-/// private. Nothing at `path` gives `None`.
+/// Opens a regular file that exists to read, never through a symlink, and
+/// refuses one that is not [`trusted`]. Nothing at `path` gives `None`.
+fn open_trusted(
+    path: &Path,
+    name: &'static str,
+    owner: u32,
+) -> io::Result<Option<File>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+
+    let Some(file) = open_existing(path, name, &options)? else {
+        return Ok(None);
+    };
+
+    trusted(name, &file.metadata()?, owner)?;
+    Ok(Some(file))
+}
+
+/// Refuses what another user owns or the group or others can write: either
+/// could have planted records.
+fn trusted(name: &str, metadata: &fs::Metadata, owner: u32) -> io::Result<()> {
+    if metadata.uid() != owner {
+        return Err(refused(name, "is owned by another user"));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(refused(name, "is writable by the group or others"));
+    }
+
+    Ok(())
+}
+
+/// The effective user ID, without a new dependency: a pipe is owned by the
+/// user who makes it. Linux sets a pipe inode's owner to the caller's fsuid
+/// (`fs/pipe.c`), and macOS reports `kauth_getuid()` (`bsd/kern/sys_pipe.c`).
+fn own_uid() -> io::Result<u32> {
+    let (reader, _writer) = io::pipe()?;
+    let pipe = File::from(OwnedFd::from(reader));
+
+    Ok(pipe.metadata()?.uid())
+}
+
+/// Opens a regular file that exists, never through a symlink. Nothing at
+/// `path` gives `None`.
 fn open_existing(
     path: &Path,
     name: &'static str,
@@ -377,7 +437,6 @@ fn open_existing(
         return Err(refused(name, "changed while opening"));
     }
 
-    private(&file)?;
     Ok(Some(file))
 }
 
@@ -502,7 +561,7 @@ fn read_records(
 mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -512,9 +571,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuditError, AuditLog, AuditRecord, CURRENT, LOCK, MAX_RECENT,
-        MAX_RECORD_BYTES, ROTATED, TAIL_CHUNK_BYTES, check_text, format_at,
-        open_or_create,
+        AuditError, AuditLog, AuditRecord, CURRENT, FOLDER, LOCK, MAX_RECENT,
+        MAX_RECORD_BYTES, ROTATED, TAIL_CHUNK_BYTES, check_text, entry, format_at,
+        open_or_create, own_uid, trusted,
     };
     use crate::{
         Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
@@ -811,6 +870,19 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_lookup_failure_other_than_not_found() {
+        let scratch = Scratch::new();
+        let file = scratch.0.join("plain");
+        fs::write(&file, b"").unwrap();
+
+        // A regular file as the parent makes symlink_metadata fail with
+        // ENOTDIR, which is an error and not a missing log.
+        let error = entry(&file.join(CURRENT), CURRENT).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
     fn restores_private_modes_on_the_next_append() {
         let scratch = Scratch::new();
         let folder = scratch.folder();
@@ -979,6 +1051,103 @@ mod tests {
         File::create(folder.join(CURRENT)).unwrap();
 
         assert_eq!(log.recent(1).unwrap(), []);
+    }
+
+    #[test]
+    fn reads_a_missing_folder_as_empty_without_creating_it() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let plain = scratch.0.join("plain");
+        fs::write(&plain, b"").unwrap();
+
+        assert_eq!(AuditLog::new(&folder).recent(1).unwrap(), []);
+        assert_eq!(
+            fs::metadata(&folder).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+
+        // A regular file in the folder's path is an error, not a missing log.
+        let error = AuditLog::new(&plain.join("log")).recent(1).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
+    fn reads_change_no_permissions() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        let item = record("call-1");
+        log.append(&item).unwrap();
+
+        let reads = [
+            (folder.clone(), 0o750),
+            (folder.join(CURRENT), 0o640),
+            (folder.join(LOCK), 0o400),
+        ];
+
+        for (path, bits) in &reads {
+            fs::set_permissions(path, fs::Permissions::from_mode(*bits)).unwrap();
+        }
+
+        assert_eq!(log.recent(1).unwrap(), [item]);
+
+        for (path, bits) in reads {
+            assert_eq!(mode(&path), bits);
+        }
+    }
+
+    #[test]
+    fn refuses_to_read_what_the_group_or_others_can_write() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        log.append(&record("call-1")).unwrap();
+
+        let targets = [
+            (FOLDER, folder.clone(), 0o700),
+            (LOCK, folder.join(LOCK), 0o600),
+            (CURRENT, folder.join(CURRENT), 0o600),
+        ];
+
+        for (name, path, private) in targets {
+            for writable in [0o020, 0o002] {
+                let bits = private | writable;
+                fs::set_permissions(&path, fs::Permissions::from_mode(bits))
+                    .unwrap();
+
+                let error = log.recent(1).unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert_eq!(
+                    error.to_string(),
+                    format!("{name} is writable by the group or others")
+                );
+                assert_eq!(mode(&path), bits);
+
+                let restore = fs::Permissions::from_mode(private);
+                fs::set_permissions(&path, restore).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_a_log_owned_by_another_user() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join(CURRENT);
+        fs::write(&path, b"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let own = own_uid().unwrap();
+
+        // Giving a file another owner needs root, so the test passes the
+        // reader a different user ID instead.
+        let error = trusted(CURRENT, &metadata, own.wrapping_add(1)).unwrap_err();
+
+        assert_eq!(own, metadata.uid());
+        trusted(CURRENT, &metadata, own).unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "audit.jsonl is owned by another user");
     }
 
     #[test]

@@ -245,7 +245,7 @@ impl Trace {
     }
 
     /// Records the final event once, even when no rule events fit.
-    pub(crate) fn finish(&mut self) {
+    pub fn finish(&mut self) {
         if !self.is_finished() {
             self.events.push(TraceEvent::FINISHED);
         }
@@ -478,6 +478,24 @@ mod tests {
             assert_eq!(trace.events(), events.as_slice());
             assert_eq!(trace.dropped(), 7);
         }
+    }
+
+    #[test]
+    fn a_caller_finishes_a_trace_through_the_public_api() {
+        let opinion = TraceEvent::rule_opinion("shell-guard", Outcome::Ask, "path")
+            .expect("valid event");
+        let finished = TraceEvent::finished().expect("valid event");
+        let mut trace = Trace::new();
+
+        let kept = [trace.push(started()), trace.push(opinion.clone())];
+
+        assert_eq!(kept, [true, true]);
+
+        trace.finish();
+        trace.finish();
+
+        assert_eq!(trace.events(), [started(), opinion, finished]);
+        assert_eq!(trace.dropped(), 0);
     }
 
     #[test]

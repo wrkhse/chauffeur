@@ -1,10 +1,10 @@
 //! The CLI as the binary a person runs, so these tests start processes.
 //! They run in CI only: nothing that starts a process runs on the owner's
-//! Mac. Without `CI` set each test returns at once.
+//! Mac. Each test is ignored, and CI runs them with `--run-ignored only`.
 #![cfg(test)]
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{self, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,15 +32,27 @@ impl Scratch {
         Self(path)
     }
 
-    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Output {
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
         command.args(args).env("CHAUFFEUR_CORE_STATE_DIR", &self.0);
 
+        command
+    }
+
+    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Output {
         let Some(input) = input else {
-            return command.output().expect("run chauffeur-core");
+            return self.command(args).output().expect("run chauffeur-core");
         };
 
-        let mut child = command
+        let (written, output) = self.feed(args, input);
+
+        written.expect("write CLI stdin");
+        output
+    }
+
+    fn feed(&self, args: &[&str], input: &[u8]) -> (io::Result<()>, Output) {
+        let mut child = self
+            .command(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -48,10 +60,9 @@ impl Scratch {
             .expect("spawn chauffeur-core");
 
         let written = child.stdin.take().expect("piped stdin").write_all(input);
-        let result = child.wait_with_output();
+        let output = child.wait_with_output().expect("wait for chauffeur-core");
 
-        written.expect("write CLI stdin");
-        result.expect("wait for chauffeur-core")
+        (written, output)
     }
 
     fn judge(&self, id: &str, subject: &Value) -> Value {
@@ -86,10 +97,6 @@ impl Drop for Scratch {
     }
 }
 
-fn in_ci() -> bool {
-    env::var_os("CI").is_some()
-}
-
 fn stdout(output: &Output) -> &str {
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     str::from_utf8(&output.stdout).expect("stdout is UTF-8")
@@ -121,11 +128,8 @@ fn expected_judgment(id: &str, outcome: &str, reason: &str) -> Value {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn allows_git_status_and_records_its_judgment() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
     let judgment = state.judge("status-1", &shell("git status"));
     let records = state.audit(&["audit", "1"]);
@@ -142,11 +146,8 @@ fn allows_git_status_and_records_its_judgment() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn asks_before_reading_a_private_ssh_key() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
     let read = json!({"tool": "read", "input": {"path": "~/.ssh/id_ed25519"}});
 
@@ -157,11 +158,8 @@ fn asks_before_reading_a_private_ssh_key() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn denies_a_recursive_root_removal() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
 
     assert_eq!(
@@ -171,22 +169,16 @@ fn denies_a_recursive_root_removal() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn lists_the_builtin_rules() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
 
     assert_eq!(stdout(&state.run(&["rules"], None)), "shell-guard\n");
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn audit_keeps_records_from_separate_runs_in_order() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
     let first = state.judge("status-1", &shell("git status"));
     let second = state.judge("status-2", &shell("git status --short"));
@@ -200,11 +192,8 @@ fn audit_keeps_records_from_separate_runs_in_order() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn judges_stdin_of_exactly_the_request_limit() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
     let request = json!({
         "id": "limit-1",
@@ -228,15 +217,28 @@ fn judges_stdin_of_exactly_the_request_limit() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn rejects_oversized_stdin() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
-    let bytes = vec![b' '; MAX_REQUEST_BYTES + 1];
-    let output = state.run(&["judge"], Some(&bytes));
+    let request = json!({
+        "id": "oversized-1",
+        "session": "s1",
+        "hook": "tool_after",
+        "subject": shell("git status"),
+    })
+    .to_string();
+    let mut bytes = request.into_bytes();
+    bytes.resize(MAX_REQUEST_BYTES * 2, b' ');
 
+    let (written, output) = state.feed(&["judge"], &bytes);
+
+    assert_eq!(bytes.len(), MAX_REQUEST_BYTES * 2);
+    // The CLI stops reading one byte past the limit and exits, so the rest
+    // of the input meets a closed pipe instead of being read.
+    assert_eq!(
+        written.map_err(|error| error.kind()),
+        Err(io::ErrorKind::BrokenPipe),
+    );
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
     assert_eq!(
@@ -246,11 +248,8 @@ fn rejects_oversized_stdin() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn rejects_an_unknown_subcommand() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
     let output = state.run(&["unknown"], None);
 
@@ -263,11 +262,8 @@ fn rejects_an_unknown_subcommand() {
 }
 
 #[test]
+#[ignore = "starts a process; runs only in CI"]
 fn prints_the_workspace_version() {
-    if !in_ci() {
-        return;
-    }
-
     let state = Scratch::new();
 
     assert_eq!(
