@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{
@@ -19,7 +19,8 @@ use std::os::unix::fs::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +39,8 @@ const ROTATED: &str = "audit.1.jsonl";
 const LOCK: &str = "lock";
 const FOLDER: &str = "audit folder";
 const TAIL_CHUNK_BYTES: usize = 4096;
+const LOCK_ATTEMPTS: u32 = 50;
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 const SECOND_DIGITS: usize = 20;
 const MICROSECOND_DIGITS: usize = 6;
 
@@ -227,7 +230,8 @@ fn limit(name: &'static str, max: usize) -> AuditError {
 /// Appends judgment records in a private folder.
 ///
 /// Appends hold an exclusive lock on the folder's `lock` file, and reads take
-/// it when it exists, so handles in any process take turns.
+/// it when it exists, so handles in any process take turns. Both try the lock
+/// 50 times, 10 ms apart, then fail instead of waiting longer.
 #[derive(Debug)]
 pub struct AuditLog {
     folder: PathBuf,
@@ -265,8 +269,9 @@ impl AuditLog {
     ///
     /// # Errors
     /// Returns an error if the line is too large, a log file is a symlink or
-    /// changes while opening, a torn tail is longer than a record, or the log
-    /// cannot be locked, created, rotated, or written.
+    /// changes while opening, a torn tail is longer than a record, the lock
+    /// stays held by another handle past the wait, or the log cannot be
+    /// locked, created, rotated, or written.
     pub fn append(&self, record: &AuditRecord) -> io::Result<()> {
         let line = record
             .line()
@@ -299,9 +304,9 @@ impl AuditLog {
     /// # Errors
     /// Returns an error if the folder, lock or a log file is owned by another
     /// user or writable by the group or others, a file is a symlink or
-    /// changes while opening, the log cannot be locked, or a file cannot be
-    /// read or has a malformed or oversized line. Missing logs contribute no
-    /// records.
+    /// changes while opening, the lock stays held by another handle past the
+    /// wait or cannot be taken, or a file cannot be read or has a malformed
+    /// or oversized line. Missing logs contribute no records.
     pub fn recent(&self, count: usize) -> io::Result<Vec<AuditRecord>> {
         let count = count.min(MAX_RECENT);
         let mut records = VecDeque::with_capacity(count);
@@ -319,7 +324,7 @@ impl AuditLog {
         let lock = open_trusted(&self.folder.join(LOCK), LOCK, owner)?;
 
         if let Some(lock) = &lock {
-            lock.lock()?;
+            wait_for_lock(lock)?;
         }
 
         for name in [ROTATED, CURRENT] {
@@ -333,7 +338,8 @@ impl AuditLog {
         Ok(records.into())
     }
 
-    /// Makes the folder private and holds its lock until the file drops.
+    /// Makes the folder private and holds its lock until the file drops,
+    /// waiting a bounded time for another handle to release it.
     fn lock(&self) -> io::Result<File> {
         DirBuilder::new()
             .recursive(true)
@@ -345,7 +351,7 @@ impl AuditLog {
         options.read(true).write(true);
 
         let file = open_or_create(&self.folder.join(LOCK), LOCK, &options)?;
-        file.lock()?;
+        wait_for_lock(&file)?;
 
         Ok(file)
     }
@@ -365,13 +371,11 @@ fn open_or_create(
 
     let mut creating = options.clone();
 
+    // A create that fails opens what another process made first, and returns
+    // the create's error when nothing is there.
     let file = match creating.create_new(true).mode(0o600).open(path) {
         Ok(file) => file,
-        // Another process creates it first: open the file it made.
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            open_existing(path, name, options)?.ok_or(error)?
-        }
-        Err(error) => return Err(error),
+        Err(error) => open_existing(path, name, options)?.ok_or(error)?,
     };
 
     private(&file)?;
@@ -465,6 +469,24 @@ fn private(file: &File) -> io::Result<()> {
 
 fn refused(name: &str, why: &str) -> io::Error {
     io::Error::other(format!("{name} {why}"))
+}
+
+/// Takes the exclusive lock on `file`, trying [`LOCK_ATTEMPTS`] times
+/// [`LOCK_RETRY`] apart, so a writer that never releases it fails the caller
+/// closed instead of hanging it.
+fn wait_for_lock(file: &File) -> io::Result<()> {
+    for _ in 0..LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => thread::sleep(LOCK_RETRY),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "audit lock is held by another handle",
+    ))
 }
 
 /// Cuts a final line without a newline and returns the length that remains.
@@ -566,14 +588,14 @@ mod tests {
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
     use super::{
-        AuditError, AuditLog, AuditRecord, CURRENT, FOLDER, LOCK, MAX_RECENT,
-        MAX_RECORD_BYTES, ROTATED, TAIL_CHUNK_BYTES, check_text, entry, format_at,
-        open_or_create, own_uid, trusted,
+        AuditError, AuditLog, AuditRecord, CURRENT, FOLDER, LOCK, LOCK_ATTEMPTS,
+        LOCK_RETRY, MAX_RECENT, MAX_RECORD_BYTES, ROTATED, TAIL_CHUNK_BYTES,
+        check_text, entry, format_at, open_or_create, own_uid, trusted,
     };
     use crate::{
         Engine, Judgment, MAX_EVENTS, MAX_TEXT_BYTES, Request, RuleSet, Trace,
@@ -941,6 +963,65 @@ mod tests {
         assert_eq!(seen, expected);
         assert_eq!(fs::read(folder.join(ROTATED)).unwrap().len(), line * 4);
         assert_eq!(fs::read(folder.join(CURRENT)).unwrap().len(), line * 4);
+    }
+
+    #[test]
+    fn fails_an_append_whose_lock_stays_held_past_the_bound() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        let (first, blocked, last) = (record("a"), record("b"), record("c"));
+        log.append(&first).unwrap();
+
+        let holder = File::open(folder.join(LOCK)).unwrap();
+        holder.lock().unwrap();
+        let started = Instant::now();
+        let error = log.append(&blocked).unwrap_err();
+        let waited = started.elapsed();
+        drop(holder);
+
+        // Every attempt sleeps once, and a loaded runner stays far under 5 s.
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "audit lock is held by another handle");
+        assert!(waited >= LOCK_RETRY * LOCK_ATTEMPTS, "{waited:?}");
+        assert!(waited < Duration::from_secs(5), "{waited:?}");
+
+        log.append(&last).unwrap();
+
+        assert_eq!(log.recent(3).unwrap(), [first, last]);
+    }
+
+    #[test]
+    fn fails_a_read_whose_lock_stays_held_past_the_bound() {
+        let scratch = Scratch::new();
+        let folder = scratch.folder();
+        let log = AuditLog::new(&folder);
+        let item = record("call-1");
+        log.append(&item).unwrap();
+
+        let modes = [(folder.clone(), 0o750), (folder.join(LOCK), 0o400)];
+
+        for (path, bits) in &modes {
+            fs::set_permissions(path, fs::Permissions::from_mode(*bits)).unwrap();
+        }
+
+        let holder = File::open(folder.join(LOCK)).unwrap();
+        holder.lock().unwrap();
+        let started = Instant::now();
+        let error = log.recent(1).unwrap_err();
+        let waited = started.elapsed();
+        drop(holder);
+
+        // Every attempt sleeps once, and a loaded runner stays far under 5 s.
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "audit lock is held by another handle");
+        assert!(waited >= LOCK_RETRY * LOCK_ATTEMPTS, "{waited:?}");
+        assert!(waited < Duration::from_secs(5), "{waited:?}");
+        assert_eq!(log.recent(1).unwrap(), [item]);
+
+        for (path, bits) in modes {
+            assert_eq!(mode(&path), bits);
+        }
     }
 
     #[test]

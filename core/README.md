@@ -10,7 +10,9 @@ flowchart LR
 
 `core/` is an independent Cargo workspace beside the installed chauffeur. It
 contains a judgment library and the `chauffeur-core` CLI. The CLI judges a
-request and records the judgment and trace in an append-only audit log.
+request and appends the judgment and trace to `audit.jsonl`. At 8 MiB the
+file rotates over `audit.1.jsonl`, replacing the older records there, and
+a read returns at most the newest 1024 records.
 
 ## Judge a request
 

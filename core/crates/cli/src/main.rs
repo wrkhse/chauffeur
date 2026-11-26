@@ -198,31 +198,117 @@ fn state_dir() -> Result<PathBuf, CliError> {
 mod tests {
     use std::error::Error;
     use std::io;
+    use std::str;
 
-    use chauffeur_judgment::RequestError;
+    use chauffeur_judgment::{AuditError, RequestError};
+    use serde::de::Error as _;
 
     use super::CliError;
 
-    fn source_text(error: &CliError) -> Option<String> {
-        error.source().map(ToString::to_string)
+    /// The error's Display, its Debug, and its source's Display.
+    fn texts(error: &CliError) -> (String, String, Option<String>) {
+        (
+            error.to_string(),
+            format!("{error:?}"),
+            error.source().map(ToString::to_string),
+        )
     }
 
     #[test]
-    fn keeps_the_request_error_as_its_source() {
-        let error = CliError::from(RequestError::Invalid("bad".to_owned()));
+    fn usage_prints_the_usage_without_a_source() {
+        let usage = "usage: chauffeur-core judge | rules | audit [N] | version";
 
-        assert_eq!(source_text(&error), Some("invalid request: bad".to_owned()));
+        assert_eq!(
+            texts(&CliError::Usage),
+            (usage.to_owned(), usage.to_owned(), None),
+        );
     }
 
     #[test]
-    fn keeps_the_io_error_as_its_source() {
+    fn count_prints_the_parse_error_and_the_usage() {
+        let parsed = "x".parse::<usize>();
+        let error = CliError::from(parsed.expect_err("x is not a count"));
+        let text = "invalid audit count: invalid digit found in string\n\
+                    usage: chauffeur-core judge | rules | audit [N] | version";
+
+        assert_eq!(
+            texts(&error),
+            (
+                text.to_owned(),
+                text.to_owned(),
+                Some("invalid digit found in string".to_owned()),
+            ),
+        );
+    }
+
+    #[test]
+    fn missing_home_names_both_variables_without_a_source() {
+        let text = "set CHAUFFEUR_CORE_STATE_DIR or HOME";
+
+        assert_eq!(
+            texts(&CliError::MissingHome),
+            (text.to_owned(), text.to_owned(), None),
+        );
+    }
+
+    #[test]
+    fn io_prints_and_keeps_the_io_error() {
         let error = CliError::from(io::Error::other("disk full"));
 
-        assert_eq!(source_text(&error), Some("disk full".to_owned()));
+        assert_eq!(
+            texts(&error),
+            (
+                "disk full".to_owned(),
+                "disk full".to_owned(),
+                Some("disk full".to_owned()),
+            ),
+        );
     }
 
     #[test]
-    fn usage_has_no_source() {
-        assert_eq!(source_text(&CliError::Usage), None);
+    fn utf8_prints_and_keeps_the_utf8_error() {
+        let bytes = vec![b'a', 0xff];
+        let error =
+            CliError::from(str::from_utf8(&bytes).expect_err("0xff is not UTF-8"));
+        let inner = "invalid utf-8 sequence of 1 bytes from index 1";
+        let text = format!("request is not UTF-8: {inner}");
+
+        assert_eq!(texts(&error), (text.clone(), text, Some(inner.to_owned())));
+    }
+
+    #[test]
+    fn request_prints_and_keeps_the_request_error() {
+        let error = CliError::from(RequestError::Invalid("bad".to_owned()));
+        let text = "invalid request: bad";
+
+        assert_eq!(
+            texts(&error),
+            (text.to_owned(), text.to_owned(), Some(text.to_owned())),
+        );
+    }
+
+    #[test]
+    fn audit_prints_and_keeps_the_audit_error() {
+        let error = CliError::from(AuditError::Limit {
+            name: "record bytes",
+            max: 65_536,
+        });
+        let text = "record bytes exceeds 65536";
+
+        assert_eq!(
+            texts(&error),
+            (text.to_owned(), text.to_owned(), Some(text.to_owned())),
+        );
+    }
+
+    #[test]
+    fn json_prints_and_keeps_the_json_error() {
+        let error = CliError::from(serde_json::Error::custom("bad json"));
+        let text = "bad json";
+
+        assert_eq!(
+            texts(&error),
+            (text.to_owned(), text.to_owned(), Some(text.to_owned())),
+        );
     }
 }

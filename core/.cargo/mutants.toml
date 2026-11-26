@@ -1,5 +1,8 @@
 test_workspace = true
 test_tool = "nextest"
+# The CLI's process tests are #[ignore] so the host never starts them; the
+# mutation run is in CI and needs them to check the binary.
+additional_cargo_test_args = ["--run-ignored", "all"]
 
 # Exclude equivalent mutants by name with a reason when one is found.
 #
@@ -9,10 +12,4 @@ test_tool = "nextest"
 exclude_re = [
   """^crates/judgment/src/rules/shell_guard\\.rs:152:41: \
   replace > with >= in removes_root$""",
-  # Equivalent: forced true, any create error falls through to
-  # open_existing, which returns the file another process made (the
-  # AlreadyExists case) or finds nothing and returns the same error.
-  """^crates/judgment/src/audit\\.rs:[0-9]+:[0-9]+: \
-  replace match guard error\\.kind\\(\\) == io::ErrorKind::AlreadyExists \
-  with true in open_or_create$""",
 ]
