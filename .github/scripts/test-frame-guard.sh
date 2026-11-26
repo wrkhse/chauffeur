@@ -42,4 +42,33 @@ if frame_matches "$unrelated" "$needle"; then
   exit 1
 fi
 
-printf 'ok: frame guard matches across a wrap\n'
+# A control echoed by a non-silent read is a whole line.
+control=$(cat <<'FRAME'
+$ printf '%s\n' '{"id":"record-1"}'
+go
+FRAME
+)
+
+# The caption says "goes", which must not read as a control line.
+caption=$(cat <<'FRAME'
+$ printf '%s\n' '{"id":"record-1"}'
+Judge pane: git status goes to chauffeur-core judge
+FRAME
+)
+
+has_control_line "$control" || {
+  printf 'the echoed go line was not detected\n' >&2
+  exit 1
+}
+
+if has_control_line "$caption"; then
+  printf 'the caption was read as a control line\n' >&2
+  exit 1
+fi
+
+if has_control_line "$unrelated"; then
+  printf 'a clean frame was read as a control line\n' >&2
+  exit 1
+fi
+
+printf 'ok: frame guard matches across a wrap and reads control lines\n'
