@@ -230,16 +230,16 @@ jobs:
 
           # The judge pane waits for a tap, judges one request and holds.
           cat > "$work/judge.sh" <<'SH'
-          printf '%s\n' '$ printf REQUEST | ./chauffeur-core judge'
-          read -r -t 120 _ || {
+          request=$(jq -nc '{id: "record-1", session: "ci",
+            hook: "tool_after",
+            subject: {tool: "shell", input: {command: "git status"}}}')
+          printf '%s\n' "\$ printf '%s\\n' '$request' | ./chauffeur-core judge"
+          read -r -s -t 120 _ || {
             echo "::error::judge pane timed out waiting for the go tap"
             exit 1
           }
 
           set -o pipefail
-          request=$(jq -nc '{id: "record-1", session: "ci",
-            hook: "tool_after",
-            subject: {tool: "shell", input: {command: "git status"}}}')
           printf '%s\n' "$request" | ./chauffeur-core judge \
             | jq -c '{request_id, verdict, trace}'
           status=$?
@@ -249,7 +249,7 @@ jobs:
           fi
           echo "chauffeur-core judge exited with $status"
           touch judged.flag
-          read -r -t 120 _ || {
+          read -r -s -t 120 _ || {
             echo "::error::judge pane timed out waiting for the stop tap"
             exit 1
           }
@@ -259,7 +259,7 @@ jobs:
           # separate chauffeur-core process from the same state folder.
           cat > "$work/audit.sh" <<'SH'
           printf '%s\n' '$ ./chauffeur-core audit 1'
-          read -r -t 120 _ || {
+          read -r -s -t 120 _ || {
             echo "::error::audit pane timed out waiting for the go tap"
             exit 1
           }
@@ -285,7 +285,7 @@ jobs:
             exit 1
           fi
           echo "chauffeur-core audit exited with $status"
-          read -r -t 120 _ || {
+          read -r -s -t 120 _ || {
             echo "::error::audit pane timed out waiting for the stop tap"
             exit 1
           }
@@ -366,7 +366,7 @@ jobs:
           }
 
           frame_shows artifacts/judge.termctrl start judged \
-            '$ printf REQUEST | ./chauffeur-core judge'
+            '"command":"git status"'
           frame_shows artifacts/judge.termctrl judged audited \
             'literal git status with only plain flags'
           frame_shows artifacts/judge.termctrl audited end \
@@ -474,7 +474,9 @@ jobs:
               frame_flat=$(tr -d '[:space:]' \
                 <<< "$frame_text" | tr '[:upper:]' '[:lower:]')
               if [[ $take == judge ]]; then
-                [[ $frame_flat == *request_id* && $frame_flat == *trace* ]] \
+                [[ $frame_flat == *request_id* \
+                  && $frame_flat == *trace* \
+                  && $frame_flat == *gitstatus* ]] \
                   || continue
               else
                 [[ $frame_flat == *judgment* ]] || continue
@@ -565,7 +567,8 @@ jobs:
           done)
           printf -- '--- OCR of demo.gif frames ---\n%s\n' "$gif_text"
           flat=$(tr -d '[:space:]' <<< "$gif_text" | tr '[:upper:]' '[:lower:]')
-          if [[ $flat != *request_id* || $flat != *trace* ]]; then
+          if [[ $flat != *request_id* || $flat != *trace* \
+            || $flat != *gitstatus* ]]; then
             echo "::error::OCR finds no judge JSON keys in demo.gif"
             exit 1
           fi

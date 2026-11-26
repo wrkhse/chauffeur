@@ -110,8 +110,10 @@ outcome, and that a noisy rule leaves `finished` last with the drops counted.
 
 Each judgment is appended to `audit.jsonl` as one JSON line. At 8 MiB the
 file rotates over `audit.1.jsonl`, and a read returns at most the newest 1024
-records. The log refuses a symlinked path and a folder another user owns, and
-locks around every append and read.
+records. Each record's `at` is 20 zero-padded digits of Unix seconds, a dot, and
+six zero-padded digits of microseconds; the width is fixed so records sort as
+text in time order. The log refuses a symlinked path and a folder another user
+owns, and locks around every append and read.
 
 ```rust
 let log = AuditLog::new(Path::new("state"));

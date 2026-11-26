@@ -58,7 +58,9 @@ A hook that calls `chauffeur-core` treats a non-zero exit as deny, so an
 invalid request or an unwritable audit log fails closed.
 
 Read the same judgment from the latest audit record. The CLI emits one JSON
-line per record; Python formats it here for reading. The timestamp varies.
+line per record; Python formats it here for reading. The `at` timestamp is 20
+zero-padded digits of Unix seconds, a dot, and six zero-padded digits of
+microseconds. The width is fixed so records sort as text in time order.
 
 ```sh
 chauffeur-core audit 1 | python3 -m json.tool
