@@ -92,6 +92,9 @@ jobs:
               ["ci-allow", "allow"], ["ci-ask", "ask"], ["ci-deny", "deny"]
             ]
           '
+      - name: Frame guard survives terminal wraps
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/test-frame-guard.sh
 
   core-mutants:
     if: github.event_name == 'pull_request'
