@@ -22,6 +22,7 @@
 //! # Ok::<(), RequestError>(())
 //! ```
 
+mod audit;
 mod engine;
 mod request;
 mod rule;
@@ -29,6 +30,9 @@ mod rules;
 mod trace;
 mod verdict;
 
+pub use audit::{
+    AuditError, AuditLog, AuditRecord, MAX_AUDIT_BYTES, MAX_RECENT, MAX_RECORD_BYTES,
+};
 pub use engine::{Engine, Judgment, JudgmentError};
 pub use request::{MAX_EVIDENCE_BLOCKS, MAX_EVIDENCE_BYTES, MAX_TEXT_BYTES};
 pub use request::{MAX_REQUEST_BYTES, Request, RequestError};

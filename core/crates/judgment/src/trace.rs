@@ -187,19 +187,23 @@ impl TryFrom<TraceFile> for Trace {
     type Error = &'static str;
 
     fn try_from(file: TraceFile) -> Result<Self, Self::Error> {
-        let mut events = file.events.as_slice();
-
-        if let Some((last, rest)) = events.split_last()
-            && last.is_finished()
-        {
-            events = rest;
-        }
+        let (events, finished) = match file.events.split_last() {
+            Some((last, rest)) if last.is_finished() => (rest, true),
+            _ => (file.events.as_slice(), false),
+        };
 
         if events.len() > MAX_RULE_EVENTS {
             return Err("the final trace slot is reserved for finished");
         }
         if events.iter().any(TraceEvent::is_finished) {
             return Err("finished must be the last trace event");
+        }
+
+        // The engine drops events only once its trace is full or finished.
+        let full = events.len() == MAX_RULE_EVENTS;
+
+        if file.dropped != 0 && !full && !finished {
+            return Err("dropped events need a full or finished trace");
         }
 
         Ok(Self {
@@ -221,12 +225,17 @@ impl Trace {
 
     /// Keeps a non-final event if there is room before the reserved slot.
     /// Counts and returns `false` for an event it cannot keep.
+    /// Refuses a finished event without counting it: `finish` records it.
     pub fn push(&mut self, event: TraceEvent) -> bool {
+        if event.is_finished() {
+            return false;
+        }
+
         // Bounded append adapts origin/v2 crates/runtime/src/run/log.rs
         // at 55bca73.
         let full = self.events.len() >= MAX_RULE_EVENTS;
 
-        if full || self.is_finished() || event.is_finished() {
+        if full || self.is_finished() {
             self.dropped = self.dropped.saturating_add(1);
             return false;
         }
@@ -236,7 +245,7 @@ impl Trace {
     }
 
     /// Records the final event once, even when no rule events fit.
-    pub(crate) fn finish(&mut self) {
+    pub fn finish(&mut self) {
         if !self.is_finished() {
             self.events.push(TraceEvent::FINISHED);
         }
@@ -432,17 +441,80 @@ mod tests {
     }
 
     #[test]
+    fn refuses_dropped_events_in_a_small_unfinished_trace() {
+        let file = json!({ "events": [started()], "dropped": 1 });
+        let error = serde_json::from_value::<Trace>(file).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "dropped events need a full or finished trace"
+        );
+    }
+
+    #[test]
+    fn refuses_too_many_events_with_dropped_as_a_reserved_slot() {
+        let events = vec![started(); MAX_EVENTS];
+        let file = json!({ "events": events, "dropped": 3 });
+        let error = serde_json::from_value::<Trace>(file).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "the final trace slot is reserved for finished"
+        );
+    }
+
+    #[test]
+    fn keeps_dropped_events_in_a_full_or_finished_trace() {
+        let finished = TraceEvent::finished().expect("valid event");
+        let full = vec![started(); MAX_EVENTS - 1];
+        let mut full_finished = full.clone();
+        full_finished.push(finished.clone());
+        let small_finished = vec![started(), finished];
+
+        for events in [full, full_finished, small_finished] {
+            let file = json!({ "events": events, "dropped": 7 });
+            let trace = serde_json::from_value::<Trace>(file).unwrap();
+
+            assert_eq!(trace.events(), events.as_slice());
+            assert_eq!(trace.dropped(), 7);
+        }
+    }
+
+    #[test]
+    fn a_caller_finishes_a_trace_through_the_public_api() {
+        let opinion = TraceEvent::rule_opinion("shell-guard", Outcome::Ask, "path")
+            .expect("valid event");
+        let finished = TraceEvent::finished().expect("valid event");
+        let mut trace = Trace::new();
+
+        let kept = [trace.push(started()), trace.push(opinion.clone())];
+
+        assert_eq!(kept, [true, true]);
+
+        trace.finish();
+        trace.finish();
+
+        assert_eq!(trace.events(), [started(), opinion, finished]);
+        assert_eq!(trace.dropped(), 0);
+    }
+
+    #[test]
+    fn refuses_a_pushed_finished_event_without_counting_it() {
+        let mut trace = Trace::new();
+        let kept = trace.push(TraceEvent::finished().expect("valid event"));
+
+        assert_eq!((kept, trace.dropped()), (false, 0));
+        assert_eq!(trace.events(), []);
+    }
+
+    #[test]
     fn refuses_rule_events_after_finished() {
         let finished = TraceEvent::finished().expect("valid event");
         let mut trace = Trace::new();
-        let kept = trace.push(finished.clone());
-
-        assert_eq!((kept, trace.dropped()), (false, 1));
-
         trace.finish();
         let kept = trace.push(started());
 
-        assert_eq!((kept, trace.dropped()), (false, 2));
+        assert_eq!((kept, trace.dropped()), (false, 1));
         assert_eq!(trace.events(), std::slice::from_ref(&finished));
 
         let file = json!({ "events": [finished, started()] });
