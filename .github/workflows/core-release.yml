@@ -231,7 +231,10 @@ jobs:
           # The judge pane waits for a tap, judges one request and holds.
           cat > "$work/judge.sh" <<'SH'
           printf '%s\n' '$ printf REQUEST | ./chauffeur-core judge'
-          read -r _
+          read -r -t 120 _ || {
+            echo "::error::judge pane timed out waiting for the go tap"
+            exit 1
+          }
 
           set -o pipefail
           request=$(jq -nc '{id: "record-1", session: "ci",
@@ -246,14 +249,20 @@ jobs:
           fi
           echo "chauffeur-core judge exited with $status"
           touch judged.flag
-          read -r _
+          read -r -t 120 _ || {
+            echo "::error::judge pane timed out waiting for the stop tap"
+            exit 1
+          }
           SH
 
           # The audit pane waits for the verdict, then reads it with a
           # separate chauffeur-core process from the same state folder.
           cat > "$work/audit.sh" <<'SH'
           printf '%s\n' '$ ./chauffeur-core audit 1'
-          read -r _
+          read -r -t 120 _ || {
+            echo "::error::audit pane timed out waiting for the go tap"
+            exit 1
+          }
 
           set -o pipefail
           found=
@@ -276,7 +285,10 @@ jobs:
             exit 1
           fi
           echo "chauffeur-core audit exited with $status"
-          read -r _
+          read -r -t 120 _ || {
+            echo "::error::audit pane timed out waiting for the stop tap"
+            exit 1
+          }
           SH
 
           termctrl start judge --record artifacts/judge.termctrl \
@@ -329,16 +341,21 @@ jobs:
           termctrl stop audit
           audit_live=
 
-          # Samples the midpoint of each clip in the edit plan, not a
-          # shared marker. Each assertion names text unique to its take:
-          # the verdict in the judge take, the audit entry in the audit
-          # take, so one take cannot stand in for the other.
+          # Samples each clip in the edit plan, not a shared marker. Each
+          # assertion names text unique to its take: the verdict in the
+          # judge take, the audit entry in the audit take, so one take
+          # cannot stand in for the other. The audit judged..audited clip
+          # samples near its end: the midpoint can land in the judged.flag
+          # wait before the audit process prints its judgment.
           frame_shows() {
-            local recording=$1 from=$2 to=$3 expected=$4 at frame
+            local recording=$1 from=$2 to=$3 expected=$4 frac=${5:-0.5}
+            local at frame
             at=$(termctrl markers --json "$recording" | jq -r \
-              --arg from "$from" --arg to "$to" '
+              --arg from "$from" --arg to "$to" --argjson frac "$frac" '
               (map({key: .name, value: .at_ms}) | from_entries) as $marks
-              | (($marks[$from] + $marks[$to]) / 2 | floor | tostring)')
+              | ($marks[$from]
+                 + ($marks[$to] - $marks[$from]) * $frac
+                 | floor | tostring)')
             frame=$(termctrl show --recording "$recording" --at-ms "$at")
             printf -- '--- %s %s..%s at %sms ---\n%s\n' \
               "$recording" "$from" "$to" "$at" "$frame"
@@ -357,7 +374,7 @@ jobs:
           frame_shows artifacts/audit.termctrl start judged \
             '$ ./chauffeur-core audit 1'
           frame_shows artifacts/audit.termctrl judged audited \
-            '"judgment":'
+            '"judgment":' 0.95
           frame_shows artifacts/audit.termctrl audited end \
             '"judgment":'
 
@@ -657,18 +674,17 @@ jobs:
             assets=("$TARBALL" SHA256SUMS demo.gif)
           fi
 
-          # A rerun or a dispatch finds the release already made, so it
-          # replaces the assets; only a new release is created, as a
-          # prerelease that is never latest. The installed chauffeur,
-          # Homebrew and npm are never touched.
+          # A rerun or a dispatch finds the release already made: the assets
+          # are replaced and the tag is edited back into a prerelease that
+          # is never latest, in case it was made normal or latest. Notes are
+          # left as they are, so a maintainer's edits survive a dispatch.
+          # Only a new release is created with fresh notes. The installed
+          # chauffeur, Homebrew and npm are never touched.
           if gh release view "$TAG" > /dev/null; then
             gh release upload "$TAG" --clobber -- "${assets[@]}"
+            gh release edit "$TAG" --prerelease --latest=false
           else
             gh release create "$TAG" --prerelease --latest=false --verify-tag \
               --title "chauffeur-core $TAG" --notes "$notes" \
               -- "${assets[@]}"
-          fi
-
-          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
-            gh release edit "$TAG" --notes "$notes"
           fi
