@@ -128,6 +128,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      # The frame matcher is sourced from the repository, so this job
+      # needs the checkout even though it films a downloaded tarball.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download the tarball
         uses: >- # v4.3.0
           actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -174,6 +179,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          source "$GITHUB_WORKSPACE/.github/scripts/frame-match.sh"
 
           work=$(mktemp -d)
           published=
@@ -359,7 +366,7 @@ jobs:
             frame=$(termctrl show --recording "$recording" --at-ms "$at")
             printf -- '--- %s %s..%s at %sms ---\n%s\n' \
               "$recording" "$from" "$to" "$at" "$frame"
-            if [[ $(tr -d '\n\r' <<< "$frame") != *"$expected"* ]]; then
+            if ! frame_matches "$frame" "$expected"; then
               echo "::error::$recording $from..$to does not show $expected"
               return 1
             fi
@@ -446,11 +453,14 @@ jobs:
 
           # OCR reads every frame of each exported take at 1 fps with the
           # footer cropped, then concatenates the text. The judge take must
-          # show the request_id and trace keys from the judge binary's own
-          # JSON, not the caption's allow verdict; the audit take must show
-          # its judgment key. The frame that shows the marker is measured
-          # too: a rendered frame of text has grayscale deviation >= 0.02,
-          # so a dark export fails even when a later hold is bright.
+          # show the request_id and trace keys and the record-1 request id
+          # from the judge binary's own JSON, not the caption's allow
+          # verdict, which also says git status; the audit take must show
+          # its judgment key. The control lines text:go and text:stop must
+          # be absent because the reads are silent. The frame that shows
+          # the marker is measured too: a rendered frame of text has
+          # grayscale deviation >= 0.02, so a dark export fails even when
+          # a later hold is bright.
           for take in judge audit; do
             frames_dir=$(mktemp -d)
             ffmpeg -hide_banner -loglevel error -y \
@@ -476,7 +486,7 @@ jobs:
               if [[ $take == judge ]]; then
                 [[ $frame_flat == *request_id* \
                   && $frame_flat == *trace* \
-                  && $frame_flat == *gitstatus* ]] \
+                  && $frame_flat == *record-1* ]] \
                   || continue
               else
                 [[ $frame_flat == *judgment* ]] || continue
@@ -490,6 +500,11 @@ jobs:
               fi
             done
             printf -- '--- OCR of demo-%s.mp4 frames ---\n%s\n' "$take" "$text"
+            text_flat=$(tr -d '[:space:]' <<< "$text" | tr '[:upper:]' '[:lower:]')
+            if [[ $text_flat == *text:go* || $text_flat == *text:stop* ]]; then
+              echo "::error::demo-$take.mp4 echoes a control line"
+              exit 1
+            fi
             if [[ -z $shown ]]; then
               if [[ $take == judge ]]; then
                 echo "::error::demo-judge.mp4 shows no judge JSON keys"
@@ -545,11 +560,12 @@ jobs:
 
           # The blank-GIF guard reads the exported GIF itself. Every frame
           # is extracted at 1 fps with the footer cropped, OCRed and joined.
-          # The judge take shows the request_id and trace keys from the
-          # binary's JSON, not the caption's allow verdict; the audit take
-          # shows its judgment key and request id. Finding both proves both
-          # takes are present. Whitespace OCR inserts inside a word is
-          # dropped.
+          # The judge take shows the request_id and trace keys and the
+          # record-1 request id from the binary's JSON, not the caption's
+          # allow verdict; the audit take shows its judgment key. Neither
+          # take may show text:go or text:stop: the reads are silent.
+          # Finding both proves both takes are present. Whitespace OCR
+          # inserts inside a word is dropped.
           gif_frames=$(mktemp -d)
           ffmpeg -hide_banner -loglevel error -y -i artifacts/demo.gif \
             -vf 'fps=1,crop=iw:ih*3/4:0:0,format=gray,negate' \
@@ -568,8 +584,12 @@ jobs:
           printf -- '--- OCR of demo.gif frames ---\n%s\n' "$gif_text"
           flat=$(tr -d '[:space:]' <<< "$gif_text" | tr '[:upper:]' '[:lower:]')
           if [[ $flat != *request_id* || $flat != *trace* \
-            || $flat != *gitstatus* ]]; then
+            || $flat != *record-1* ]]; then
             echo "::error::OCR finds no judge JSON keys in demo.gif"
+            exit 1
+          fi
+          if [[ $flat == *text:go* || $flat == *text:stop* ]]; then
+            echo "::error::OCR finds a control line in demo.gif"
             exit 1
           fi
           if [[ $flat != *judgment* || $flat != *record-1* ]]; then
