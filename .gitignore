@@ -23,6 +23,7 @@ __pycache__/
 .env.*
 !.env.example
 *.env
+!/.github/tidy.env
 .envrc
 .direnv/
 *credentials*.json
