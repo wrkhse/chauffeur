@@ -45,18 +45,18 @@ fi
 if ((${#other_files[@]} > 0)); then
   # shellcheck source=.github/tidy.env
   source .github/tidy.env
-  cache_dir="$HOME/.cache/wrkhse/tidy-${TIDY_SHA256}"
+  cache_dir="$HOME/.cache/wrkhse/tidy-${TIDY_DARWIN_SHA256}"
   tidy_bin="$cache_dir/tidy"
   if [[ ! -x "$tidy_bin" ]]; then
-    printf 'pre-commit: tidy: verifying checksum %s\n' "${TIDY_SHA256}"
+    printf 'pre-commit: tidy: verifying checksum %s\n' "${TIDY_DARWIN_SHA256}"
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
-    if ! curl -fsSL "${TIDY_URL}" -o "$tmp_dir/tidy.tar.gz"; then
+    if ! curl -fsSL "${TIDY_DARWIN_URL}" -o "$tmp_dir/tidy.tar.gz"; then
       fail 'tidy download'
     fi
     actual="$(shasum -a 256 "$tmp_dir/tidy.tar.gz" | awk '{print $1}')"
-    if [[ "$actual" != "${TIDY_SHA256}" ]]; then
-      printf 'pre-commit: tidy checksum mismatch: expected %s, got %s\n' "${TIDY_SHA256}" "$actual" >&2
+    if [[ "$actual" != "${TIDY_DARWIN_SHA256}" ]]; then
+      printf 'pre-commit: tidy checksum mismatch: expected %s, got %s\n' "${TIDY_DARWIN_SHA256}" "$actual" >&2
       fail 'tidy checksum'
     fi
     mkdir -p "$cache_dir"
