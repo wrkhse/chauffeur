@@ -103,7 +103,7 @@ if ((${#other_files[@]} > 0)); then
       ;;
   esac
   tidy_url="$release_base/${TIDY_VERSION}/$asset"
-  cache_dir="$HOME/.cache/wrkhse/tidy-${tidy_sha}"
+  cache_dir="${TIDY_CACHE_ROOT:-$HOME/.cache/wrkhse}/tidy-${tidy_sha}"
   archive="$cache_dir/tidy.tar.gz"
   tidy_bin="$cache_dir/tidy"
   mkdir -p "$cache_dir"
