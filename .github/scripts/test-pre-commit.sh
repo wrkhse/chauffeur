@@ -24,6 +24,11 @@ git add bad.rs
 git commit -qm 'fmt: badly formatted'
 git show HEAD:bad.rs | grep -q 'pub fn badly_formatted() -> usize {'
 
+printf 'const value={a:1};\n' > tidy-input.ts
+git add tidy-input.ts
+git commit -qm 'fmt: badly formatted TypeScript'
+git show HEAD:tidy-input.ts | grep -q 'const value = { a: 1 };'
+
 printf 'fn broken( {\n}\n' > parse.rs
 git add parse.rs
 if git commit -qm 'fmt: parse error' > "$work/parse.out" 2>&1; then
@@ -52,20 +57,18 @@ git add -- --dash.rs
 git commit -qm 'fmt: dash filename'
 git show 'HEAD:--dash.rs' | grep -q 'pub fn dash() -> usize {'
 
-cp .github/tidy.env "$work/tidy.env.orig"
-zeros="$(printf '0%.0s' {1..64})"
-while IFS= read -r line; do
-  case "$line" in
-    TIDY_*SHA256=*) printf '%s\n' "${line%%=*}=$zeros" ;;
-    *) printf '%s\n' "$line" ;;
-  esac
-done < "$work/tidy.env.orig" > .github/tidy.env
+for cache_dir in "$TIDY_CACHE_ROOT"/tidy-*; do
+  printf 'corrupt archive\n' > "$cache_dir/tidy.tar.gz"
+done
 printf '# note\n' > note.md
-git add .github/tidy.env note.md
-if git commit -qm 'chore: bad pin' > "$work/sha.out" 2>&1; then
-  echo 'checksum mismatch commit unexpectedly succeeded' >&2
+git add note.md
+if git commit -qm 'chore: corrupted cache' > "$work/sha.out" 2>&1; then
+  echo 'corrupted cache commit unexpectedly succeeded' >&2
   exit 1
 fi
 grep -q 'FAILED at tidy checksum' "$work/sha.out"
+for cache_dir in "$TIDY_CACHE_ROOT"/tidy-*; do
+  rm -f "$cache_dir/tidy.tar.gz"
+done
 
 echo 'pre-commit hook selftest: all cases passed'
