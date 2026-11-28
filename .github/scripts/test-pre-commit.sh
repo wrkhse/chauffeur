@@ -124,4 +124,15 @@ if [ -f "$TIDY_CACHE_ROOT/tidy-$zeros/tidy.tar.gz" ]; then
 fi
 git restore --staged --worktree .github/tidy.env
 
+printf 'probe\n' > link-target.md
+ln -s link-target.md staged-link.md
+git add staged-link.md
+if git commit -qm 'fmt: staged symlink' > "$work/symlink.out" 2>&1; then
+  echo 'staged symlink commit unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'FAILED at staged path' "$work/symlink.out"
+git restore --staged staged-link.md
+rm -f staged-link.md link-target.md
+
 echo 'pre-commit hook selftest: all cases passed'
