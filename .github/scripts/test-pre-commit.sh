@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'printf "selftest FAILED at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 work="$(mktemp -d)"
