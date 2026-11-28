@@ -204,6 +204,7 @@ impl TryFrom<TraceFile> for Trace {
 
         Ok(Self {
             events: file.events,
+            // A plain counter: it is not checked against the events.
             dropped: file.dropped,
         })
     }
@@ -385,7 +386,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unknown field `extra`, expected one of `events`, `dropped`"
+            "unknown field `extra`, expected `events` or `dropped`"
         );
     }
 
