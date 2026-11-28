@@ -5,8 +5,9 @@ name: Core release
 # workspace. `build` checks the tag against the package version, builds
 # and smoke-tests the packed binary; `recording` films that binary
 # judging a git status request in one pane and reading its audit entry in
-# another; `release` attaches the tarball, the demo GIF and SHA256SUMS
+# another; `release` attaches the tarballs, the demo GIF and SHA256SUMS
 # to a GitHub prerelease that is never latest.
+# `build-macos` also builds the macOS arm64 target for that release.
 #
 # A dispatch names an existing tag, films its published tarball and
 # rebuilds the demo GIF and checksums for it.
@@ -114,6 +115,92 @@ jobs:
           actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: chauffeur-core-tarball
+          path: ${{ runner.temp }}/dist/*.tar.gz
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      TARGET: aarch64-apple-darwin
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      # A dispatch runs on a branch, so the tag is checked out by name.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: >- # v1
+          dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.100.0
+          targets: aarch64-apple-darwin
+      - name: The tag names the chauffeur-cli version
+        run: |
+          set -euo pipefail
+
+          version=$(cargo +1.100.0 metadata --locked --no-deps \
+            --format-version 1 |
+            jq -r '.packages[] | select(.name == "chauffeur-cli") | .version')
+          [[ "$version" == "${TAG#core-v}" ]] || {
+            echo "::error::chauffeur-cli is $version, the tag is $TAG"
+            exit 1
+          }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "ARCHIVE=chauffeur-core-$version-$TARGET.tar.gz" >> "$GITHUB_ENV"
+      - run: >-
+          cargo +1.100.0 build --release --locked -p chauffeur-cli
+          --target "$TARGET"
+      - name: Pack the binary
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dist"
+          tar -czf "$RUNNER_TEMP/dist/$ARCHIVE" \
+            -C "target/$TARGET/release" chauffeur-core
+          tar -tzvf "$RUNNER_TEMP/dist/$ARCHIVE"
+      # Runs the binary from the tarball, outside the checkout, with a
+      # scratch state folder; no installed chauffeur is touched.
+      - name: Smoke-test the packed binary
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          tar -xzf "$RUNNER_TEMP/dist/$ARCHIVE" -C "$work"
+          cd "$work"
+          mkdir -p state
+          export CHAUFFEUR_CORE_STATE_DIR="$work/state"
+
+          printed=$(./chauffeur-core version)
+          [[ "$printed" == "$VERSION" ]] || {
+            echo "::error::version printed '$printed', the tag is $VERSION"
+            exit 1
+          }
+
+          id=ci-allow
+          request=$(jq -n --arg id "$id" '{
+            id: $id, session: "ci", hook: "tool_after",
+            subject: {tool: "shell", input: {command: "git status"}}
+          }')
+
+          judgment=$(printf '%s\n' "$request" | ./chauffeur-core judge)
+          jq -e --arg id "$id" \
+            '.request_id == $id and .verdict.outcome == "allow"' \
+            <<< "$judgment"
+
+          record=$(./chauffeur-core audit 1)
+          jq -e --arg id "$id" \
+            '.request_id == $id and .judgment.verdict.outcome == "allow"' \
+            <<< "$record"
+      - name: Upload the tarball
+        uses: >- # v7.0.2
+          actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: chauffeur-core-macos-tarball
           path: ${{ runner.temp }}/dist/*.tar.gz
           if-no-files-found: error
 
@@ -628,7 +715,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build, recording]
+    needs: [build, build-macos, recording]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -640,14 +727,20 @@ jobs:
         with:
           name: chauffeur-core-tarball
           path: ${{ runner.temp }}/release
+      - name: Download the macOS tarball
+        uses: >- # v4.3.0
+          actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: chauffeur-core-macos-tarball
+          path: ${{ runner.temp }}/release
       - name: Download the demo
         uses: >- # v4.3.0
           actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: core-demo
           path: ${{ runner.temp }}/release
-      # A dispatch keeps the published tarball, so the rebuilt one gives
-      # way to the release's own copy and the sums cover what is attached.
+      # A dispatch keeps the published tarballs, so the rebuilt ones give
+      # way to the release's own copies and the sums cover what is attached.
       - name: Write SHA256SUMS
         working-directory: ${{ runner.temp }}/release
         env:
@@ -657,12 +750,11 @@ jobs:
           set -euo pipefail
 
           tarballs=(*.tar.gz)
-          if (( ${#tarballs[@]} != 1 )); then
-            echo "::error::expected one tarball, found ${tarballs[*]}"
+          if (( ${#tarballs[@]} != 2 )); then
+            echo "::error::expected two tarballs, found ${tarballs[*]}"
             exit 1
           fi
-          tarball=${tarballs[0]}
-          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+          echo "TARBALLS=${tarballs[*]}" >> "$GITHUB_ENV"
 
           if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
             names=$(gh api "repos/$GH_REPO/releases/tags/$TAG" \
@@ -670,16 +762,24 @@ jobs:
               echo "::error::dispatch cannot view release $TAG"
               exit 1
             }
-            if [[ $'\n'$names$'\n' != *$'\n'"$tarball"$'\n'* ]]; then
-              echo "::error::release $TAG has no asset $tarball"
-              exit 1
-            fi
-
-            rm -- "$tarball"
-            gh release download "$TAG" --pattern "$tarball" --dir .
+            for tarball in "${tarballs[@]}"; do
+              if [[ $'\n'$names$'\n' != *$'\n'"$tarball"$'\n'* ]]; then
+                if [[ $tarball == *aarch64-apple-darwin.tar.gz ]]; then
+                  gh release upload "$TAG" --clobber -- "$tarball"
+                  echo "::notice::added macOS asset $tarball to release $TAG"
+                else
+                  echo "::error::release $TAG has no asset $tarball"
+                  exit 1
+                fi
+              else
+                rm -- "$tarball"
+                gh release download "$TAG" --pattern "$tarball" --dir .
+              fi
+            done
+            tarballs=(*.tar.gz)
           fi
 
-          sha256sum -- "$tarball" demo.gif > SHA256SUMS
+          sha256sum -- "${tarballs[@]}" demo.gif > SHA256SUMS
           cat SHA256SUMS
       - name: Publish the GitHub prerelease
         working-directory: ${{ runner.temp }}/release
@@ -689,20 +789,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          notes="A core candidate of chauffeur-core, the Rust core, for"
-          notes+=" x86_64 Linux. Check the tarball against SHA256SUMS, unpack"
-          notes+=" it and run chauffeur-core version. demo.gif shows this"
-          notes+=" packed binary allowing git status in one pane and reading"
-          notes+=" the audit entry with a fresh process in the other. This is"
-          notes+=" a prerelease and is never marked latest."
+          notes="Core candidates of chauffeur-core, the Rust core, for"
+          notes+=" macOS arm64 and x86_64 Linux. Check the tarballs against"
+          notes+=" SHA256SUMS, unpack the one for your platform and run"
+          notes+=" chauffeur-core version. demo.gif shows this packed binary"
+          notes+=" allowing git status in one pane and reading the audit"
+          notes+=" entry with a fresh process in the other. This is a"
+          notes+=" prerelease and is never marked latest."
 
           # A dispatch re-records the demo of a published tag, so it
           # replaces the GIF and the SHA256SUMS that covers it and leaves
-          # the tarball as it was.
+          # the tarballs as they were.
           if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
             assets=(SHA256SUMS demo.gif)
           else
-            assets=("$TARBALL" SHA256SUMS demo.gif)
+            read -r -a tarballs <<< "$TARBALLS"
+            assets=("${tarballs[@]}" SHA256SUMS demo.gif)
           fi
 
           # A rerun or a dispatch finds the release already made: the assets
