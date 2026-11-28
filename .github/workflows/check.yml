@@ -29,9 +29,6 @@ jobs:
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
-      - name: "Proof: force red gate"
-        shell: bash
-        run: exit 1
 
   package:
     needs: [rust]
