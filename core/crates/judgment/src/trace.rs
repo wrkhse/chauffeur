@@ -365,6 +365,7 @@ mod tests {
     #[test]
     fn does_not_serialize_the_runtime_dropped_count() {
         let mut trace = Trace::new();
+        // Finished is refused on an empty trace, incrementing dropped to 1.
         let kept = trace.push(TraceEvent::finished().expect("valid event"));
 
         assert_eq!((kept, trace.dropped()), (false, 1));
@@ -376,6 +377,8 @@ mod tests {
 
         let read_back = serde_json::from_value::<Trace>(json).unwrap();
 
+        // The runtime dropped count is deliberately not persisted.
+        assert_eq!(read_back.dropped(), 0);
         assert_eq!(read_back.events(), trace.events());
     }
 
