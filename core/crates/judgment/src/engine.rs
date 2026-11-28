@@ -600,4 +600,24 @@ mod tests {
 
         Request::parse(&json.to_string()).unwrap()
     }
+
+    #[test]
+    fn round_trips_a_judgment_with_dropped_trace_events() {
+        let mut trace = Trace::new();
+
+        for _ in 0..MAX_EVENTS {
+            trace.push(opinion("noisy", Outcome::Ask, FIXED));
+        }
+
+        trace.finish();
+        assert_eq!(trace.dropped(), 1);
+
+        let verdict = verdict(Outcome::Ask, "noisy", FIXED);
+        let judgment = Judgment::new("call-1", Some(verdict), trace).unwrap();
+
+        let json = serde_json::to_string(&judgment).unwrap();
+        let decoded: Judgment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, judgment);
+    }
 }
