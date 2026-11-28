@@ -13,5 +13,5 @@
     "skills/**/SKILL.md",
     "bench/judges/*.md"
   ],
-  "include_roots": ["crates", "judges"]
+  "include_roots": ["."]
 }
