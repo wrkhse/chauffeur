@@ -179,6 +179,7 @@ pub struct Trace {
 struct TraceFile {
     #[serde(deserialize_with = "deserialize_events")]
     events: Vec<TraceEvent>,
+    /// A plain counter; it is not validated against the event list.
     #[serde(default)]
     dropped: usize,
 }
