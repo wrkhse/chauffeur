@@ -108,6 +108,96 @@ done
 
 cat -- "$PR_JSON" | write_capped "$OUT/pr.json" "$MAX_BYTES" "$OUT/pr.json"
 
+# A docs-only PR gets an advisory verdict. Classification uses the complete
+# file list from the GitHub API and the expected count in the CHANGED_FILES file:
+# gh pr view's files array stops at 100 entries, while the API count covers
+# them all. A renamed file must pass on both its old and new path. Anything
+# missing, unreadable or inconsistent fails toward blocking.
+docs_only=false
+changed=""
+if [ -n "${CHANGED_FILES-}" ] && [ -f "$CHANGED_FILES" ]; then
+  changed=$(cat -- "$CHANGED_FILES" | tr -d '[:space:]') || changed=""
+fi
+if [[ "$changed" =~ ^[0-9]+$ ]] &&
+   api_files=$("$GH" api --paginate "repos/$REPO/pulls/${PR-}/files" 2>/dev/null); then
+  docs_only=$(printf '%s' "$api_files" | jq -rs \
+    --argjson changed "$changed" '
+    def image:
+      endswith(".png") or endswith(".jpg") or endswith(".gif");
+
+    def allowed:
+      ascii_downcase as $p
+      | ($p | startswith(".github/") | not)
+        and (($p | endswith(".md"))
+          or ((($p | startswith("docs/")) or ($p | startswith("site/")))
+              and ($p | image)));
+
+    # Governance files are never docs-only, on the old and new path of a
+    # rename alike. Matching is case-insensitive and applies at any depth.
+    def governance:
+      . as $p
+      | ($p | ascii_downcase) as $lower
+      | ($lower | split("/") | last) as $name
+      | $lower == "agents.md"
+        or $lower == "claude.md"
+        or $lower == "contributing.md"
+        or $lower == "philosophy.md"
+        or $lower == "security.md"
+        or $lower == "docs/repository-standards.md"
+        or $lower == "docs/issues-and-pull-requests.md"
+        or ($name == "agents.md")
+        or ($name == "claude.md")
+        or ($name == "contributing.md")
+        or ($lower | startswith(".opencode/"))
+        or ($lower | startswith(".github/"))
+        or ($lower | startswith(".claude/"))
+        or ($lower | startswith(".agents/"));
+
+    if (length == 0 or any(.[]; type != "array")) then
+      false
+    else
+      add as $files
+      | if ($files | length) == 0
+           or ($changed != ($files | length)) then
+          false
+        else
+          ($files | all(
+            (.filename? // "") as $filename
+            | (.previous_filename? // "") as $previous
+            | ($filename | type == "string" and allowed and (governance | not))
+              and (if (.status? // "") == "renamed" or (.previous_filename? != null) then
+                     ($previous | type == "string" and allowed and (governance | not))
+                   else true end)
+          ))
+        end
+    end
+  ') || docs_only=false
+fi
+printf '%s\n' "$docs_only" > "$OUT/docs-only.txt"
+
+# A Markdown file is code when Rust embeds it with include_str!. Keep the
+# search to Rust sources in the checkout, skipping generated input and large
+# files, and clear the advisory verdict on the first match.
+if [ "$docs_only" = true ] && command -v rg > /dev/null 2>&1; then
+  md_pattern=$(printf '%s' "$api_files" | jq -rs '
+    if (length == 0 or any(.[]; type != "array")) then empty
+    else
+      add as $files
+      | $files[]
+      | (.filename? // ""), (.previous_filename? // "")
+      | select(type == "string" and endswith(".md") and length > 0)
+    end
+  ' 2> /dev/null | sed 's/[][\.*^$()+?{|]/\\&/g' | paste -sd '|' -) || md_pattern=""
+  if [ -n "$md_pattern" ] &&
+     rg -q --no-messages --max-count 1 --max-filesize 2000000 \
+       -g '*.rs' -g '!review-input/**' -g '!target/**' \
+       -- "include_str![^)]*($md_pattern)" .; then
+    docs_only=false
+    printf '%s\n' "$docs_only" > "$OUT/docs-only.txt"
+    printf 'Rust include_str! embeds a changed Markdown file; docs-only cleared.\n' >> "$notes"
+  fi
+fi
+
 # The capped copy is for the reviewer and may no longer be valid JSON.
 issue=$(jq -r --arg repo "$REPO" '
   def code_snippet:
