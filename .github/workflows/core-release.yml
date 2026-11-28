@@ -764,18 +764,17 @@ jobs:
             }
             for tarball in "${tarballs[@]}"; do
               if [[ $'\n'$names$'\n' != *$'\n'"$tarball"$'\n'* ]]; then
-                if [[ $TAG == core-v0.1.0-rc.1 \
-                  && $tarball == *aarch64-apple-darwin.tar.gz ]]; then
-                  echo "::notice::legacy release $TAG has no macOS asset $tarball, skipping"
-                  rm -- "$tarball"
-                  continue
+                if [[ $tarball == *aarch64-apple-darwin.tar.gz ]]; then
+                  gh release upload "$TAG" --clobber -- "$tarball"
+                  echo "::notice::added macOS asset $tarball to release $TAG"
+                else
+                  echo "::error::release $TAG has no asset $tarball"
+                  exit 1
                 fi
-                echo "::error::release $TAG has no asset $tarball"
-                exit 1
+              else
+                rm -- "$tarball"
+                gh release download "$TAG" --pattern "$tarball" --dir .
               fi
-
-              rm -- "$tarball"
-              gh release download "$TAG" --pattern "$tarball" --dir .
             done
             tarballs=(*.tar.gz)
           fi
