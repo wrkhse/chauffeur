@@ -179,6 +179,8 @@ pub struct Trace {
 struct TraceFile {
     #[serde(deserialize_with = "deserialize_events")]
     events: Vec<TraceEvent>,
+    #[serde(default)]
+    dropped: usize,
 }
 
 impl TryFrom<TraceFile> for Trace {
@@ -202,7 +204,7 @@ impl TryFrom<TraceFile> for Trace {
 
         Ok(Self {
             events: file.events,
-            dropped: 0,
+            dropped: file.dropped,
         })
     }
 }
@@ -333,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_tagged_events_and_explicit_dropped_count() {
+    fn serializes_and_reads_back_an_explicit_dropped_count() {
         let mut trace = Trace::new();
         trace.push(started());
         trace.push(
@@ -345,29 +347,43 @@ mod tests {
         );
         trace.finish();
 
+        // A late event cannot join a finished trace, but its count survives the wire.
+        assert!(!trace.push(started()));
+
         let json = concat!(
             r#"{"events":[{"kind":"rule_started","rule":"shell-guard"},"#,
             r#"{"kind":"rule_opinion","rule":"shell-guard","outcome":"ask","#,
             r#""reason":"shell path"},"#,
             r#"{"kind":"decided","rule":"shell-guard","outcome":"ask"},"#,
-            r#"{"kind":"finished"}],"dropped":0}"#,
+            r#"{"kind":"finished"}],"dropped":1}"#,
         );
 
-        assert_eq!(serde_json::to_string(&trace).unwrap(), json);
-        let file = json!({ "events": trace.events() });
-        assert_eq!(serde_json::from_value::<Trace>(file).unwrap(), trace);
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert_eq!(serialized, json);
+        assert_eq!(serde_json::from_str::<Trace>(&serialized).unwrap(), trace);
     }
 
     #[test]
-    fn deserialization_refuses_a_supplied_dropped_count() {
+    fn deserialization_defaults_an_omitted_dropped_count_to_zero() {
+        let trace = serde_json::from_value::<Trace>(json!({
+            "events": [],
+        }))
+        .unwrap();
+
+        assert_eq!(trace, Trace::new());
+        assert_eq!(trace.dropped(), 0);
+    }
+
+    #[test]
+    fn deserialization_refuses_an_unknown_trace_field() {
         let error = serde_json::from_value::<Trace>(json!({
-            "events": [], "dropped": 0,
+            "events": [], "extra": 1,
         }))
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "unknown field `dropped`, expected `events`"
+            "unknown field `extra`, expected `events` or `dropped`"
         );
     }
 

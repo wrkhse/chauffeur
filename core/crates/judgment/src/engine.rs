@@ -407,14 +407,14 @@ mod tests {
     #[test]
     fn serializes_and_reads_back_a_judgment() {
         let judgment = builtin().judge(&request(&json!({ "tool": "read" })));
-        let json = serde_json::to_value(&judgment).unwrap();
+        let serialized = serde_json::to_value(&judgment).unwrap();
         let events = json!([
             { "kind": "rule_started", "rule": "shell-guard" },
             { "kind": "finished" },
         ]);
 
         assert_eq!(
-            json,
+            serialized,
             json!({
                 "request_id": "call-1",
                 "verdict": null,
@@ -422,13 +422,18 @@ mod tests {
             })
         );
 
-        let file = json!({
+        // An older file without the dropped field still reads as zero.
+        let older = json!({
             "request_id": "call-1",
             "verdict": null,
             "trace": { "events": events },
         });
 
-        assert_eq!(serde_json::from_value::<Judgment>(file).unwrap(), judgment);
+        assert_eq!(serde_json::from_value::<Judgment>(older).unwrap(), judgment);
+        assert_eq!(
+            serde_json::from_value::<Judgment>(serialized).unwrap(),
+            judgment
+        );
     }
 
     #[test]

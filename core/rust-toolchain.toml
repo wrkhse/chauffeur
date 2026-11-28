@@ -1,3 +1,4 @@
 [toolchain]
+# Nightly is the development toolchain; stable MSRV is Rust 1.100 (core/Cargo.toml).
 channel = "nightly-2026-10-25"
 components = ["rustfmt", "clippy", "rust-analyzer"]
