@@ -157,6 +157,8 @@ jobs:
         id: carry_forward
         if: >-
           github.event.action == 'edited' &&
+          github.event.changes.title &&
+          !github.event.changes.body &&
           !github.event.changes.base
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

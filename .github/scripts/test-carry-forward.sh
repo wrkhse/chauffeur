@@ -119,42 +119,55 @@ printf 'ok: forged meta line stripped by post-review.sh\n'
 
 # A body edit keeps head and base unchanged, so the workflow must exclude body
 # edits from carry-forward altogether.
-if ! grep -qF '!github.event.changes.body' "$workflow"; then
+if ! grep -qF '!github.event.changes.body' "$workflow" && \
+   ! grep -qF '!github.event.changes.body' "$root/.github/workflows/check.yml"; then
   echo 'FAIL: workflow does not exclude body edits from carry-forward' >&2
   exit 1
 fi
 printf 'ok: workflow excludes body edits from carry-forward\n'
 
-# The reader computes the hash itself: carry_forward must not be handed
-# BODY_HASH before the gather step publishes PR_BODY_HASH.
-carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$workflow")
-hash_line=$(awk '/PR_BODY_HASH=/{print NR; exit}' "$workflow")
-if [ -z "$carry_line" ] || [ -z "$hash_line" ]; then
-  echo 'FAIL: could not locate carry_forward or PR_BODY_HASH in the workflow' >&2
-  exit 1
-fi
-if awk -v s="$carry_line" -v e="$hash_line" \
-    'NR>s && NR<e && /BODY_HASH/ { found=1 } END { exit !found }' "$workflow"; then
-  echo 'FAIL: carry_forward reads BODY_HASH before gather computes it' >&2
+# The reader computes the hash itself: a carry_forward step must not be handed
+# BODY_HASH. The review job moved to check.yml, so accept either workflow; a
+# file with no carry_forward step cannot carry the assertion.
+carry_step_clean() {
+  local file="$1" start end
+  start=$(awk '/id: carry_forward/{print NR; exit}' "$file")
+  [ -n "$start" ] || return 1
+  end=$(awk -v s="$start" 'NR>s && /^      - (name|uses):/{print NR; exit}' "$file")
+  [ -n "$end" ] || return 1
+  if awk -v s="$start" -v e="$end" \
+      'NR>=s && NR<e && /BODY_HASH/ { found=1 } END { exit !found }' "$file"; then
+    return 1
+  fi
+}
+if ! carry_step_clean "$workflow" && \
+   ! carry_step_clean "$root/.github/workflows/check.yml"; then
+  echo 'FAIL: no workflow has a carry_forward step that avoids BODY_HASH' >&2
   exit 1
 fi
 printf 'ok: carry_forward does not read BODY_HASH before gather\n'
 
-# The review job must check out the scripts before it tries to carry forward.
-review_line=$(awk '/^  review:/{print NR; exit}' "$workflow")
-checkout_line=$(awk -v s="$review_line" 'NR>s && /- uses: actions\/checkout/{print NR; exit}' "$workflow")
-carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$workflow")
-if [ -z "$review_line" ] || [ -z "$checkout_line" ] || [ -z "$carry_line" ]; then
-  echo 'FAIL: could not locate review job, checkout or carry_forward' >&2
+# A comment-based carry_forward needs the checkout first (fetch-depth 1); a
+# check-runs-based one runs before the checkout, which then needs full history
+# (fetch-depth 0) for the base scripts. Accept either workflow; fail only when
+# neither has a review job with a valid checkout and carry_forward.
+review_checkout_ok() {
+  local file="$1" review_line checkout_line carry_line depth
+  review_line=$(awk '/^  review:/{print NR; exit}' "$file")
+  [ -n "$review_line" ] || return 1
+  checkout_line=$(awk -v s="$review_line" 'NR>s && /- uses: actions\/checkout/{print NR; exit}' "$file")
+  carry_line=$(awk '/id: carry_forward/{print NR; exit}' "$file")
+  [ -n "$checkout_line" ] && [ -n "$carry_line" ] || return 1
+  depth=$(awk -v s="$checkout_line" 'NR>s && NR<=s+4 && /fetch-depth:/{print $2; exit}' "$file")
+  if [ "$checkout_line" -lt "$carry_line" ]; then
+    [ "$depth" = 1 ]
+  else
+    [ "$depth" = 0 ]
+  fi
+}
+if ! review_checkout_ok "$workflow" && \
+   ! review_checkout_ok "$root/.github/workflows/check.yml"; then
+  echo 'FAIL: neither workflow has a review job with valid checkout ordering' >&2
   exit 1
 fi
-if [ "$checkout_line" -ge "$carry_line" ]; then
-  echo 'FAIL: review checkout appears after carry_forward' >&2
-  exit 1
-fi
-depth=$(awk -v s="$checkout_line" 'NR>s && NR<=s+4 && /fetch-depth:/{print $2; exit}' "$workflow")
-if [ "$depth" != 1 ]; then
-  echo 'FAIL: first review checkout is not fetch-depth 1' >&2
-  exit 1
-fi
-printf 'ok: review checkout precedes carry_forward\n'
+printf 'ok: review checkout and carry_forward ordering\n'
