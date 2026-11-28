@@ -5,11 +5,11 @@ name: Core release
 # workspace. `build` checks the tag against the package version, builds
 # and smoke-tests the packed binary; `recording` films that binary
 # judging a git status request in one pane and reading its audit entry in
-# another; `release` attaches the tarball, the demo GIF and SHA256SUMS
+# another; `release` attaches the tarballs, the demo GIF and SHA256SUMS
 # to a GitHub prerelease that is never latest.
 # `build-macos` also builds the macOS arm64 target for that release.
 #
-# A dispatch names an existing tag, films its published tarball and
+# A dispatch names an existing tag, films its published tarballs and
 # rebuilds the demo GIF and checksums for it.
 
 on:
@@ -764,13 +764,15 @@ jobs:
             }
             for tarball in "${tarballs[@]}"; do
               if [[ $'\n'$names$'\n' != *$'\n'"$tarball"$'\n'* ]]; then
-                echo "::error::release $TAG has no asset $tarball"
-                exit 1
+                echo "::notice::$tarball is absent from release $TAG, skipping"
+                rm -- "$tarball"
+                continue
               fi
 
               rm -- "$tarball"
               gh release download "$TAG" --pattern "$tarball" --dir .
             done
+            tarballs=(*.tar.gz)
           fi
 
           sha256sum -- "${tarballs[@]}" demo.gif > SHA256SUMS
