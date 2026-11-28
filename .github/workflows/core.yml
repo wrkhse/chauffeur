@@ -53,6 +53,25 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo +"$TOOLCHAIN" deny check
 
+  core-msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Minimum supported Rust version
+        run: |
+          set -euo pipefail
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv"
+          printf 'MSRV=%s\n' "$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup run "$msrv" rustc -V
+      - run: cargo +"$MSRV" test --workspace --locked
+
   core-mutants:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

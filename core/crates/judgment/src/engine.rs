@@ -432,6 +432,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_then_reads_back_a_judgment_with_dropped_events() {
+        let mut trace = Trace::new();
+
+        for _ in 0..MAX_EVENTS {
+            trace.push(started("shell-guard"));
+        }
+        trace.finish();
+        let judgment = Judgment::new(
+            "call-1",
+            Some(verdict(Outcome::Deny, "shell-guard", "reason")),
+            trace,
+        )
+        .expect("valid judgment");
+
+        let written = serde_json::to_string(&judgment).unwrap();
+        let read = serde_json::from_str::<Judgment>(&written).unwrap();
+
+        assert_eq!(read.trace().dropped(), 1);
+        assert_eq!(read, judgment);
+    }
+
+    #[test]
     fn refuses_an_empty_request_id_in_new_and_json() {
         let file = json!({
             "request_id": "",
