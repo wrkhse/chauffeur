@@ -58,6 +58,15 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo +"$TOOLCHAIN" deny check
 
+      - name: hidden tests
+        if: always()
+        run: |
+          set +e
+          echo "hidden-tests: begin"
+          cargo +"$TOOLCHAIN" nextest run -p chauffeur-judgment --all-features --locked --no-fail-fast --status-level all -E 'test(=engine::tests::round_trips_a_judgment_with_dropped_trace_events) | test(=trace::tests::round_trips_a_nonzero_dropped_count)'
+          status=$?
+          echo "hidden-tests: end"
+          exit "$status"
   core-mutants:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
