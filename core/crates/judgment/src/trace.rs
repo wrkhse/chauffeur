@@ -171,6 +171,9 @@ fn check_len(name: &'static str, text: &str, max: usize) -> Result<(), TraceErro
 #[serde(try_from = "TraceFile")]
 pub struct Trace {
     events: Vec<TraceEvent>,
+    // A runtime bound diagnostic, deliberately outside the persisted trace
+    // format: the strict reader still refuses a supplied count.
+    #[serde(skip_serializing)]
     dropped: usize,
 }
 
@@ -333,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_tagged_events_and_explicit_dropped_count() {
+    fn round_trips_the_serialized_trace() {
         let mut trace = Trace::new();
         trace.push(started());
         trace.push(
@@ -345,17 +348,35 @@ mod tests {
         );
         trace.finish();
 
-        let json = concat!(
+        let expected = concat!(
             r#"{"events":[{"kind":"rule_started","rule":"shell-guard"},"#,
             r#"{"kind":"rule_opinion","rule":"shell-guard","outcome":"ask","#,
             r#""reason":"shell path"},"#,
             r#"{"kind":"decided","rule":"shell-guard","outcome":"ask"},"#,
-            r#"{"kind":"finished"}],"dropped":0}"#,
+            r#"{"kind":"finished"}]}"#,
         );
 
-        assert_eq!(serde_json::to_string(&trace).unwrap(), json);
-        let file = json!({ "events": trace.events() });
-        assert_eq!(serde_json::from_value::<Trace>(file).unwrap(), trace);
+        let json = serde_json::to_string(&trace).unwrap();
+
+        assert_eq!(json, expected);
+        assert_eq!(serde_json::from_str::<Trace>(&json).unwrap(), trace);
+    }
+
+    #[test]
+    fn does_not_serialize_the_runtime_dropped_count() {
+        let mut trace = Trace::new();
+        let kept = trace.push(TraceEvent::finished().expect("valid event"));
+
+        assert_eq!((kept, trace.dropped()), (false, 1));
+        trace.finish();
+
+        let json = serde_json::to_value(&trace).unwrap();
+
+        assert_eq!(json, json!({ "events": [{ "kind": "finished" }] }));
+
+        let read_back = serde_json::from_value::<Trace>(json).unwrap();
+
+        assert_eq!(read_back.events(), trace.events());
     }
 
     #[test]

@@ -1,3 +1,5 @@
 [toolchain]
+# This nightly is only the local/CI lint, format and deny toolchain. The
+# crate's MSRV is 1.100 (see Cargo.toml) and CI verifies it separately.
 channel = "nightly-2026-10-25"
 components = ["rustfmt", "clippy", "rust-analyzer"]

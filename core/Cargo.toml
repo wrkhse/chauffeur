@@ -6,6 +6,9 @@ members = ["crates/judgment"]
 version = "0.1.0-rc.1"
 edition = "2024"
 license = "MIT"
+# 1.100 is the deliberate MSRV for the judgment crate; CI checks this floor
+# on stable 1.100. The pinned nightly in rust-toolchain.toml is only the
+# lint, format and test toolchain.
 rust-version = "1.100"
 publish = false
 repository = "https://github.com/wrkhse/chauffeur"

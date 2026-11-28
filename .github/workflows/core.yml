@@ -53,6 +53,19 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo +"$TOOLCHAIN" deny check
 
+  core-msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust 1.100.0 toolchain
+        run: rustup toolchain install 1.100.0 --profile minimal
+      - run: cargo +1.100.0 check --workspace --all-features --locked
+
   core-mutants:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

@@ -418,17 +418,11 @@ mod tests {
             json!({
                 "request_id": "call-1",
                 "verdict": null,
-                "trace": { "events": events, "dropped": 0 },
+                "trace": { "events": events },
             })
         );
 
-        let file = json!({
-            "request_id": "call-1",
-            "verdict": null,
-            "trace": { "events": events },
-        });
-
-        assert_eq!(serde_json::from_value::<Judgment>(file).unwrap(), judgment);
+        assert_eq!(serde_json::from_value::<Judgment>(json).unwrap(), judgment);
     }
 
     #[test]
