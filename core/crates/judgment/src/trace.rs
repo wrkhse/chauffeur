@@ -568,4 +568,18 @@ mod tests {
     fn started() -> TraceEvent {
         TraceEvent::rule_started("shell-guard").expect("valid event")
     }
+
+    #[test]
+    fn round_trips_a_nonzero_dropped_count() {
+        let mut trace = Trace {
+            events: vec![started()],
+            dropped: usize::MAX,
+        };
+        trace.finish();
+
+        let json = serde_json::to_string(&trace).unwrap();
+        let read = serde_json::from_str::<Trace>(&json).unwrap();
+
+        assert_eq!(read, trace);
+    }
 }
