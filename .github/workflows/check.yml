@@ -133,19 +133,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          checks=$(gh api --paginate \
-            "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100") || {
-              echo "::error::Could not read core check-runs at $HEAD_SHA."
-              exit 1
-            }
-          failed=$(printf '%s\n' "$checks" | jq -s -r '
-            (add // []) as $runs
+          failed=$(gh api --paginate \
+            "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" | jq -s -r '
+            [.[].check_runs[]] as $runs
             | ["core-rust", "core-mutants"]
             | map(. as $name
                 | [$runs[] | select(.name == $name)]
-                | sort_by(.started_at // .completed_at // "") | reverse | .[0]
+                | sort_by(.completed_at // "") | reverse | .[0]
                 | select(.conclusion == "failure" or .conclusion == "cancelled")
-                | "\($name): \(.conclusion)") | .[]')
+                | "\($name): \(.conclusion)") | .[]') || {
+              echo "::error::Could not read core check-runs at $HEAD_SHA."
+              exit 1
+            }
           if [ -n "$failed" ]; then
             echo "::error::Core gate failed or was cancelled at $HEAD_SHA: $failed"
             exit 1
