@@ -1,4 +1,5 @@
 //! Stable JSON contracts shared by the daemon, CLI, MCP, and host adapters.
+// Review-gate proof: a small non-docs change.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
