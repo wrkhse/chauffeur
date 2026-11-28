@@ -1,67 +1,78 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Offline fixture for the carry-forward lookup in opencode-review.yml. Every
-# completed "review" check-run shares one head SHA: this PR (42) failed, and a
-# newer success comes from PR 999. An older same-app success for 42 is a repeat
-# run; another newer success comes from a different app. The lookup must select
-# 42's newest GitHub Actions verdict (failure), never the other PR's or the
-# other app's success. Dropping the PR-number filter selects the newer PR 999
-# success and fails this test.
+# Offline integration test for carry-forward.sh. A stub gh returns the comment
+# fixture, so the real script runs without network access. Each case checks
+# GITHUB_OUTPUT, the same way the workflow reads the result.
+script="$(dirname -- "${BASH_SOURCE[0]}")/carry-forward.sh"
+workflow="$(dirname -- "${BASH_SOURCE[0]}")/../workflows/opencode-review.yml"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/test-carry-forward.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT
 
-# Keep this jq literal identical to the one in the carry_forward step of
-# .github/workflows/opencode-review.yml.
-carry_forward_verdict() {
-  jq -rs --argjson pr "$PR" '
-    [ .[].check_runs[]
-      | select(.name == "review")
-      | select(.status == "completed")
-      | select(.conclusion == "success" or .conclusion == "failure")
-      | select(.app.id == 15368)
-      | select(any(.pull_requests[]?; .number == $pr))
-    ] as $matches
-    | if ($matches | length) == 0 then error("No review check-run for PR \($pr)")
-      else ($matches | sort_by(.completed_at) | reverse | .[0].conclusion)
-      end
-  '
+marker='<!-- opencode-review -->'
+head=1111111111111111111111111111111111111111
+base=2222222222222222222222222222222222222222
+other=3333333333333333333333333333333333333333
+
+cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = api ] || { echo "stub gh: unexpected command: $*" >&2; exit 2; }
+cat -- "$(dirname -- "$0")/comments.json"
+STUB
+chmod +x "$tmp/gh"
+
+# One marker comment by $id whose meta records $meta_head, $meta_base and
+# $verdict. Lower ids are older, so the newest matching comment wins.
+comment() {
+  local id=$1 meta_head=$2 meta_base=$3 verdict=$4 meta
+  meta=$(jq -nc --arg head "$meta_head" --arg base "$meta_base" \
+    --arg verdict "$verdict" \
+    '{head: $head, base: $base, verdict: $verdict}')
+  jq -n --argjson id "$id" --arg marker "$marker" --arg meta "$meta" \
+    --arg verdict "$verdict" \
+    '{id: $id, user: {id: $id},
+      body: ($marker + "\n**Verdict: " + $verdict + "**\n"
+        + "<!-- opencode-review-meta " + $meta + " -->")}'
 }
 
-PR=42
-sha=0123456789abcdef0123456789abcdef01234567
+# Runs the real script with a JSON array of comments and checks its output.
+expect_carried() {
+  local name=$1 expected=$2 comments=$3 got
+  printf '%s\n' "$comments" > "$tmp/comments.json"
+  rm -f -- "$tmp/out"
+  PATH="$tmp:$PATH" GITHUB_OUTPUT="$tmp/out" REPO=owner/repo PR=7 \
+    HEAD_SHA="$head" BASE_SHA="$base" bash "$script" > "$tmp/stdout" 2> "$tmp/stderr"
+  got=$(sed -n 's/^carried=//p' "$tmp/out")
+  if [ "$got" != "$expected" ]; then
+    cat -- "$tmp/stdout" "$tmp/stderr" >&2
+    printf 'expected carried=%s, got %s\n' "$expected" "$got" >&2
+    return 1
+  fi
+  printf 'ok: %s\n' "$name"
+}
 
-# gh api --paginate emits one JSON document per page; jq -s slurps both pages.
-other_pr=$(jq -nc --arg sha "$sha" '{
-  total_count: 1,
-  check_runs: [{
-    name: "review", head_sha: $sha, status: "completed", conclusion: "success",
-    app: {id: 15368}, completed_at: "2026-11-27T05:00:00Z",
-    pull_requests: [{number: 999}]
-  }]
-}')
-this_pr=$(jq -nc --arg sha "$sha" '{
-  total_count: 3,
-  check_runs: [
-    {
-      name: "review", head_sha: $sha, status: "completed", conclusion: "failure",
-      app: {id: 15368}, completed_at: "2026-11-27T03:00:00Z",
-      pull_requests: [{number: 42}]
-    },
-    {
-      name: "review", head_sha: $sha, status: "completed", conclusion: "success",
-      app: {id: 15368}, completed_at: "2026-11-27T01:00:00Z",
-      pull_requests: [{number: 42}]
-    },
-    {
-      name: "review", head_sha: $sha, status: "completed", conclusion: "success",
-      app: {id: 424242}, completed_at: "2026-11-27T04:00:00Z",
-      pull_requests: [{number: 42}]
-    }
-  ]
-}')
+good=$(comment 200 "$head" "$base" 'MERGE AS IS')
+stale=$(comment 100 "$other" "$base" 'MERGE AS IS')
 
-verdict=$(printf '%s\n%s\n' "$other_pr" "$this_pr" | carry_forward_verdict)
-if [ "$verdict" != failure ]; then
-  printf 'expected failure verdict, got %s\n' "$verdict" >&2
-  exit 1
-fi
-printf 'ok: newest GitHub Actions verdict for PR 42 selected; others ignored\n'
+expect_carried 'newest matching marker comment carries the verdict' true \
+  "$(jq -cn --argjson stale "$stale" --argjson good "$good" '[$stale, $good]')"
+
+wrong_head=$(comment 200 "$other" "$base" 'MERGE AS IS')
+expect_carried 'a different head never carries (shared head SHA)' false \
+  "$(jq -cn --argjson c "$wrong_head" '[$c]')"
+
+fix_first=$(comment 200 "$head" "$base" 'FIX FIRST')
+expect_carried 'FIX FIRST never carries' false \
+  "$(jq -cn --argjson c "$fix_first" '[$c]')"
+
+wrong_base=$(comment 200 "$head" "$other" 'MERGE AS IS')
+expect_carried 'a different base never carries' false \
+  "$(jq -cn --argjson c "$wrong_base" '[$c]')"
+
+wrong_author=$(comment 12345 "$head" "$base" 'MERGE AS IS')
+expect_carried 'a comment from another author never carries' false \
+  "$(jq -cn --argjson c "$wrong_author" '[$c]')"
+
+grep -Fq -- '!github.event.changes.body' "$workflow"
+printf 'ok: workflow never carries a body edit\n'
