@@ -1,0 +1,17 @@
+{
+  "governance_names": [
+    "agents.md",
+    "claude.md",
+    "contributing.md"
+  ],
+  "governance_paths": [],
+  "non_docs_globs": [
+    ".github/**",
+    ".claude/**",
+    ".agents/**",
+    ".opencode/**",
+    "skills/**/SKILL.md",
+    "bench/judges/*.md"
+  ],
+  "include_roots": ["."]
+}
